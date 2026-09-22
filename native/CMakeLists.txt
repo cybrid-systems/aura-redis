@@ -12,6 +12,7 @@ set_target_properties(aura_redis_core PROPERTIES
   POSITION_INDEPENDENT_CODE ON
   C_VISIBILITY_PRESET default)
 target_compile_options(aura_redis_core PRIVATE -O2 -Wall -Wextra)
+target_link_libraries(aura_redis_core PRIVATE dl)
 
 add_executable(aura_redis_server src/ar_main.c)
 target_link_libraries(aura_redis_server PRIVATE aura_redis_core)
@@ -19,3 +20,13 @@ target_include_directories(aura_redis_server PRIVATE include)
 set_target_properties(aura_redis_server PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 target_compile_options(aura_redis_server PRIVATE -O2 -Wall -Wextra)
+
+# Iteration 7 — sample eviction plugin (dlopen)
+add_library(ar_evict_random SHARED plugins/evict_random.c)
+target_include_directories(ar_evict_random PRIVATE include)
+target_link_libraries(ar_evict_random PRIVATE aura_redis_core)
+set_target_properties(ar_evict_random PROPERTIES
+  OUTPUT_NAME ar_evict_random
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
+  POSITION_INDEPENDENT_CODE ON)
+target_compile_options(ar_evict_random PRIVATE -O2 -Wall -Wextra)

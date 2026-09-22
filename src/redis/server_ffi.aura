@@ -3,6 +3,7 @@
 ; Env:
 ;   AURA_REDIS_PORT / AURA_REDIS_CORE_SO / AURA_REDIS_MAXMEMORY / AURA_REDIS_EVICT
 ;   AURA_REDIS_ADAPTIVE=1 → serve_ms pump + inlined adaptive supervisor (Iteration 6)
+;   AURA_REDIS_EVICT_SO   path to eviction plugin .so (Iteration 7; overrides EVICT)
 ;
 ; Aura FFI quirks (this rev) — documented so we do not "clean up" into breakage:
 ;   - Top-level (c-func) binds work for many symbols, but user closures defined
@@ -70,6 +71,7 @@
 (define ar-metric-hits (c-func lib "ar_metric_hits" "(Opaque) -> Int"))
 (define ar-metric-misses (c-func lib "ar_metric_misses" "(Opaque) -> Int"))
 (define ar-used-memory (c-func lib "ar_core_used_memory" "(Opaque) -> Int"))
+(define ar-load-plugin (c-func lib "ar_core_load_evict_plugin" "(Opaque String) -> Int"))
 
 (define core #f)
 (if (not *fatal*)
@@ -91,10 +93,17 @@
 (define lr 0)
 (if (not *fatal*)
   (begin
-    (let ((ev (getenv "AURA_REDIS_EVICT")))
-      (if (and (string? ev) (> (string-length ev) 0))
-        (ar-set-evict core ev)
-        (ar-set-evict core "noop")))
+    (let ((plug (getenv "AURA_REDIS_EVICT_SO")))
+      (if (and (string? plug) (> (string-length plug) 0))
+        (begin
+          (display "server_ffi: loading eviction plugin ")
+          (display plug)
+          (newline)
+          (ar-load-plugin core plug))
+        (let ((ev (getenv "AURA_REDIS_EVICT")))
+          (if (and (string? ev) (> (string-length ev) 0))
+            (ar-set-evict core ev)
+            (ar-set-evict core "noop")))))
     (let ((mm (getenv "AURA_REDIS_MAXMEMORY")))
       (if (and (string? mm) (> (string-length mm) 0) (number? (string->number mm)))
         (ar-set-maxmem core (string->number mm))

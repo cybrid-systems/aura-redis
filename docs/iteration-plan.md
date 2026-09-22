@@ -72,11 +72,13 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 ---
 
-## Iteration 7 — Hot-update strategy plugins (optional stretch)
+## Iteration 7 — Hot-update strategy plugins (optional stretch) ✅ (v1 dlopen)
 
 **Goal:** Strategy as reloadable `.so` via `std/hot-update` / `aot:reload` **or** dlopen of policy packs from aura-redis, without dropping listen socket.
 
 **Exit:** Reload new eviction impl while server runs; one memtier soak.
+
+**Result (v1):** `ar_core_load_evict_plugin` + sample `native/plugins/evict_random.c` → `libar_evict_random.so`; env `AURA_REDIS_EVICT_SO` / `--plugin`; `tests/test_evict_plugin.py`. Full `std/hot-update` / AOT path deferred.
 
 ---
 
@@ -98,4 +100,4 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 ## Current position
 
-**Iterations 0–6 done.** **Next: Iteration 7** (hot-update strategy `.so` / plugins).
+**Iterations 0–7 (v1 dlopen) done.** **Next: Iteration 8** (layout evolution) or deepen hot-update/AOT.

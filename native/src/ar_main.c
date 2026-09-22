@@ -8,6 +8,7 @@
 int main(int argc, char** argv) {
   int port = 6379;
   const char* evict = "noop";
+  const char* plugin = NULL;
   uint64_t maxmem = 0;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
@@ -16,13 +17,18 @@ int main(int argc, char** argv) {
       evict = argv[++i];
     else if (strcmp(argv[i], "--maxmemory") == 0 && i + 1 < argc)
       maxmem = strtoull(argv[++i], NULL, 10);
+    else if (strcmp(argv[i], "--plugin") == 0 && i + 1 < argc)
+      plugin = argv[++i];
   }
   ArCore* core = ar_core_create();
   if (!core) {
     fprintf(stderr, "ar_main: create failed\n");
     return 1;
   }
-  ar_core_set_evict_by_name(core, evict);
+  if (plugin && plugin[0])
+    ar_core_load_evict_plugin(core, plugin);
+  else
+    ar_core_set_evict_by_name(core, evict);
   if (maxmem)
     ar_core_set_maxmemory(core, maxmem);
   if (ar_core_listen(core, port) != 1) {

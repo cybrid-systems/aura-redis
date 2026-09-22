@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dlfcn.h>
 
 static void evict_noop_on_get(ArCore* db, void* entry) {
   (void)db;
@@ -270,6 +271,7 @@ ArCore* ar_core_create(void) {
     return NULL;
   }
   c->evict = &kEvictNoop;
+  c->evict_plugin = NULL;
   c->listen_fd = -1;
   c->epfd = -1;
   return c;
@@ -282,6 +284,11 @@ void ar_core_destroy(ArCore* core) {
     /* close handled in server module if linked; best-effort here */
     extern void ar_net_shutdown(ArCore* core);
     ar_net_shutdown(core);
+  }
+  if (core->evict_plugin) {
+    dlclose(core->evict_plugin);
+    core->evict_plugin = NULL;
+    core->evict = &kEvictNoop;
   }
   for (size_t i = 0; i < core->nbuckets; ++i) {
     ArEntry* e = core->buckets[i];
@@ -468,19 +475,21 @@ int ar_ping(ArCore* core) {
 int ar_core_set_evict_by_name(ArCore* core, const char* name) {
   if (!core || !name)
     return 0;
-  if (strcmp(name, "noop") == 0) {
-    core->evict = &kEvictNoop;
-    return 1;
+  const ArEvictOps* ops = NULL;
+  if (strcmp(name, "noop") == 0)
+    ops = &kEvictNoop;
+  else if (strcmp(name, "lru") == 0)
+    ops = &kEvictLru;
+  else if (strcmp(name, "lfu") == 0)
+    ops = &kEvictLfu;
+  else
+    return 0;
+  if (core->evict_plugin) {
+    dlclose(core->evict_plugin);
+    core->evict_plugin = NULL;
   }
-  if (strcmp(name, "lru") == 0) {
-    core->evict = &kEvictLru;
-    return 1;
-  }
-  if (strcmp(name, "lfu") == 0) {
-    core->evict = &kEvictLfu;
-    return 1;
-  }
-  return 0;
+  core->evict = ops;
+  return 1;
 }
 
 const char* ar_core_evict_name(ArCore* core) {
@@ -512,3 +521,61 @@ uint64_t ar_metric_hits(ArCore* core) { return core ? core->hits : 0; }
 uint64_t ar_metric_misses(ArCore* core) { return core ? core->misses : 0; }
 uint64_t ar_metric_evicted(ArCore* core) { return core ? core->evicted : 0; }
 uint64_t ar_metric_expired(ArCore* core) { return core ? core->expired : 0; }
+
+
+int ar_core_over_maxmemory(ArCore* core) {
+  return core && core->maxmemory > 0 && core->used_memory > core->maxmemory;
+}
+
+int ar_core_evict_random_one(ArCore* core) {
+  if (!core || core->nkeys == 0)
+    return 0;
+  /* Sample up to 16 occupied buckets; free first entry found after random start. */
+  size_t start = (size_t)(core->clock++ % core->nbuckets);
+  for (size_t n = 0; n < core->nbuckets && n < 64; ++n) {
+    size_t b = (start + n) % core->nbuckets;
+    ArEntry* e = core->buckets[b];
+    if (!e)
+      continue;
+    ar_entry_free(core, b, e);
+    core->evicted++;
+    return 1;
+  }
+  return 0;
+}
+
+int ar_core_load_evict_plugin(ArCore* core, const char* so_path) {
+  if (!core || !so_path || !so_path[0])
+    return 0;
+  void* h = dlopen(so_path, RTLD_NOW | RTLD_LOCAL);
+  if (!h) {
+    fprintf(stderr, "ar_core_load_evict_plugin: dlopen %s: %s\n", so_path,
+            dlerror());
+    return 0;
+  }
+  dlerror();
+  typedef const ArEvictOps* (*get_ops_fn)(void);
+  get_ops_fn get = (get_ops_fn)dlsym(h, "ar_plugin_evict_ops");
+  const char* err = dlerror();
+  if (err || !get) {
+    fprintf(stderr, "ar_core_load_evict_plugin: dlsym ar_plugin_evict_ops: %s\n",
+            err ? err : "null");
+    dlclose(h);
+    return 0;
+  }
+  const ArEvictOps* ops = get();
+  if (!ops || !ops->evict_one) {
+    fprintf(stderr, "ar_core_load_evict_plugin: invalid ops\n");
+    dlclose(h);
+    return 0;
+  }
+  void* old = core->evict_plugin;
+  core->evict = ops;
+  core->evict_plugin = h;
+  if (old)
+    dlclose(old);
+  fprintf(stderr, "ar_core: loaded eviction plugin %s name=%s\n", so_path,
+          ops->name ? ops->name : "?");
+  maybe_evict(core);
+  return 1;
+}

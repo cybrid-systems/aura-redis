@@ -51,6 +51,7 @@ struct ArCore {
   ArConn conns[AR_MAX_CONN];
   int nconns;
   int quit;
+  void* evict_plugin; /* dlopen handle; NULL if built-in */
 };
 
 /* dict helpers used by server */

@@ -74,6 +74,14 @@ uint64_t ar_metric_misses(ArCore* core);
 uint64_t ar_metric_evicted(ArCore* core);
 uint64_t ar_metric_expired(ArCore* core);
 
+/* Iteration 7 — hot-load eviction plugin .so
+ * Plugin must export: const ArEvictOps* ar_plugin_evict_ops(void);
+ * Helpers for plugin authors (also used by built-in random plugin): */
+int ar_core_over_maxmemory(ArCore* core);
+int ar_core_evict_random_one(ArCore* core);
+int ar_core_load_evict_plugin(ArCore* core, const char* so_path);
+
+
 #ifdef __cplusplus
 }
 #endif
