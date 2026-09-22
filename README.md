@@ -39,6 +39,7 @@ Iteration plan: [`docs/iteration-plan.md`](docs/iteration-plan.md)
 AURA_REDIS_ADAPTIVE=1 ./scripts/run-server-ffi.sh 6379   # adaptive control plane
 ./scripts/demo-adaptive.sh               # two load patterns → strategy swaps in logs
 AURA_REDIS_ENGINE=ffi ./scripts/smoke-test.sh
+./scripts/bench-e2e.sh                     # e2e: throughput + hit-rate → docs/perf-eval.md
 ./scripts/memtier-cmp.sh                 # vs redis:7-alpine → docs/perf-log.md
 python3 tests/test_eviction.py --evict lru
 python3 tests/test_adaptive.py --spawn
@@ -60,7 +61,7 @@ source scripts/sandbox-policy-profile.sh   # DENY_PLUGIN=1; no ffi required for 
 
 Story: mutate `choose-fn` under sandbox → `EVICT lru|lfu|noop`. Not “swap a .so”.
 
-**Perf (2026-09-22):** C data plane memtier p=1 **~1.13× Redis**, p=16 **~1.30× Redis**; Lisp path ~143 ops/s. Details: [`docs/perf-log.md`](docs/perf-log.md). Dynamic workloads where static LRU loses (and adaptive tracks best-of lru/lfu): [`docs/workloads.md`](docs/workloads.md).
+**Perf (2026-09-22 e2e):** C data plane memtier vs Redis **~1.15–1.35×** (lru/adaptive); Lisp ~14 ops/s. Adaptive wins hit% on `hot_protect`/`oscillate`; fixed LRU fine on `ws_shift`. Full tables: [`docs/perf-eval.md`](docs/perf-eval.md). Also [`docs/perf-log.md`](docs/perf-log.md), [`docs/workloads.md`](docs/workloads.md).
 
 Loopback bind **127.0.0.1** for both engines (documented).
 
