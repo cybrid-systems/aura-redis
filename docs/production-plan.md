@@ -123,3 +123,4 @@ Production does **not** mean “C-only Redis clone.”
 |------------|------|-------|
 | 2026-09-22 | Plan freeze | This doc; iteration-plan → production track |
 | 2026-09-22 | **P0.1** | `docs/commands.md`; RESP harden (null bulk, length digits, 16MiB cap); `tests/test_prod_protocol.py` |
+| 2026-09-22 | **P0.2** | `maybe_evict` scales with nkeys (was 64); `tests/test_prod_memory.py` maxmemory bound + large-SET |

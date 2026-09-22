@@ -309,8 +309,15 @@ static char* xmemdup(const char* s, size_t n) {
 static void maybe_evict(ArCore* core) {
   if (!core->evict || !core->evict->should_evict)
     return;
+  /* P0.2: must reclaim enough for large SETs / floods — fixed 64 under-shot
+   * maxmemory when many small keys needed eviction. Bound by nkeys. */
   int guard = 0;
-  while (core->evict->should_evict(core) && guard++ < 64) {
+  int limit = (int)core->nkeys + 8;
+  if (limit < 64)
+    limit = 64;
+  if (limit > 1000000)
+    limit = 1000000;
+  while (core->evict->should_evict(core) && guard++ < limit) {
     if (!core->evict->evict_one || !core->evict->evict_one(core))
       break;
   }
