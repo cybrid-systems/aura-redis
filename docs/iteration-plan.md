@@ -116,35 +116,28 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 **Iterations 0–9 done.** Aura-native path is the product story; PLUGIN remains escape hatch (DENY_PLUGIN under sandbox profile).
 
-**Active track: MVP M0–M5** (collapses explore iters 10–14 into a shippable demo).
+**MVP M0–M5 done.** See [`mvp-plan.md`](mvp-plan.md).
 
-→ [`mvp-plan.md`](mvp-plan.md) — goal, phases, choose-fn contract, demo script.
+**High-ROI M6–M12 done.** Fitness mutate/heal, threshold mutation, TTL-aware kernel, soft-goal choose, online evolve, per-prefix `POLICY` — see [`high-roi-iterations.md`](high-roi-iterations.md) · [`mutation-gains.md`](mutation-gains.md).
 
-| Phase | Theme |
-|-------|--------|
-| M0 | Plan freeze |
-| M1 | Multi-signal INFO + choose-fn API |
-| M2 | Joint EVICT+LAYOUT |
-| M3 | Industry harness (`zipf_hotkey`, oscillate) |
-| M4 | Hot-key PIN + `EVICT samples N` |
-| M5 | Distinctive demo MVP (`scripts/demo-mvp.sh`) |
+**Active track: Production P0–P3** (single-node RESP cache/KV ship bar — not full Redis Cluster).
+
+→ [`production-plan.md`](production-plan.md) — authoritative production roadmap  
+→ [`commands.md`](commands.md) — C data-plane command contract (P0.1)
+
+| Band | Theme |
+|------|--------|
+| P0 | Correctness & safety (protocol, memory, TTL, AUTH, shutdown, INFO, CI/soak) |
+| P1 | Operability & Aura control plane prod (CONFIG, agent HA, metrics, limits) |
+| P2 | Durability / HA stretch (RDB/AOF, replica, TLS) |
+| P3 | Compatibility expansion (more types, MULTI/PubSub) **only if demanded** |
 
 ---
 
-## Post-MVP / explore (15+) — adaptive load mutation
+## Post-MVP / explore (archived pointers)
 
-Design exploration (archetypes, P0–P3 axes, harness names, numbered backlog):
+Design exploration (archetypes, axes, harness names):
 
 → [`runtime-mutation-explore.md`](runtime-mutation-explore.md)
 
-Iters **10–14** are delivered via the MVP track above. Remaining:
-
-| Iter | Theme |
-|------|--------|
-| 15 | New kernel: SLRU or TTL-aware |
-| 16 | Soft-goal choose (hit% vs evict CPU) |
-| 17 | hot_cold threshold mutation via Aura |
-| 18 | Optional `std/evolve` thresholds |
-| 19 | W-TinyLFU-ish / GDSF kernel |
-| 20 | Per-prefix policy namespace sketch |
-| 21 | ZSET / gaming — only if data-type roadmap opens |
+Explore iters **15–21** largely landed as **M9–M12** (TTL-aware, soft-goal, evolve, prefix policy). Remaining ideas fold into production P3 or stay backlog — do not block P0.

@@ -2,7 +2,7 @@
 
 **English** | **中文**
 
-A Redis-compatible **RESP2** server implemented in [Aura](https://github.com/cybrid-systems/aura) (AI-native Lisp from cybrid-systems). This is a **v0 subset** — enough to exercise Aura sockets, hashes, fibers, and strings end-to-end, not a production Redis replacement.
+A Redis-compatible **RESP2** server implemented in [Aura](https://github.com/cybrid-systems/aura) (AI-native Lisp from cybrid-systems). This is an **Aura-adaptive RESP cache/KV** (string-focused C data plane + Aura `policy_agent`) — **not** a full Redis Cluster replacement. Production bar: [`docs/production-plan.md`](docs/production-plan.md).
 
 Pinned Aura revision: [`b0c6b3555e4287c8807b019a8b9316ee94c988b6`](https://github.com/cybrid-systems/aura/commit/b0c6b3555e4287c8807b019a8b9316ee94c988b6) (see `AURA_REF`).
 
@@ -12,7 +12,10 @@ Pinned Aura revision: [`b0c6b3555e4287c8807b019a8b9316ee94c988b6`](https://githu
 
 Detailed design: [`docs/architecture.md`](docs/architecture.md)  
 Iteration plan: [`docs/iteration-plan.md`](docs/iteration-plan.md)  
-**MVP plan (M0–M5):** [`docs/mvp-plan.md`](docs/mvp-plan.md)  
+**Production plan (P0–P3):** [`docs/production-plan.md`](docs/production-plan.md) ← **active ship track**  
+Command contract (C data plane): [`docs/commands.md`](docs/commands.md)  
+**MVP plan (M0–M5):** [`docs/mvp-plan.md`](docs/mvp-plan.md) (done)  
+High-ROI M6–M12: [`docs/high-roi-iterations.md`](docs/high-roi-iterations.md) (done)  
 Runtime mutation exploration: [`docs/runtime-mutation-explore.md`](docs/runtime-mutation-explore.md)
 
 **Direction:** C data plane for fast GET/SET + built-in kernels; **Aura mutates policy code** (`hot-strategy` / sandbox) and applies via RESP `EVICT`/`LAYOUT`. PLUGIN/.so is an escape hatch only — see [`docs/aura-native-control.md`](docs/aura-native-control.md).
