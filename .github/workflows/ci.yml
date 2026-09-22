@@ -1,0 +1,49 @@
+# aura-redis CI — build pinned Aura in official container, then smoke-test Redis subset
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  AURA_BUILD_TYPE: RelWithDebInfo
+  AURA_BUILD_JOBS: "0"
+  AURA_CI: "1"
+  AURA_USE_MOLD: "1"
+  AURA_LINK_JOBS: "2"
+  AURA_PIPELINE_STRICT: "0"
+  CCACHE_DISABLE: "1"
+  NINJA_STATUS: "[%f/%t %es] "
+
+jobs:
+  build-aura-and-smoke:
+    name: build-aura + aura-redis-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      image: ghcr.io/cybrid-systems/dev:v1.0.7
+    steps:
+      - name: Checkout aura-redis
+        uses: actions/checkout@v4
+
+      - name: Fetch pinned Aura
+        run: ./scripts/fetch-aura.sh
+
+      - name: Build Aura (must compile)
+        run: ./scripts/build-aura.sh
+
+      - name: Prove aura binary exists
+        run: |
+          test -x .deps/aura/build/aura
+          .deps/aura/build/aura --help >/dev/null 2>&1 || true
+          ls -la .deps/aura/build/aura
+
+      - name: aura-redis smoke (PING/SET/GET/DEL/INCR/EXISTS/FLUSHDB)
+        run: ./scripts/smoke-test.sh
