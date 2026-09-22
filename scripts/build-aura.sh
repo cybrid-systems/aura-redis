@@ -16,6 +16,7 @@ export AURA_BUILD_JOBS="${AURA_BUILD_JOBS:-0}"
 export AURA_CI="${AURA_CI:-1}"
 export CCACHE_DISABLE="${CCACHE_DISABLE:-1}"
 export AURA_PIPELINE_STRICT="${AURA_PIPELINE_STRICT:-0}"
+export AURA_BUILD_TARGETS="${AURA_BUILD_TARGETS:-aura}"
 
 cd "$AURA"
 echo "build-aura: ./build.py build (AURA_BUILD_TYPE=$AURA_BUILD_TYPE)"

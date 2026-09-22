@@ -77,7 +77,7 @@ Inside the container this script:
 ```bash
 ./scripts/fetch-aura.sh
 ./scripts/build-aura.sh          # needs GCC 16 / mold — prefer the container
-./scripts/run-server.sh [port]   # default 6379; AURA_SANDBOX=off
+./scripts/run-server.sh [port]   # sets AURA_REDIS_PORT (default 6379); AURA_SANDBOX=off
 ./scripts/smoke-test.sh          # ephemeral port 16379
 ```
 

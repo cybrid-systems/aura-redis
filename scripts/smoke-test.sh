@@ -24,10 +24,11 @@ fi
 export AURA_SANDBOX=off
 export AURA_PIPELINE_STRICT="${AURA_PIPELINE_STRICT:-0}"
 export AURA_PATH="${AURA_PATH:-$ROOT/.deps/aura/lib}"
+export AURA_REDIS_PORT="$PORT"
 
 cd "$ROOT"
 echo "smoke-test: starting server on 127.0.0.1:$PORT"
-"$AURA_BIN" src/redis/server.aura "$PORT" >"$LOG" 2>&1 &
+"$AURA_BIN" src/redis/server.aura >"$LOG" 2>&1 &
 PID=$!
 
 # Wait until listen line appears or process dies

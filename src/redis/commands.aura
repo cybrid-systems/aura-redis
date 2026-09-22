@@ -42,12 +42,13 @@
   (if s (list "bulk" s) (list "null")))
 
 (define (parse-set-opts args)
-  ; Returns (list value ex-ms nx xx) — ex-ms 0 means none; nx/xx are #t/#f
-  (let ((val (arg-at args 1))
+  ; Returns (list value expire-at-ms nx xx) — expire-at 0 means none; nx/xx are #t/#f
+  ; args = (SET key value [EX sec|PX ms] [NX|XX] ...)
+  (let ((val (arg-at args 2))
         (ex-ms 0)
         (nx #f)
         (xx #f)
-        (i 2)
+        (i 3)
         (n (length args))
         (ok #t))
     (while (lambda () (and ok (< i n)))

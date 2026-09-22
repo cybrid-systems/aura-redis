@@ -15,6 +15,7 @@ fi
 export AURA_SANDBOX=off
 export AURA_PIPELINE_STRICT="${AURA_PIPELINE_STRICT:-0}"
 export AURA_PATH="${AURA_PATH:-$ROOT/.deps/aura/lib}"
+export AURA_REDIS_PORT="$PORT"
 
 cd "$ROOT"
-exec "$AURA_BIN" src/redis/server.aura "$PORT"
+exec "$AURA_BIN" src/redis/server.aura

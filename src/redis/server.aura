@@ -2,7 +2,9 @@
 ;
 ; Usage (from repo root, after building Aura):
 ;   AURA_SANDBOX=off AURA_PIPELINE_STRICT=0 AURA_PATH=.deps/aura/lib \
-;     ./.deps/aura/build/aura src/redis/server.aura [port]
+;     AURA_REDIS_PORT=6379 ./.deps/aura/build/aura src/redis/server.aura
+;
+; Port comes from AURA_REDIS_PORT (Aura CLI treats bare args as program files).
 ;
 ; Limitations (v0):
 ;   - tcp-listen binds 127.0.0.1 only (Aura std/socket)
@@ -14,9 +16,9 @@
 (require "src/redis/commands" all:)
 
 (define (default-port)
-  (let ((args (command-line)))
-    (if (and (pair? args) (number? (string->number (car args))))
-      (string->number (car args))
+  (let ((env (getenv "AURA_REDIS_PORT")))
+    (if (and (string? env) (number? (string->number env)))
+      (string->number env)
       6379)))
 
 (define (buf-append a b)
