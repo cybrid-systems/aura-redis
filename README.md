@@ -12,7 +12,8 @@ Pinned Aura revision: [`b0c6b3555e4287c8807b019a8b9316ee94c988b6`](https://githu
 
 Detailed design: [`docs/architecture.md`](docs/architecture.md)  
 Iteration plan: [`docs/iteration-plan.md`](docs/iteration-plan.md)  
-Runtime mutation toward big-tech adaptive loads: [`docs/runtime-mutation-explore.md`](docs/runtime-mutation-explore.md)
+**MVP plan (M0–M5):** [`docs/mvp-plan.md`](docs/mvp-plan.md)  
+Runtime mutation exploration: [`docs/runtime-mutation-explore.md`](docs/runtime-mutation-explore.md)
 
 **Direction:** C data plane for fast GET/SET + built-in kernels; **Aura mutates policy code** (`hot-strategy` / sandbox) and applies via RESP `EVICT`/`LAYOUT`. PLUGIN/.so is an escape hatch only — see [`docs/aura-native-control.md`](docs/aura-native-control.md).
 
@@ -49,6 +50,20 @@ python3 tests/test_plugin_reload.py         # live PLUGIN swap mid-traffic (no r
 ./scripts/demo-plugin-reload.sh            # same as above
 python3 tests/test_layout.py                # flat↔hot_cold migrate under load
 ```
+
+
+### Demo MVP (distinctive story)
+
+```bash
+./scripts/build-native.sh
+./scripts/demo-mvp.sh                 # ~2 min: LRU lose → Aura adaptive win → WS shift
+python3 tests/test_mvp.py
+python3 scripts/bench_dynamic_evict.py --workloads zipf_hotkey,oscillate
+```
+
+Under Meta-like hot-key / Zipf pressure, **static LRU hit% collapses**; Aura-mutated
+policy (`choose_normal` → joint `EVICT`+`LAYOUT`, optional `PIN`) recovers ~100%.
+C only runs named kernels. `AURA_REDIS_DENY_PLUGIN=1`. Details: [`docs/mvp-plan.md`](docs/mvp-plan.md).
 
 ### Aura-native adaptation (moat)
 

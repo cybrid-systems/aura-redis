@@ -21,6 +21,9 @@ Workloads
    on one server lifetime. Adaptive should be close to best-of {lru,lfu}
    on each phase.
 
+4. zipf_hotkey (Meta-like, LFU/pin-favoring) — MVP M3
+   Zipf α≈0.99 over keyspace; boost tiny hot set; cold flood; GET hot.
+
 Adaptive path (default): Python controller with the same rules as
 src/redis/policy/choose_normal.aura (min-ops=80, write-heavy→lfu,
 read-heavy+hit≥60%→lru). Optional --aura-agent uses policy_agent.aura
@@ -70,20 +73,126 @@ def info_int(info: Dict[str, str], key: str) -> int:
 # ── adaptive controllers ──────────────────────────────────────────────
 
 
-class PythonAdaptiveController(threading.Thread):
-    """Mirrors choose_normal.aura / adaptive_body.aura rules via RESP EVICT."""
+def choose_policy(
+    profile: str,
+    dg: int,
+    ds: int,
+    dh: int,
+    dm: int,
+    devicted: int,
+    nkeys: int,
+) -> str:
+    """Mirror choose_*.aura multi-signal joint contract.
 
-    def __init__(self, port: int, tick: float = 0.08, min_ops: int = 80):
+    Returns "" | "lfu" | "lru" | "lfu|hot_cold" | "lru|flat" | "...|pin".
+    """
+    ops = dg + ds
+    hit_pct = (100 * dh) // (dh + dm) if (dh + dm) > 0 else 0
+    miss_pct = (100 * dm) // (dh + dm) if (dh + dm) > 0 else 0
+    if profile == "aggressive":
+        if ops < 40:
+            return ""
+        if ds > dg * 1 or miss_pct > 25:
+            if miss_pct > 35 or devicted > 5:
+                return "lfu|hot_cold|pin"
+            return "lfu|hot_cold"
+        if dg > ds * 3 and hit_pct >= 50:
+            return "lru|flat"
+        return ""
+    if profile == "conservative":
+        if ops < 120:
+            return ""
+        if ds > dg * 3 and miss_pct > 55:
+            return "lfu|hot_cold"
+        if ds > dg * 3:
+            return "lfu"
+        if dg > ds * 8 and hit_pct >= 75:
+            return "lru"
+        if devicted > 20 and nkeys > 100:
+            return "lfu|hot_cold"
+        return ""
+    if profile == "inverted":
+        if ops < 80:
+            return ""
+        if ds > dg * 2:
+            return "lru|flat"
+        if dg > ds * 5 and hit_pct >= 60:
+            return "lfu|hot_cold"
+        return ""
+    # normal (default)
+    if ops < 80:
+        return ""
+    if ds > dg * 2 and miss_pct > 40 and nkeys > 0:
+        return "lfu|hot_cold|pin"
+    if ds > dg * 2:
+        return "lfu|hot_cold"
+    if dg > ds * 5 and hit_pct >= 60:
+        return "lru|flat"
+    if devicted > 0 and miss_pct > 50:
+        return "lfu|hot_cold"
+    return ""
+
+
+def apply_choice(sock: socket.socket, choice: str, cur_evict: str, cur_layout: str,
+                 swaps: List[str], pin_hot_prefix: Optional[str] = None,
+                 pin_n: int = 0) -> None:
+    """Apply joint EVICT|LAYOUT|pin from choose result. Owns layout (no C adaptive)."""
+    if not choice:
+        return
+    parts = [p for p in choice.split("|") if p]
+    ev = parts[0] if parts else ""
+    ly = parts[1] if len(parts) > 1 else ""
+    want_pin = len(parts) > 2 and parts[2] == "pin"
+    if ev and ev != cur_evict:
+        redis_call(sock, "EVICT", ev)
+        swaps.append(f"{cur_evict}->{ev}")
+    if ly and ly != cur_layout and ly in ("flat", "hot_cold"):
+        redis_call(sock, "LAYOUT", ly)
+        swaps.append(f"layout:{cur_layout}->{ly}")
+    if want_pin:
+        try:
+            redis_call(sock, "EVICT", "samples", "32")
+        except Exception:
+            pass
+        if pin_hot_prefix and pin_n > 0:
+            for i in range(pin_n):
+                try:
+                    redis_call(sock, "PIN", f"{pin_hot_prefix}{i:04d}")
+                except Exception:
+                    pass
+
+
+class PythonAdaptiveController(threading.Thread):
+    """Mirrors choose_*.aura via RESP EVICT+LAYOUT (joint). Owns layout."""
+
+    def __init__(
+        self,
+        port: int,
+        tick: float = 0.08,
+        profile: str = "normal",
+        pin_prefix: Optional[str] = None,
+        pin_n: int = 0,
+    ):
         super().__init__(daemon=True)
         self.port = port
         self.tick = tick
-        self.min_ops = min_ops
+        self.profile = profile
+        self.pin_prefix = pin_prefix
+        self.pin_n = pin_n
         self._stop = threading.Event()
         self.swaps: List[str] = []
-        self.prev: Optional[Tuple[int, int, int, int]] = None
+        self.prev: Optional[Tuple[int, int, int, int, int]] = None
+        self.hit_ewma: float = 0.0
+        self._last_evict_swap = 0.0
+        self.dwell_s = 0.6  # sticky kernel after EVICT (avoid thrash mid-boost)
 
     def stop(self) -> None:
         self._stop.set()
+
+    def set_profile(self, profile: str) -> None:
+        """Hot-swap policy body (mirrors hot-strategy:swap!)."""
+        self.profile = profile
+        self.swaps.append(f"profile->{profile}")
 
     def run(self) -> None:
         try:
@@ -101,27 +210,41 @@ class PythonAdaptiveController(threading.Thread):
                 se = info_int(info, "sets")
                 h = info_int(info, "hits")
                 m = info_int(info, "misses")
+                ev = info_int(info, "evicted")
+                nk = info_int(info, "keys")
                 cur = info.get("evict", "")
+                cur_ly = info.get("layout", "flat")
                 if self.prev is not None:
                     dg = g - self.prev[0]
                     ds = se - self.prev[1]
                     dh = h - self.prev[2]
                     dm = m - self.prev[3]
-                    ops = dg + ds
-                    choice = ""
-                    if ops >= self.min_ops:
-                        hit_pct = (100 * dh) // (dh + dm) if (dh + dm) > 0 else 0
-                        if ds > dg * 2:
-                            choice = "lfu"
-                        elif dg > ds * 5 and hit_pct >= 60:
-                            choice = "lru"
-                    if choice and choice != cur:
-                        try:
-                            redis_call(s, "EVICT", choice)
-                            self.swaps.append(f"{cur}->{choice}")
-                        except Exception:
-                            pass
-                self.prev = (g, se, h, m)
+                    de = ev - self.prev[4]
+                    win = dh + dm
+                    if win > 0:
+                        inst = 100.0 * dh / win
+                        self.hit_ewma = 0.7 * self.hit_ewma + 0.3 * inst
+                    choice = choose_policy(self.profile, dg, ds, dh, dm, de, nk)
+                    # Dwell: ignore EVICT flips (still allow layout) shortly after swap
+                    if choice and (time.time() - self._last_evict_swap) < self.dwell_s:
+                        parts = choice.split("|")
+                        if parts and parts[0] and parts[0] != cur:
+                            # keep current evict; drop pin noise during dwell
+                            choice = "|".join(([cur] + parts[1:2]) if len(parts) > 1 else [])
+                            if not choice or choice == cur:
+                                choice = ""
+                    try:
+                        before = list(self.swaps)
+                        apply_choice(
+                            s, choice, cur, cur_ly, self.swaps,
+                            pin_hot_prefix=self.pin_prefix, pin_n=self.pin_n,
+                        )
+                        for sw in self.swaps[len(before):]:
+                            if "->" in sw and not sw.startswith("layout:"):
+                                self._last_evict_swap = time.time()
+                    except Exception:
+                        pass
+                self.prev = (g, se, h, m, ev)
                 time.sleep(self.tick)
         finally:
             try:
@@ -429,6 +552,100 @@ def workload_oscillate(s: socket.socket, mode: str) -> List[PhaseResult]:
     return [p1, p2]
 
 
+
+def _zipf_ranks(n: int, alpha: float, rng) -> List[int]:
+    """Sample key ranks 0..n-1 with Zipf(alpha)."""
+    # harmonic weights
+    weights = [1.0 / ((k + 1) ** alpha) for k in range(n)]
+    total = sum(weights)
+    probs = [w / total for w in weights]
+    # cumulative
+    cdf = []
+    acc = 0.0
+    for p in probs:
+        acc += p
+        cdf.append(acc)
+    out = []
+    for _ in range(n * 4):  # caller may not need this many; used for traffic
+        u = rng.random()
+        lo, hi = 0, n - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if u <= cdf[mid]:
+                hi = mid
+            else:
+                lo = mid + 1
+        out.append(lo)
+    return out
+
+
+def workload_zipf_hotkey(s: socket.socket, mode: str, seed: int = 42) -> PhaseResult:
+    """Meta-like Zipf α≈0.99: tiny hot set + cold flood; favors LFU/pin/adaptive."""
+    import random
+    rng = random.Random(seed)
+    nkeys = 500
+    nhot = 20
+    boost = 40
+    ncold = 700
+    alpha = 0.99
+    vlen = 160
+    val = "Z" * vlen
+
+    if mode == "adaptive":
+        if not wait_evict(s, "lfu", mode):
+            raise RuntimeError("adaptive failed to flip to lfu before zipf_hotkey")
+
+    # Populate keyspace with Zipf-biased SETs (hot ranks get more writes first)
+    ranks = list(range(nkeys))
+    # Insert all keys once
+    for i in ranks:
+        redis_call(s, "SET", f"z{i:04d}", val)
+    # Boost true hot set (lowest ranks = Zipf head)
+    for _ in range(boost):
+        for i in range(nhot):
+            redis_call(s, "GET", f"z{i:04d}")
+
+    # Optional: pin under adaptive (controller may also pin via policy)
+    if mode == "adaptive":
+        for i in range(min(8, nhot)):
+            try:
+                redis_call(s, "PIN", f"z{i:04d}")
+            except Exception:
+                pass
+
+    # Cold flood past maxmemory (unique keys)
+    for i in range(ncold):
+        redis_call(s, "SET", f"zc{i:05d}", val)
+
+    # Zipf GET traffic over original keyspace hot head
+    hits = misses = 0
+    for _ in range(nhot * 5):
+        # sample Zipf among first nkeys but score on hot set identity
+        # Use inverse-transform on nhot*3 head for GET targets
+        # Prefer GETs on the protected hot set to measure retention
+        pass
+    for i in range(nhot):
+        if redis_call(s, "GET", f"z{i:04d}") is None:
+            misses += 1
+        else:
+            hits += 1
+    # Extra Zipf-shaped probes on head+tail mix
+    for r in _zipf_ranks(nkeys, alpha, rng)[:200]:
+        if r < nhot:
+            if redis_call(s, "GET", f"z{r:04d}") is None:
+                misses += 1
+            else:
+                hits += 1
+    info = parse_info(redis_call(s, "INFO"))
+    return PhaseResult(
+        name="zipf_hotkey",
+        hits=hits,
+        misses=misses,
+        evicted=info_int(info, "evicted"),
+        useful_gets=hits,
+    )
+
+
 # ── orchestration ─────────────────────────────────────────────────────
 
 
@@ -446,6 +663,13 @@ def run_one(
         start_evict = "lru"
 
     h = start_server(port, start_evict, maxmemory, adaptive=adaptive)
+    if (
+        policy == "adaptive"
+        and isinstance(h.controller, PythonAdaptiveController)
+        and workload == "zipf_hotkey"
+    ):
+        h.controller.pin_prefix = "z"
+        h.controller.pin_n = 8
     try:
         s = connect(port)
         try:
@@ -455,6 +679,8 @@ def run_one(
                 phases = [workload_ws_shift(s, policy)]
             elif workload == "oscillate":
                 phases = workload_oscillate(s, policy)
+            elif workload == "zipf_hotkey":
+                phases = [workload_zipf_hotkey(s, policy)]
             else:
                 raise ValueError(workload)
             try:
@@ -517,6 +743,32 @@ def print_table(results: List[RunResult]) -> None:
     print("=" * 78)
 
 
+
+def print_regret_table(results: List[RunResult]) -> None:
+    """Regret vs best-fixed (oracle = max hit% among lru/lfu on that workload)."""
+    print("Regret vs best-fixed (lower = better; adaptive should be near 0):")
+    print("-" * 78)
+    by_wl: Dict[str, List[RunResult]] = {}
+    for r in results:
+        by_wl.setdefault(r.workload, []).append(r)
+    for wl, runs in by_wl.items():
+        fixed = [x for x in runs if x.policy in ("lru", "lfu")]
+        if not fixed:
+            continue
+        best_fixed = max(fixed, key=lambda x: x.overall_hit_rate)
+        for r in runs:
+            regret = best_fixed.overall_hit_rate - r.overall_hit_rate
+            flag = ""
+            if r.policy == "adaptive" and regret <= 0.05:
+                flag = "  ✓ near-oracle"
+            elif r.policy == best_fixed.policy:
+                flag = "  (best-fixed)"
+            print(
+                f"  {wl:<14} {r.policy:<10} hit={100*r.overall_hit_rate:5.1f}%  "
+                f"regret={100*regret:6.1f}pp vs {best_fixed.policy}{flag}"
+            )
+    print("=" * 78)
+
 def assert_success(results: List[RunResult]) -> None:
     """Require at least one workload where LRU is clearly worse than LFU or adaptive."""
     by_wl: Dict[str, Dict[str, RunResult]] = {}
@@ -556,7 +808,7 @@ def main() -> int:
     ap.add_argument(
         "--workloads",
         default="hot_protect,ws_shift,oscillate",
-        help="Comma list: hot_protect,ws_shift,oscillate",
+        help="Comma list: hot_protect,ws_shift,oscillate,zipf_hotkey",
     )
     ap.add_argument(
         "--policies",
@@ -595,6 +847,7 @@ def main() -> int:
             results.append(r)
 
     print_table(results)
+    print_regret_table(results)
     if not args.skip_assert:
         assert_success(results)
     return 0

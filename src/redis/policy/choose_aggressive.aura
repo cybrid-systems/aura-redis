@@ -1,0 +1,22 @@
+; choose_aggressive — faster flips, pin sooner on miss spikes (MVP M1)
+(export *policy-choose-aggressive*)
+
+(define *policy-choose-aggressive*
+  "(lambda (dgets dsets dhits dmisses devicted nkeys)
+     (let ((ops (+ dgets dsets)))
+       (if (< ops 40)
+         \"\"
+         (let ((hit-pct (if (> (+ dhits dmisses) 0)
+                          (quotient (* 100 dhits) (+ dhits dmisses))
+                          0))
+               (miss-pct (if (> (+ dhits dmisses) 0)
+                           (quotient (* 100 dmisses) (+ dhits dmisses))
+                           0)))
+           (cond
+             ((or (> dsets (* dgets 1)) (> miss-pct 25))
+              (if (or (> miss-pct 35) (> devicted 5))
+                \"lfu|hot_cold|pin\"
+                \"lfu|hot_cold\"))
+             ((and (> dgets (* dsets 3)) (>= hit-pct 50)) \"lru|flat\")
+             ((> nkeys 0) \"\")
+             (else \"\"))))))")

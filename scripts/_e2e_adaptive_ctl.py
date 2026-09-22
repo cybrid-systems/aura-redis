@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Thin adaptive EVICT controller for bench-e2e throughput runs."""
+"""Thin adaptive EVICT+LAYOUT controller for bench-e2e (mirrors choose_normal.aura)."""
 from __future__ import annotations
 
 import socket
@@ -11,12 +11,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
 
+# Import shared choose from bench module
+sys.path.insert(0, str(ROOT / "scripts"))
+from bench_dynamic_evict import apply_choice, choose_policy, parse_info, info_int  # noqa: E402
+
 
 def main() -> None:
     port = int(sys.argv[1])
-    min_ops = 80
+    profile = sys.argv[2] if len(sys.argv) > 2 else "normal"
     prev = None
     s = None
+    swaps: list[str] = []
     for _ in range(80):
         try:
             s = socket.create_connection(("127.0.0.1", port), 2)
@@ -28,7 +33,7 @@ def main() -> None:
 
     while True:
         try:
-            info = redis_call(s, "INFO")
+            info = parse_info(redis_call(s, "INFO"))
         except Exception:
             time.sleep(0.08)
             try:
@@ -40,35 +45,28 @@ def main() -> None:
             except OSError:
                 break
             continue
-        d = {}
-        for ln in info.splitlines():
-            if ":" in ln and not ln.startswith("#"):
-                k, v = ln.split(":", 1)
-                d[k.strip()] = v.strip()
-        g = int(d.get("gets", 0))
-        se = int(d.get("sets", 0))
-        h = int(d.get("hits", 0))
-        m = int(d.get("misses", 0))
-        cur = d.get("evict", "")
+        g = info_int(info, "gets")
+        se = info_int(info, "sets")
+        h = info_int(info, "hits")
+        m = info_int(info, "misses")
+        ev = info_int(info, "evicted")
+        nk = info_int(info, "keys")
+        cur = info.get("evict", "")
+        cur_ly = info.get("layout", "flat")
         if prev is not None:
-            dg = g - prev[0]
-            ds = se - prev[1]
-            dh = h - prev[2]
-            dm = m - prev[3]
-            ops = dg + ds
-            choice = ""
-            if ops >= min_ops:
-                hit_pct = (100 * dh) // (dh + dm) if (dh + dm) > 0 else 0
-                if ds > dg * 2:
-                    choice = "lfu"
-                elif dg > ds * 5 and hit_pct >= 60:
-                    choice = "lru"
-            if choice and choice != cur:
-                try:
-                    redis_call(s, "EVICT", choice)
-                except Exception:
-                    pass
-        prev = (g, se, h, m)
+            dg, ds, dh, dm, de = (
+                g - prev[0],
+                se - prev[1],
+                h - prev[2],
+                m - prev[3],
+                ev - prev[4],
+            )
+            choice = choose_policy(profile, dg, ds, dh, dm, de, nk)
+            try:
+                apply_choice(s, choice, cur, cur_ly, swaps)
+            except Exception:
+                pass
+        prev = (g, se, h, m, ev)
         time.sleep(0.08)
 
 

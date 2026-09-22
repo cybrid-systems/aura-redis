@@ -32,11 +32,12 @@ static const ArEvictOps kEvictNoop = {
     .name = "noop",
 };
 
-/* Sample one entry from hot and (if present) cold; used by LRU/LFU. */
+/* Sample entries from hot and (if present) cold; used by LRU/LFU.
+ * Skips pinned keys (MVP M4). Sample count from db->evict_samples. */
 static void sample_pick_lru(ArCore* db, ArEntry** best, size_t* best_b,
                             int* best_tier, uint64_t* best_t, int* samples) {
-  int max_samples = 16;
-  for (int attempt = 0; attempt < 64 && *samples < max_samples; ++attempt) {
+  int max_samples = db->evict_samples > 0 ? db->evict_samples : 16;
+  for (int attempt = 0; attempt < 128 && *samples < max_samples; ++attempt) {
     int use_cold = (db->layout == AR_LAYOUT_HOT_COLD && db->cold_buckets &&
                     db->cold_nkeys > 0 && (attempt & 1));
     ArEntry** table = use_cold ? db->cold_buckets : db->buckets;
@@ -45,6 +46,8 @@ static void sample_pick_lru(ArCore* db, ArEntry** best, size_t* best_b,
       continue;
     size_t i = (size_t)(rand() % (int)nb);
     for (ArEntry* e = table[i]; e && *samples < max_samples; e = e->next) {
+      if (e->pinned)
+        continue;
       (*samples)++;
       if (e->last_access < *best_t) {
         *best_t = e->last_access;
@@ -59,8 +62,8 @@ static void sample_pick_lru(ArCore* db, ArEntry** best, size_t* best_b,
 static void sample_pick_lfu(ArCore* db, ArEntry** best, size_t* best_b,
                             int* best_tier, uint8_t* best_f, uint64_t* best_t,
                             int* samples) {
-  int max_samples = 16;
-  for (int attempt = 0; attempt < 64 && *samples < max_samples; ++attempt) {
+  int max_samples = db->evict_samples > 0 ? db->evict_samples : 16;
+  for (int attempt = 0; attempt < 128 && *samples < max_samples; ++attempt) {
     int use_cold = (db->layout == AR_LAYOUT_HOT_COLD && db->cold_buckets &&
                     db->cold_nkeys > 0 && (attempt & 1));
     ArEntry** table = use_cold ? db->cold_buckets : db->buckets;
@@ -69,6 +72,8 @@ static void sample_pick_lfu(ArCore* db, ArEntry** best, size_t* best_b,
       continue;
     size_t i = (size_t)(rand() % (int)nb);
     for (ArEntry* e = table[i]; e && *samples < max_samples; e = e->next) {
+      if (e->pinned)
+        continue;
       (*samples)++;
       if (e->lfu_freq < *best_f ||
           (e->lfu_freq == *best_f && e->last_access < *best_t)) {
@@ -258,6 +263,8 @@ void ar_entry_free_ex(ArCore* core, size_t bucket, int tier, ArEntry* e) {
       (tier == 1 && core->cold_buckets) ? core->cold_buckets : core->buckets;
   unlink_entry(table, bucket, e);
   core->used_memory -= e->klen + e->vlen + sizeof(ArEntry);
+  if (e->pinned && core->pinned_keys)
+    core->pinned_keys--;
   if (core->layout == AR_LAYOUT_HOT_COLD) {
     if (tier == 1) {
       if (core->cold_nkeys)
@@ -583,6 +590,7 @@ ArCore* ar_core_create(void) {
   }
   c->layout = AR_LAYOUT_FLAT;
   c->evict = &kEvictNoop;
+  c->evict_samples = 16;
   c->evict_plugin = NULL;
   c->plugin_reloads = 0;
   c->listen_fd = -1;
@@ -944,4 +952,89 @@ uint64_t ar_metric_plugin_reloads(ArCore* core) {
 
 int ar_core_has_evict_plugin(ArCore* core) {
   return (core && core->evict_plugin) ? 1 : 0;
+}
+
+/* --- MVP M4: samples + pin set --- */
+
+int ar_core_set_evict_samples(ArCore* core, int n) {
+  if (!core)
+    return 0;
+  if (n < 1)
+    n = 1;
+  if (n > 256)
+    n = 256;
+  core->evict_samples = n;
+  return 1;
+}
+
+int ar_core_evict_samples(ArCore* core) {
+  return core ? (core->evict_samples > 0 ? core->evict_samples : 16) : 16;
+}
+
+uint64_t ar_core_nkeys(ArCore* core) {
+  return core ? (uint64_t)core->nkeys : 0;
+}
+
+uint64_t ar_core_pinned_keys(ArCore* core) {
+  return core ? core->pinned_keys : 0;
+}
+
+int ar_core_pin(ArCore* core, const char* key, size_t klen) {
+  if (!core || !key)
+    return 0;
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
+  if (!e)
+    return 0;
+  if (!e->pinned) {
+    e->pinned = 1;
+    core->pinned_keys++;
+  }
+  return 1;
+}
+
+int ar_core_unpin(ArCore* core, const char* key, size_t klen) {
+  if (!core || !key)
+    return 0;
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
+  if (!e || !e->pinned)
+    return 0;
+  e->pinned = 0;
+  if (core->pinned_keys)
+    core->pinned_keys--;
+  return 1;
+}
+
+static size_t collect_pinned_table(ArEntry** table, size_t nb, char** out_keys,
+                                   size_t max_out, size_t written) {
+  if (!table)
+    return written;
+  for (size_t i = 0; i < nb && written < max_out; ++i) {
+    for (ArEntry* e = table[i]; e && written < max_out; e = e->next) {
+      if (!e->pinned)
+        continue;
+      char* copy = (char*)malloc(e->klen + 1);
+      if (!copy)
+        continue;
+      if (e->klen)
+        memcpy(copy, e->key, e->klen);
+      copy[e->klen] = '\0';
+      out_keys[written++] = copy;
+    }
+  }
+  return written;
+}
+
+size_t ar_core_list_pinned(ArCore* core, char** out_keys, size_t max_out) {
+  if (!core || !out_keys || max_out == 0)
+    return 0;
+  size_t n = collect_pinned_table(core->buckets, core->nbuckets, out_keys,
+                                  max_out, 0);
+  if (core->layout == AR_LAYOUT_HOT_COLD && core->cold_buckets)
+    n = collect_pinned_table(core->cold_buckets, core->cold_nbuckets, out_keys,
+                             max_out, n);
+  return n;
 }

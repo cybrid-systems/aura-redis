@@ -1,0 +1,20 @@
+; choose_conservative — higher thresholds; layout stays flat unless pressure
+(export *policy-choose-conservative*)
+
+(define *policy-choose-conservative*
+  "(lambda (dgets dsets dhits dmisses devicted nkeys)
+     (let ((ops (+ dgets dsets)))
+       (if (< ops 120)
+         \"\"
+         (let ((hit-pct (if (> (+ dhits dmisses) 0)
+                          (quotient (* 100 dhits) (+ dhits dmisses))
+                          0))
+               (miss-pct (if (> (+ dhits dmisses) 0)
+                           (quotient (* 100 dmisses) (+ dhits dmisses))
+                           0)))
+           (cond
+             ((and (> dsets (* dgets 3)) (> miss-pct 55)) \"lfu|hot_cold\")
+             ((> dsets (* dgets 3)) \"lfu\")
+             ((and (> dgets (* dsets 8)) (>= hit-pct 75)) \"lru\")
+             ((and (> devicted 20) (> nkeys 100)) \"lfu|hot_cold\")
+             (else \"\"))))))")

@@ -1,16 +1,23 @@
-; choose_normal — default Aura eviction choose-fn body (code string)
-; Rules match Iteration 6 adaptive_body (min-ops=80).
+; choose_normal — multi-signal joint EVICT+LAYOUT choose-fn body (MVP M1/M2)
+; Contract: (lambda (dgets dsets dhits dmisses devicted nkeys) …)
+;   → "" | "lfu" | "lru" | "lfu|hot_cold" | "lru|flat" | "…|pin"
 (export *policy-choose-normal*)
 
 (define *policy-choose-normal*
-  "(lambda (dgets dsets dhits dmisses)
+  "(lambda (dgets dsets dhits dmisses devicted nkeys)
      (let ((ops (+ dgets dsets)))
        (if (< ops 80)
          \"\"
          (let ((hit-pct (if (> (+ dhits dmisses) 0)
                           (quotient (* 100 dhits) (+ dhits dmisses))
-                          0)))
+                          0))
+               (miss-pct (if (> (+ dhits dmisses) 0)
+                           (quotient (* 100 dmisses) (+ dhits dmisses))
+                           0)))
            (cond
-             ((> dsets (* dgets 2)) \"lfu\")
-             ((and (> dgets (* dsets 5)) (>= hit-pct 60)) \"lru\")
+             ((and (> dsets (* dgets 2)) (> miss-pct 40) (> nkeys 0))
+              \"lfu|hot_cold|pin\")
+             ((> dsets (* dgets 2)) \"lfu|hot_cold\")
+             ((and (> dgets (* dsets 5)) (>= hit-pct 60)) \"lru|flat\")
+             ((and (> devicted 0) (> miss-pct 50)) \"lfu|hot_cold\")
              (else \"\"))))))")

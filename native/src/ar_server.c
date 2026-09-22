@@ -374,9 +374,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     /* redis-benchmark / some clients probe; reply empty array */
     return wbuf_append(c, "*0\r\n", 4);
   }
-  /* Aura-native control plane: EVICT [name] — query or select built-in
-   * eviction kernel (noop|lru|lfu). Policy agents apply swaps via RESP
-   * instead of FFI soup (see docs/aura-native-control.md). */
+  /* Aura-native control plane: EVICT [name] | EVICT samples <n>
+   * Policy agents apply swaps via RESP (see docs/aura-native-control.md). */
   if (cmd_eq(cmd, clen, "evict")) {
     if (argc == 1) {
       const char* name = ar_core_evict_name(core);
@@ -392,11 +391,22 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         return reply_err(c, "ERR bad evict (want noop|lru|lfu)");
       return reply_ok(c);
     }
+    if (argc == 3 && cmd_eq(argv[1].p, argv[1].len, "samples")) {
+      char nbuf[32];
+      if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+        return reply_err(c, "ERR bad samples");
+      memcpy(nbuf, argv[2].p, argv[2].len);
+      nbuf[argv[2].len] = '\0';
+      int n = atoi(nbuf);
+      if (!ar_core_set_evict_samples(core, n))
+        return reply_err(c, "ERR bad samples");
+      return reply_ok(c);
+    }
     return reply_err(c, "ERR wrong number of arguments for 'evict'");
   }
-  /* INFO — metrics bulk for Aura policy agent (no FFI required). */
+  /* INFO — multi-signal metrics for Aura policy agent (MVP M1). */
   if (cmd_eq(cmd, clen, "info")) {
-    char buf[512];
+    char buf[768];
     int n = snprintf(buf, sizeof(buf),
                      "# aura-redis\n"
                      "evict:%s\n"
@@ -406,10 +416,16 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
                      "hits:%llu\n"
                      "misses:%llu\n"
                      "evicted:%llu\n"
+                     "keys:%llu\n"
+                     "samples:%d\n"
+                     "pinned:%llu\n"
                      "used_memory:%llu\n"
                      "maxmemory:%llu\n"
                      "plugin:%d\n"
-                     "plugin_reloads:%llu\n",
+                     "plugin_reloads:%llu\n"
+                     "layout_gen:%llu\n"
+                     "hot_keys:%llu\n"
+                     "cold_keys:%llu\n",
                      ar_core_evict_name(core),
                      ar_core_layout_name(core),
                      (unsigned long long)ar_metric_gets(core),
@@ -417,13 +433,56 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
                      (unsigned long long)ar_metric_hits(core),
                      (unsigned long long)ar_metric_misses(core),
                      (unsigned long long)ar_metric_evicted(core),
+                     (unsigned long long)ar_core_nkeys(core),
+                     ar_core_evict_samples(core),
+                     (unsigned long long)ar_core_pinned_keys(core),
                      (unsigned long long)ar_core_used_memory(core),
                      (unsigned long long)ar_core_maxmemory(core),
                      ar_core_has_evict_plugin(core),
-                     (unsigned long long)ar_metric_plugin_reloads(core));
+                     (unsigned long long)ar_metric_plugin_reloads(core),
+                     (unsigned long long)ar_core_layout_gen(core),
+                     (unsigned long long)ar_core_hot_keys(core),
+                     (unsigned long long)ar_core_cold_keys(core));
     if (n < 0)
       return reply_err(c, "ERR info");
     return reply_bulk(c, buf, (size_t)n);
+  }
+  /* MVP M4: PIN key | UNPIN key | PIN (list) */
+  if (cmd_eq(cmd, clen, "pin")) {
+    if (argc == 1) {
+      char* keys[256];
+      size_t n = ar_core_list_pinned(core, keys, 256);
+      char hdr[32];
+      int hn = snprintf(hdr, sizeof(hdr), "*%zu\r\n", n);
+      if (hn < 0 || wbuf_append(c, hdr, (size_t)hn) < 0) {
+        for (size_t i = 0; i < n; ++i)
+          ar_free(keys[i]);
+        return -1;
+      }
+      for (size_t i = 0; i < n; ++i) {
+        size_t kl = strlen(keys[i]);
+        if (reply_bulk(c, keys[i], kl) < 0) {
+          for (size_t j = i; j < n; ++j)
+            ar_free(keys[j]);
+          return -1;
+        }
+        ar_free(keys[i]);
+      }
+      return 0;
+    }
+    if (argc == 2) {
+      if (!ar_core_pin(core, argv[1].p, argv[1].len))
+        return reply_err(c, "ERR pin failed (missing key?)");
+      return reply_ok(c);
+    }
+    return reply_err(c, "ERR wrong number of arguments for 'pin'");
+  }
+  if (cmd_eq(cmd, clen, "unpin")) {
+    if (argc != 2)
+      return reply_err(c, "ERR wrong number of arguments for 'unpin'");
+    if (!ar_core_unpin(core, argv[1].p, argv[1].len))
+      return reply_int(c, 0);
+    return reply_int(c, 1);
   }
   /* Iteration 8: LAYOUT [name] — query or migrate dict layout (quiescent). */
   if (cmd_eq(cmd, clen, "layout")) {

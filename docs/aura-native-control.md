@@ -41,27 +41,35 @@ in the v1 agent loop).
 ```text
 EVICT              → bulk current name (noop|lru|lfu|plugin-name)
 EVICT lru|lfu|noop → +OK (clears plugin handle if any)
+EVICT samples <n>  → set approx eviction sample size (default 16; MVP M4)
 LAYOUT [name]      → query / migrate (unchanged)
-INFO               → bulk metrics (gets/sets/hits/misses/evict/layout/…)
+PIN key / UNPIN key / PIN → pin set (eviction skips; MVP M4)
+INFO               → multi-signal metrics (gets/sets/hits/misses/evicted/keys/
+                     samples/pinned/evict/layout/…)
 PLUGIN [path]      → escape hatch; **denied** when AURA_REDIS_DENY_PLUGIN=1
 ```
 
-## Control loop
+## Control loop (MVP joint)
 
 ```text
-  metrics (INFO) ──► choose-fn (Aura, hot-swappable)
-                           │
-                           ▼
-                     EVICT <name>   (C kernel pointer swap between commands)
+  INFO deltas ──► choose-fn (Aura, hot-swappable)
+                        │
+                        ▼
+              "lfu|hot_cold|pin"  (or bare "lfu" / "")
+                        │
+          ┌─────────────┼─────────────┐
+          ▼             ▼             ▼
+     EVICT name    LAYOUT name    PIN / samples
 ```
 
-1. Seed `(define (choose-fn …) …)` and `hot-strategy:register!`.
-2. Each tick: parse `INFO` deltas → `(choose-fn dgets dsets dhits dmisses)`.
-3. If choice ≠ current → `EVICT <choice>`.
-4. On policy update: `mutate:safety-snapshot` → `hot-strategy:swap!` → on failure
-   `hot-strategy:heal!`.
+1. Seed `(define (choose-fn dgets dsets dhits dmisses devicted nkeys) …)`.
+2. Each tick: parse `INFO` deltas (+ agent hit% EWMA) → choose-fn.
+3. Parse `|` fields → apply `EVICT` and optional `LAYOUT` / pin hint.
+4. When agent owns layout, leave `AURA_REDIS_LAYOUT_ADAPTIVE` **off**.
+5. On policy update: `mutate:safety-snapshot` → `hot-strategy:swap!` → heal on failure.
 
-Policy body strings live in `src/redis/policy/*.aura`.
+Policy bodies: `choose_normal` / `choose_aggressive` / `choose_conservative`
+(+ inverted / broken for demos). See [`mvp-plan.md`](mvp-plan.md).
 
 ## Sandbox profile
 
@@ -86,6 +94,8 @@ See `scripts/sandbox-policy-profile.sh`:
 
 ```bash
 ./scripts/build-native.sh
+./scripts/demo-mvp.sh                          # ~2 min distinctive MVP story
+python3 tests/test_mvp.py                      # INFO/PIN/samples/choose unit+smoke
 python3 tests/test_aura_native.py              # EVICT/INFO/DENY_PLUGIN smoke
 python3 tests/test_aura_native.py --unit-aura  # hot-strategy swap+heal in docker
 ./scripts/demo-aura-native.sh                  # full: C server + policy agent + loads

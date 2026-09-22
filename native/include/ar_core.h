@@ -101,6 +101,17 @@ uint64_t ar_metric_migrates(ArCore* core);
  * Returns 1 if a migrate ran. Safe to call from Aura adaptive tick. */
 int ar_core_adapt_layout(ArCore* core);
 
+/* MVP M4 — eviction sample size + hot-key pin set */
+int ar_core_set_evict_samples(ArCore* core, int n); /* clamp 1..256; default 16 */
+int ar_core_evict_samples(ArCore* core);
+int ar_core_pin(ArCore* core, const char* key, size_t klen);   /* 1 if newly pinned / already */
+int ar_core_unpin(ArCore* core, const char* key, size_t klen); /* 1 if was pinned */
+uint64_t ar_core_pinned_keys(ArCore* core);
+/* Write up to max_out pinned key names into out_keys (malloc'd; caller frees each
+ * via ar_free). Returns count written. */
+size_t ar_core_list_pinned(ArCore* core, char** out_keys, size_t max_out);
+uint64_t ar_core_nkeys(ArCore* core);
+
 #ifdef __cplusplus
 }
 #endif

@@ -13,6 +13,7 @@ typedef struct ArEntry {
   size_t vlen;
   uint64_t last_access;
   uint8_t lfu_freq; /* approximate LFU counter (Iteration 5) */
+  uint8_t pinned;   /* MVP M4: skip in eviction when set */
   struct ArEntry* next;
 } ArEntry;
 
@@ -59,8 +60,10 @@ struct ArCore {
   uint64_t migrates;
 
   const ArEvictOps* evict;
+  int evict_samples; /* MVP M4: approx sample size (default 16) */
   uint64_t ops, gets, sets, hits, misses;
   uint64_t evicted, expired;
+  uint64_t pinned_keys; /* count of entries with pinned=1 */
   uint64_t clock;
   uint64_t maxmemory; /* 0 = unlimited */
   uint64_t used_memory;
