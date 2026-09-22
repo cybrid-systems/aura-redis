@@ -105,6 +105,28 @@ python3 tests/test_aura_native.py --unit-aura  # hot-strategy swap+heal in docke
 ./scripts/demo-aura-native.sh                  # full: C server + policy agent + loads
 ```
 
+
+## Production HA (P1.9)
+
+Fail-safe contract:
+
+1. **C data plane owns the live kernel.** `EVICT` / `LAYOUT` state lives in
+   `aura_redis_server`. If `policy_agent` dies or its TCP session drops, the
+   server **keeps the last applied kernel** — it does not revert to `noop`.
+2. **Reconnect + exponential backoff.** On INFO/TCP failure the agent closes
+   the socket and reconnects with backoff (`AURA_REDIS_POLICY_BACKOFF_CAP_MS`,
+   default 4000). Optional `AURA_REDIS_PASSWORD` / `REQUIREPASS` for AUTH.
+3. **Re-apply last choice after reconnect.** The agent remembers `*last-evict*` /
+   `*last-layout*` from its own applies and re-asserts them if the server
+   differs (covers in-process drops). After a full process crash/restart the
+   agent re-reads `INFO` and continues from the server’s current kernel.
+4. **Policy pin log.** Each connect/reconnect logs
+   `policy_agent: policy-pin tag=… profile=… version=… last-evict=…`.
+5. **Optional heartbeat file.** `AURA_REDIS_POLICY_HEARTBEAT=/path` is rewritten
+   each tick (`ts_ms`, `profile`, `version`, `last_evict`, `reconnects`, …).
+
+Test: `python3 tests/test_prod_policy_ha.py` (Docker Aura agent + C server).
+
 ## Files
 
 - `src/redis/policy_agent.aura` — agent loop

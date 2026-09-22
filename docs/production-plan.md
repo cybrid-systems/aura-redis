@@ -1,7 +1,7 @@
 # aura-redis production plan
 
 **Status:** authoritative production roadmap (v1).  
-**Reality check:** tip ~`d2a2b08`+ is ~2.2k LOC C data plane + Aura `policy_agent` control plane — a **string KV / adaptive cache** with RESP2, maxmemory eviction, and Aura-mutated policy. It is **not** Redis Cluster, modules, or full command compatibility. Production here means *production for this product*, not “become Redis overnight.”
+**Reality check:** tip ~`c094e8f`+ is ~2.2k LOC C data plane + Aura `policy_agent` control plane — a **string KV / adaptive cache** with RESP2, maxmemory eviction, and Aura-mutated policy. It is **not** Redis Cluster, modules, or full command compatibility. Production here means *production for this product*, not “become Redis overnight.”
 
 **Companions:** [`iteration-plan.md`](iteration-plan.md) · [`mvp-plan.md`](mvp-plan.md) · [`aura-native-control.md`](aura-native-control.md) · [`commands.md`](commands.md) · [`mutation-gains.md`](mutation-gains.md)
 
@@ -83,8 +83,9 @@
 | MVP M0–M5 | **DONE** |
 | High-ROI M6–M12 (mutation, TTL kernel, soft-goal, evolve, prefix POLICY) | **DONE** |
 | **Production P0** | **P0.1–P0.7 DONE** |
-| **P1.1 CONFIG** | **DONE** (runtime; no persist) → next P1.9 policy_agent HA |
-| **Production P1–P3** | **ACTIVE** ← you are here |
+| **P1.1 / P1.8 CONFIG** | **DONE** (runtime; no persist) |
+| **P1.9 policy_agent HA** | **DONE** — reconnect/backoff, re-apply last EVICT/LAYOUT, policy-pin log, heartbeat; fail-safe documented |
+| **Production P1–P3** | **ACTIVE** ← next P1.10 logging/slowlog (or P1.12 clients — see track order) |
 
 MVP/explore remains valuable demos; **ship bar moves to this document.**
 
@@ -119,7 +120,7 @@ Production does **not** mean “C-only Redis clone.”
 
 - Data plane: `aura_redis_server` (C) — GET/SET/evict kernels, RESP.  
 - Control plane: `policy_agent.aura` — `hot-strategy` / fitness / evolve → RESP `EVICT` / `LAYOUT` / `PIN` / `POLICY`.  
-- Fail-safe (P1.9): if agent disconnects, **last applied kernel remains**; no silent revert to `noop` unless configured.  
+- Fail-safe (P1.9 **DONE**): if agent disconnects, **last applied kernel remains**; reconnect re-applies last EVICT/LAYOUT; policy-pin + optional heartbeat.  
 - Sandbox profile: `AURA_REDIS_DENY_PLUGIN=1` (see `scripts/sandbox-policy-profile.sh`).
 
 ---
@@ -137,3 +138,4 @@ Production does **not** mean “C-only Redis clone.”
 | 2026-09-22 | **P0.6** | INFO Server/Clients/Memory/Stats/Keyspace/Persistence/Aura; flat keys for policy_agent; `tests/test_prod_info.py` |
 | 2026-09-22 | **P0.7** | `scripts/prod-soak.sh` + `tests/test_prod_soak.py`; `scripts/ci-prod.sh` P0.1–P0.7; CI workflow note |
 | 2026-09-22 | **P1.1** (start) | `CONFIG GET/SET` maxmemory/requirepass/protected-mode/evict-samples/bind; `tests/test_prod_config.py` |
+| 2026-09-22 | **P1.9** | policy_agent reconnect+backoff; re-apply last EVICT/LAYOUT; policy-pin + heartbeat; fail-safe docs; `tests/test_prod_policy_ha.py` |

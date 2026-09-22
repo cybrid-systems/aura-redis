@@ -27,6 +27,10 @@
 ;   AURA_REDIS_THRESH_MISS_PIN      seed miss-pin literal (default 30; evolve uses 75)
 ;   AURA_REDIS_EVOLVE_MAX_GENS      max generations (default 6)
 ;   AURA_REDIS_EVOLVE_WINDOW        ticks per fitness window (default 8)
+;   AURA_REDIS_PASSWORD / REQUIREPASS  AUTH to C server when requirepass set
+;   AURA_REDIS_POLICY_HEARTBEAT     optional file rewritten each tick (HA probe)
+;   AURA_REDIS_POLICY_FORCE_RECONNECT_AFTER  test hook: drop TCP after N ticks
+;   AURA_REDIS_POLICY_BACKOFF_CAP_MS  reconnect backoff cap (default 4000)
 
 (require "std/mutate" all:)
 (require "std/hot-strategy" all:)
@@ -106,6 +110,21 @@
 (define *did-invert* #f)
 (define *did-heal* #f)
 
+; P1.9 — HA: last applied kernels, reconnect/backoff, heartbeat
+(define *last-evict* "")
+(define *last-layout* "")
+(define *reconnects* 0)
+(define *backoff-ms* 50)
+(define *backoff-cap* 4000)
+(define *conn-alive* #f)
+(define *heartbeat-file* "")
+(define *password* "")
+(define *force-reconnect-after* 0)
+(define *tick-count* 0)
+(define *forced-reconnect-done* #f)
+(define *policy-version* 0)
+(define *ever-connected* #f)
+
 ; ── env ──
 (let ((e (getenv "AURA_REDIS_HOST")))
   (if (and (string? e) (> (string-length e) 0)) (set! *host* e) #t))
@@ -162,6 +181,32 @@
   (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
     (set! *evolve-window* (string->number e))
     #t))
+(let ((e (getenv "AURA_REDIS_PASSWORD")))
+  (if (and (string? e) (> (string-length e) 0))
+    (set! *password* e)
+    (let ((e2 (getenv "AURA_REDIS_REQUIREPASS")))
+      (if (and (string? e2) (> (string-length e2) 0))
+        (set! *password* e2)
+        #t))))
+(let ((e (getenv "AURA_REDIS_POLICY_HEARTBEAT")))
+  (if (and (string? e) (> (string-length e) 0))
+    (begin
+      (set! *heartbeat-file* e)
+      (display "policy_agent: heartbeat-file=")
+      (display *heartbeat-file*)
+      (newline))
+    (begin
+      (display "policy_agent: heartbeat-file=(none)")
+      (newline))))
+(let ((e (getenv "AURA_REDIS_POLICY_FORCE_RECONNECT_AFTER")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *force-reconnect-after* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_POLICY_BACKOFF_CAP_MS")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *backoff-cap* (string->number e))
+    #t))
+
 ; Evolve owns threshold mutation — disable M6/M7 fitness profile swap path
 (if *evolve-on*
   (set! *fitness-on* #f)
@@ -296,25 +341,32 @@
         (else #f)))))
 
 (define (redis-call! sock . args)
-  (let ((wire (resp-encode-cmd args)))
-    (tcp-send sock wire)
-    (let ((buf "")
-          (done #f)
-          (result ""))
-      (while (not done)
-        (begin
-          (let ((chunk (tcp-recv sock 65536)))
-            (if (or (not (string? chunk)) (= (string-length chunk) 0))
-              (begin (set! done #t) (set! result "ERR closed"))
-              (begin
-                (set! buf (string-append buf chunk))
-                (let ((parsed (resp-parse-one buf)))
-                  (if parsed
-                    (begin
-                      (set! result (cadr parsed))
-                      (set! done #t))
-                    #t)))))))
-      result)))
+  (let ((wire (resp-encode-cmd args))
+        (sent (tcp-send sock wire)))
+    (if (or (not (number? sent)) (< sent 0))
+      (begin
+        (set! *conn-alive* #f)
+        "ERR closed")
+      (let ((buf "")
+            (done #f)
+            (result ""))
+        (while (not done)
+          (begin
+            (let ((chunk (tcp-recv sock 65536)))
+              (if (or (not (string? chunk)) (= (string-length chunk) 0))
+                (begin
+                  (set! *conn-alive* #f)
+                  (set! done #t)
+                  (set! result "ERR closed"))
+                (begin
+                  (set! buf (string-append buf chunk))
+                  (let ((parsed (resp-parse-one buf)))
+                    (if parsed
+                      (begin
+                        (set! result (cadr parsed))
+                        (set! done #t))
+                      #t)))))))
+        result))))
 
 
 ; ── pin helpers (best-effort; PIN list is RESP array — agent may not parse it) ──
@@ -828,22 +880,191 @@
         #t)))
   #t)
 
-; ── connect to C data plane ──
+;
+; ── P1.9 HA helpers ──
+(define (err-closed? s)
+  (and (string? s)
+       (>= (string-length s) 3)
+       (string=? (substring s 0 3) "ERR")))
+
+(define (close-sock!)
+  (if (number? *sock*)
+    (begin
+      (tcp-close *sock*)
+      (set! *sock* #f)
+      (set! *conn-alive* #f))
+    (set! *conn-alive* #f)))
+
+(define (log-policy-pin! tag)
+  (set! *policy-version* (hot-strategy:version))
+  (display "policy_agent: policy-pin tag=")
+  (display tag)
+  (display " profile=")
+  (display *profile-name*)
+  (display " version=")
+  (display *policy-version*)
+  (display " last-evict=")
+  (display *last-evict*)
+  (display " last-layout=")
+  (display *last-layout*)
+  (display " reconnects=")
+  (display *reconnects*)
+  (newline)
+  #t)
+
+(define (write-heartbeat!)
+  (if (or (not (string? *heartbeat-file*)) (= (string-length *heartbeat-file*) 0))
+    #f
+    (begin
+      (set! *policy-version* (hot-strategy:version))
+      (let ((payload (string-append
+                       "ts_ms=" (number->string (monotonic-ms)) "\n"
+                       "profile=" *profile-name* "\n"
+                       "version=" (number->string *policy-version*) "\n"
+                       "last_evict=" *last-evict* "\n"
+                       "last_layout=" *last-layout* "\n"
+                       "reconnects=" (number->string *reconnects*) "\n"
+                       "applies=" (number->string *applies*) "\n")))
+        (write-file *heartbeat-file* payload)
+        (display "policy_agent: heartbeat wrote path=")
+        (display *heartbeat-file*)
+        (display " bytes=")
+        (display (string-length payload))
+        (newline)
+        #t))))
+
+(define (reapply-last-policy!)
+  ; After reconnect: INFO then re-assert last chosen EVICT/LAYOUT if known.
+  ; Fail-safe: if agent memory empty, C server already keeps last kernel.
+  (let ((info (redis-call! *sock* "INFO")))
+    (if (or (not (string? info)) (err-closed? info))
+      (begin
+        (display "policy_agent: reapply INFO failed\n")
+        (set! *conn-alive* #f)
+        #f)
+      (let ((cur (info-get info "evict"))
+            (cur-layout (info-get info "layout")))
+        (display "policy_agent: reapply check server evict=")
+        (display cur)
+        (display " layout=")
+        (display cur-layout)
+        (display " want-evict=")
+        (display *last-evict*)
+        (display " want-layout=")
+        (display *last-layout*)
+        (newline)
+        (if (> (string-length *last-evict*) 0)
+          (begin
+            (display "policy_agent: re-apply EVICT ")
+            (display *last-evict*)
+            (display (if (string=? *last-evict* cur) " (in-sync)" " (delta)"))
+            (newline)
+            (redis-call! *sock* "EVICT" *last-evict*)
+            (set! *applies* (+ *applies* 1)))
+          #t)
+        (if (> (string-length *last-layout*) 0)
+          (begin
+            (display "policy_agent: re-apply LAYOUT ")
+            (display *last-layout*)
+            (display (if (string=? *last-layout* cur-layout) " (in-sync)" " (delta)"))
+            (newline)
+            (redis-call! *sock* "LAYOUT" *last-layout*)
+            (set! *applies* (+ *applies* 1)))
+          #t)
+        (set! *have-prev* #f)
+        (log-policy-pin! "reapply")
+        #t))))
+
+(define (ensure-connected!)
+  (if (and *conn-alive* (number? *sock*))
+    #t
+    (let ((ok #f)
+          (delay *backoff-ms*)
+          (attempt 0))
+      (close-sock!)
+      (while (and (not ok) *running*)
+        (begin
+          (set! attempt (+ attempt 1))
+          (display "policy_agent: connect attempt=")
+          (display attempt)
+          (display " backoff_ms=")
+          (display delay)
+          (display " ")
+          (display *host*)
+          (display ":")
+          (display *port*)
+          (newline)
+          (set! *sock* (tcp-connect *host* *port*))
+          (cond
+            ((not (number? *sock*))
+             (begin
+               (display "policy_agent: tcp-connect failed; sleep ")
+               (display delay)
+               (newline)
+               (busy-wait-ms delay)
+               (set! delay (if (< (* delay 2) *backoff-cap*) (* delay 2) *backoff-cap*))))
+            (else
+             (begin
+               (set! *conn-alive* #t)
+               (if (> (string-length *password*) 0)
+                 (begin
+                   (display "policy_agent: AUTH\n")
+                   (let ((ar (redis-call! *sock* "AUTH" *password*)))
+                     (display "policy_agent: AUTH → ")
+                     (display ar)
+                     (newline)
+                     (if (err-closed? ar)
+                       (set! *conn-alive* #f)
+                       #t)))
+                 #t)
+               (if (not *conn-alive*)
+                 (begin
+                   (close-sock!)
+                   (busy-wait-ms delay)
+                   (set! delay (if (< (* delay 2) *backoff-cap*) (* delay 2) *backoff-cap*)))
+                 (let ((pong (redis-call! *sock* "PING")))
+                   (display "policy_agent: PING → ")
+                   (display pong)
+                   (newline)
+                   (if (or (not (string? pong))
+                           (err-closed? pong)
+                           (and (>= (string-length pong) 3)
+                                (string=? (substring pong 0 3) "ERR")))
+                     (begin
+                       (close-sock!)
+                       (busy-wait-ms delay)
+                       (set! delay (if (< (* delay 2) *backoff-cap*)
+                                     (* delay 2) *backoff-cap*)))
+                     (begin
+                       (if *ever-connected*
+                         (begin
+                           (set! *reconnects* (+ *reconnects* 1))
+                           (display "policy_agent: reconnected reconnects=")
+                           (display *reconnects*)
+                           (newline)
+                           (reapply-last-policy!)
+                           (log-policy-pin! "reconnect"))
+                         (begin
+                           (set! *ever-connected* #t)
+                           (log-policy-pin! "connect")
+                           (set! *have-prev* #f)))
+                       (set! *backoff-ms* 50)
+                       (set! ok #t)
+                       (write-heartbeat!))))))))))
+      ok)))
+
+; ── connect to C data plane (P1.9: reconnect + backoff) ──
 (display "policy_agent: connect ")
 (display *host*)
 (display ":")
 (display *port*)
 (newline)
 
-(set! *sock* (tcp-connect *host* *port*))
-(if (not (number? *sock*))
+(if (not (ensure-connected!))
   (begin
-    (display "policy_agent: tcp-connect failed\n")
+    (display "policy_agent: initial connect failed\n")
     (set! *fatal* #t))
-  (begin
-    (display "policy_agent: PING → ")
-    (display (redis-call! *sock* "PING"))
-    (newline)))
+  #t)
 
 (if (and (not *fatal*) *demo*)
   (begin
@@ -855,15 +1076,50 @@
   (while *running*
     (begin
       (busy-wait-ms *tick-ms*)
+      (set! *tick-count* (+ *tick-count* 1))
+      ; HA test hook: force one TCP drop after N ticks
+      (if (and (not *forced-reconnect-done*)
+               (> *force-reconnect-after* 0)
+               (>= *tick-count* *force-reconnect-after*)
+               *conn-alive*)
+        (begin
+          (display "policy_agent: HA force-reconnect after ticks=")
+          (display *tick-count*)
+          (newline)
+          (close-sock!)
+          (set! *forced-reconnect-done* #t))
+        #t)
+      (if (not (ensure-connected!))
+        (begin
+          (display "policy_agent: give up reconnect\n")
+          (set! *running* #f)
+          (set! *fatal* #t))
+        (begin
       (maybe-reload-profile!)
+      (write-heartbeat!)
+      ; HA test: after forced reconnect succeeds, exit cleanly (non-demo)
+      (if (and *forced-reconnect-done*
+               (>= *reconnects* 1)
+               (not *demo*)
+               (>= *tick-count* (+ *force-reconnect-after* 2)))
+        (begin
+          (display "policy_agent: HA reconnect test PASS reconnects=")
+          (display *reconnects*)
+          (display " last-evict=")
+          (display *last-evict*)
+          (newline)
+          (set! *running* #f)
+          (set! *exit* 0)
+          (set! *fatal* #f))
+        #t)
       ; safety before any swap in demo phases
       (let ((info (redis-call! *sock* "INFO")))
-        (if (or (not (string? info)) (string=? (substring info 0 (if (< (string-length info) 3) (string-length info) 3)) "ERR"))
+        (if (or (not (string? info)) (err-closed? info))
           (begin
-            (display "policy_agent: INFO failed: ")
+            (display "policy_agent: INFO failed (will reconnect): ")
             (display info)
             (newline)
-            (set! *running* #f))
+            (close-sock!))
           (begin
             (let ((g (info-num info "gets"))
                   (s (info-num info "sets"))
@@ -1001,6 +1257,7 @@
                                 (display erate)
                                 (display ")\n")
                                 (redis-call! *sock* "EVICT" ev-name)
+                                (set! *last-evict* ev-name)
                                 (set! *applies* (+ *applies* 1))
                                 (set! *swaps* (+ *swaps* 1))))
                             #t)
@@ -1013,6 +1270,7 @@
                               (display ly-name)
                               (newline)
                               (redis-call! *sock* "LAYOUT" ly-name)
+                              (set! *last-layout* ly-name)
                               (set! *applies* (+ *applies* 1)))
                             #t)
                           ; On LRU swap-in: drop stale pins so WS shift is not glued to set A
@@ -1117,6 +1375,7 @@
               (set! *exit* 0))
             #t))
         #t)))
+        )) ; end ensure-connected begin / while body
   #t)
 
 (if (number? *sock*)
@@ -1125,6 +1384,14 @@
 
 (display "policy_agent: exit applies=")
 (display *applies*)
+(display " reconnects=")
+(display *reconnects*)
+(display " last-evict=")
+(display *last-evict*)
+(display " profile=")
+(display *profile-name*)
+(display " version=")
+(display (hot-strategy:version))
 (display " heals=")
 (display *heals*)
 (display " fitness-swaps=")
