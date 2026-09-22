@@ -75,6 +75,10 @@ Story arc in `scripts/demo-mvp.sh` (+ optional `tests/test_mvp.py`):
 
 ---
 
+## M6+ (mutation gains)
+
+See [`mutation-gains.md`](mutation-gains.md) and [`high-roi-iterations.md`](high-roi-iterations.md) — fitness-driven `hot-strategy:swap!`/`heal!` vs frozen choose-fn (measurable pp).
+
 ## Post-MVP backlog
 
 Point to [`runtime-mutation-explore.md`](runtime-mutation-explore.md) **iters 15+**:

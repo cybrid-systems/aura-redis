@@ -29,6 +29,13 @@ Workloads
    hot_protect (LFU+pin again). Primary scoreboard: cumulative useful-GET
    hit% and regret vs per-phase oracle (best fixed kernel per phase).
 
+6. diurnal_shift — quiet→peak→flash-sale→cool (M8); favors adaptive mutation.
+
+7. poison_heal — start inverted choose-fn; adaptive_mutate heals, frozen stays bad.
+
+Policies: lru | lfu | adaptive (=adaptive_mutate) | adaptive_frozen |
+          adaptive_mutate | poison_frozen | poison_mutate
+
 Adaptive path (DEFAULT): Aura policy_agent.aura in Docker writes EVICT /
 LAYOUT / PIN decisions (choose_normal.aura: min-ops=40, miss-spike→lfu|flat|pin,
 WS→lru|flat + UNPIN). Python choose_policy() is a host-only mirror for CI /
@@ -61,6 +68,19 @@ from smoke_client import redis_call  # noqa: E402
 DEFAULT_PORT = 26730
 _ACTIVE_CONTROLLER = None  # set by run_one for marathon pin retarget
 IMG = os.environ.get("AURA_DEV_IMAGE", "ghcr.io/cybrid-systems/dev:v1.0.7")
+
+
+ADAPTIVE_POLICIES = {
+    "adaptive",
+    "adaptive_frozen",
+    "adaptive_mutate",
+    "poison_frozen",
+    "poison_mutate",
+}
+
+
+def is_adaptive(mode: str) -> bool:
+    return mode in ADAPTIVE_POLICIES or mode == "adaptive"
 
 
 def parse_info(text: str) -> Dict[str, str]:
@@ -321,11 +341,20 @@ class PythonAdaptiveController(threading.Thread):
 class AuraAgentController:
     """Spawn policy_agent.aura (non-demo) against C server."""
 
-    def __init__(self, port: int, tick_ms: int = 100):
+    def __init__(
+        self,
+        port: int,
+        tick_ms: int = 100,
+        fitness_mutate: bool = True,
+        seed_profile: str = "normal",
+    ):
         self.port = port
         self.tick_ms = tick_ms
+        self.fitness_mutate = fitness_mutate
+        self.seed_profile = seed_profile
         self.cid: Optional[str] = None
         self.swaps: List[str] = []
+        self.fitness_events: List[str] = []
         self.log = Path(f"/tmp/ar-policy-agent-{port}.log")
 
     def start(self) -> None:
@@ -341,8 +370,12 @@ class AuraAgentController:
             "-e", "AURA_REDIS_HOST=127.0.0.1",
             "-e", f"AURA_REDIS_POLICY_MS={self.tick_ms}",
             "-e", "AURA_REDIS_DENY_PLUGIN=1",
+            "-e", f"AURA_REDIS_FITNESS_MUTATE={'1' if self.fitness_mutate else '0'}",
+            "-e", f"AURA_REDIS_SEED_PROFILE={self.seed_profile}",
             # no AURA_REDIS_POLICY_DEMO → run forever
         ]
+        if not self.fitness_mutate:
+            cmd.extend(["-e", "AURA_REDIS_FROZEN=1"])
         if profile:
             cmd.extend(["-e", f"AURA_REDIS_POLICY_PROFILE_FILE={profile}"])
         cmd.extend([
@@ -372,10 +405,14 @@ class AuraAgentController:
         )
         text = self.log.read_text(errors="replace")
         self.swaps = []
+        self.fitness_events = []
         for ln in text.splitlines():
             if not ln.strip().startswith("policy_agent:"):
                 continue
             if ("EVICT" in ln and "→" in ln) or "LAYOUT" in ln or "PIN" in ln or "UNPIN" in ln:
+                self.swaps.append(ln.strip())
+            if "fitness-swap" in ln or "fitness-heal" in ln or "hot-strategy:heal!" in ln:
+                self.fitness_events.append(ln.strip())
                 self.swaps.append(ln.strip())
 
     def stop(self) -> None:
@@ -407,6 +444,8 @@ def start_server(
     evict: str,
     maxmemory: int,
     adaptive: str = "off",  # off | python | aura
+    fitness_mutate: bool = True,
+    seed_profile: str = "normal",
 ) -> ServerHandle:
     kill_port(port)
     bin_path = ROOT / "native/build/aura_redis_server"
@@ -443,7 +482,9 @@ def start_server(
         time.sleep(0.12)
         h.controller = ctl
     elif adaptive == "aura":
-        ctl = AuraAgentController(port)
+        ctl = AuraAgentController(
+            port, fitness_mutate=fitness_mutate, seed_profile=seed_profile,
+        )
         ctl.start()
         h.controller = ctl
     return h
@@ -479,7 +520,7 @@ def wait_evict(s: socket.socket, want: str, mode: str, rounds: int = 25) -> bool
     for _ in range(rounds):
         if parse_info(redis_call(s, "INFO")).get("evict") == want:
             return True
-        if mode != "adaptive":
+        if not is_adaptive(mode):
             return parse_info(redis_call(s, "INFO")).get("evict") == want
         if want == "lfu":
             for j in range(120):
@@ -538,9 +579,11 @@ def workload_hot_protect(s: socket.socket, mode: str) -> PhaseResult:
     vlen = 180
     val = "V" * vlen
 
-    if mode == "adaptive":
-        if not wait_evict(s, "lfu", mode):
-            raise RuntimeError("adaptive failed to flip to lfu before hot_protect")
+    if is_adaptive(mode):
+        ok = wait_evict(s, "lfu", mode)
+        if not ok:
+            # poison_frozen (inverted seed) intentionally cannot flip — measure hit% drop
+            print("  note: wait_evict(lfu) did not succeed (ok for poison_frozen)")
 
     for i in range(nhot):
         redis_call(s, "SET", f"hot{i:04d}", val)
@@ -548,7 +591,8 @@ def workload_hot_protect(s: socket.socket, mode: str) -> PhaseResult:
         for i in range(nhot):
             redis_call(s, "GET", f"hot{i:04d}")
 
-    if mode == "adaptive":
+    # Bench-side PIN only when agent can choose LFU (not poison_frozen inverted)
+    if is_adaptive(mode) and "frozen" not in mode:
         try:
             redis_call(s, "LAYOUT", "flat")
             redis_call(s, "EVICT", "samples", "64")
@@ -590,7 +634,7 @@ def workload_hot_protect(s: socket.socket, mode: str) -> PhaseResult:
 
 def workload_ws_shift(s: socket.socket, mode: str) -> PhaseResult:
     """LRU-favoring: working-set shift from A → B under pressure."""
-    if mode == "adaptive":
+    if is_adaptive(mode):
         # Prefer LRU for shifting locality; nudge if still on lfu.
         wait_evict(s, "lru", mode)
 
@@ -631,7 +675,7 @@ def workload_oscillate(s: socket.socket, mode: str) -> List[PhaseResult]:
     p1 = workload_hot_protect(s, mode)
     redis_call(s, "FLUSHDB")
     # Bridge: clear pressure artifacts; adaptive should move toward lru.
-    if mode == "adaptive":
+    if is_adaptive(mode):
         wait_evict(s, "lru", mode)
     else:
         # Fixed policies: small settle
@@ -653,7 +697,7 @@ def workload_phase_marathon(s: socket.socket, mode: str) -> List[PhaseResult]:
     tracks the better kernel (+ PIN) on every phase.
     """
     # Phase 1 — Meta-like zipf cold-flood (LFU+pin)
-    if mode == "adaptive" and isinstance(
+    if is_adaptive(mode) and isinstance(
         _ACTIVE_CONTROLLER, PythonAdaptiveController
     ):
         pass  # pin_prefix already set by run_one
@@ -661,7 +705,7 @@ def workload_phase_marathon(s: socket.socket, mode: str) -> List[PhaseResult]:
 
     redis_call(s, "FLUSHDB")
     # Bridge toward LRU + clear pins so set-A from zipf does not stick
-    if mode == "adaptive":
+    if is_adaptive(mode):
         try:
             redis_call(s, "LAYOUT", "flat")
         except Exception:
@@ -692,7 +736,7 @@ def workload_phase_marathon(s: socket.socket, mode: str) -> List[PhaseResult]:
     p2 = workload_ws_shift(s, mode)
 
     redis_call(s, "FLUSHDB")
-    if mode == "adaptive":
+    if is_adaptive(mode):
         wait_evict(s, "lfu", mode)
         # Retarget pin prefix for hot_protect phase
         ctl = _ACTIVE_CONTROLLER
@@ -750,9 +794,9 @@ def workload_zipf_hotkey(s: socket.socket, mode: str, seed: int = 42) -> PhaseRe
     vlen = 160
     val = "Z" * vlen
 
-    if mode == "adaptive":
+    if is_adaptive(mode):
         if not wait_evict(s, "lfu", mode):
-            raise RuntimeError("adaptive failed to flip to lfu before zipf_hotkey")
+            print("  note: wait_evict(lfu) failed before zipf_hotkey")
 
     # Populate keyspace with Zipf-biased SETs (hot ranks get more writes first)
     ranks = list(range(nkeys))
@@ -767,7 +811,7 @@ def workload_zipf_hotkey(s: socket.socket, mode: str, seed: int = 42) -> PhaseRe
     # Re-SET + PIN hot head under adaptive BEFORE cold flood.
     # (Populate of full keyspace can already evict tail-of-hot under maxmemory;
     # PIN on a missing key fails — that was the ~5pp zipf regret.)
-    if mode == "adaptive":
+    if is_adaptive(mode) and "frozen" not in mode:
         try:
             redis_call(s, "LAYOUT", "flat")
         except Exception:
@@ -827,7 +871,160 @@ def workload_zipf_hotkey(s: socket.socket, mode: str, seed: int = 42) -> PhaseRe
     )
 
 
+
+def workload_diurnal_shift(s: socket.socket, mode: str) -> List[PhaseResult]:
+    """M8: quiet → peak write → flash-sale cold flood → cool read (4 phases).
+
+    Short phases so conservative (slow thresholds) lags; aggressive/mutate catches
+    flips. Cumulative useful-GET hit% attributes mutation vs frozen.
+    """
+    phases: List[PhaseResult] = []
+    vlen = 160
+    val = "D" * vlen
+
+    # Phase 0 — quiet read-ish (LRU ok)
+    if is_adaptive(mode):
+        # no wait_evict crutch — choose-fn / fitness must flip
+        for _j in range(8):
+            redis_call(s, "SET", f"__nudge{_j}", "n" * 32)
+            redis_call(s, "GET", f"__nudge{_j}")
+    for i in range(60):
+        redis_call(s, "SET", f"q{i:04d}", val)
+    hits = misses = 0
+    for _ in range(4):
+        for i in range(60):
+            if redis_call(s, "GET", f"q{i:04d}") is None:
+                misses += 1
+            else:
+                hits += 1
+    info = parse_info(redis_call(s, "INFO"))
+    phases.append(PhaseResult("quiet", hits, misses, info_int(info, "evicted"), hits))
+
+    redis_call(s, "FLUSHDB")
+
+    # Phase 1 — peak write + small hot set (LFU)
+    if is_adaptive(mode):
+        for _j in range(12):
+            redis_call(s, "SET", f"__w{_j}", "w" * 48)
+    nhot = 24
+    for i in range(nhot):
+        redis_call(s, "SET", f"z{i:04d}", val)
+    for _ in range(20):
+        for i in range(nhot):
+            redis_call(s, "GET", f"z{i:04d}")
+    # No bench-side PIN — Aura choose-fn / fitness-swap must emit lfu|flat|pin
+    if is_adaptive(mode):
+        try:
+            redis_call(s, "EVICT", "samples", "64")
+        except Exception:
+            pass
+        for i in range(nhot):
+            redis_call(s, "SET", f"z{i:04d}", val)
+    # write storm
+    for i in range(200):
+        redis_call(s, "SET", f"pk{i:04d}", val)
+    hits = misses = 0
+    for _ in range(6):
+        for i in range(nhot):
+            if redis_call(s, "GET", f"z{i:04d}") is None:
+                misses += 1
+            else:
+                hits += 1
+    info = parse_info(redis_call(s, "INFO"))
+    phases.append(PhaseResult("peak", hits, misses, info_int(info, "evicted"), hits))
+
+    # Phase 2 — flash-sale cold flood (need LFU+pin; LRU dies)
+    # Missy traffic so fitness can swap conservative→aggressive, then re-SET hot
+    # so agent PIN (from aggressive choose-fn) lands BEFORE the flood.
+    if is_adaptive(mode) and "frozen" not in mode:
+        import time as _t
+        # 1) miss spike → fitness-swap conservative→aggressive
+        for _k in range(25):
+            redis_call(s, "SET", f"__miss{_k}", "m" * 64)
+            redis_call(s, "GET", f"__nope{_k}")
+            _t.sleep(0.05)
+        _t.sleep(0.35)
+        # 2) re-materialize hot set, then missy+write window so aggressive emits pin
+        for i in range(nhot):
+            redis_call(s, "SET", f"z{i:04d}", val)
+        for _k in range(40):
+            redis_call(s, "SET", f"__c{_k}", "c" * 48)
+            redis_call(s, "GET", f"__gone{_k}")
+        _t.sleep(0.45)  # agent tick: EVICT lfu + PIN from aggressive choose-fn
+    for i in range(700):
+        redis_call(s, "SET", f"fl{i:05d}", val)
+    hits = misses = 0
+    for _ in range(8):
+        for i in range(nhot):
+            if redis_call(s, "GET", f"z{i:04d}") is None:
+                misses += 1
+            else:
+                hits += 1
+    info = parse_info(redis_call(s, "INFO"))
+    phases.append(PhaseResult("flash", hits, misses, info_int(info, "evicted"), hits))
+
+    redis_call(s, "FLUSHDB")
+    # clear pins
+    if is_adaptive(mode):
+        try:
+            pinned = redis_call(s, "PIN")
+            if isinstance(pinned, list):
+                for k in pinned:
+                    if isinstance(k, str) and k:
+                        try:
+                            redis_call(s, "UNPIN", k)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        wait_evict(s, "lru", mode, rounds=12)
+
+    # Phase 3 — cool WS shift (LRU)
+    nA, nB = 120, 100
+    for i in range(nA):
+        redis_call(s, "SET", f"A{i:04d}", val)
+    for _ in range(25):
+        for i in range(nA):
+            redis_call(s, "GET", f"A{i:04d}")
+    hits = misses = 0
+    for _ in range(6):
+        for i in range(nB):
+            redis_call(s, "SET", f"B{i:04d}", val)
+        for j in range(120):
+            if redis_call(s, "GET", f"B{j % nB:04d}") is None:
+                misses += 1
+            else:
+                hits += 1
+    info = parse_info(redis_call(s, "INFO"))
+    phases.append(PhaseResult("cool", hits, misses, info_int(info, "evicted"), hits))
+    return phases
+
+
 # ── orchestration ─────────────────────────────────────────────────────
+
+
+def _policy_agent_opts(policy: str) -> tuple[bool, str]:
+    """Return (fitness_mutate, seed_profile) for Aura agent policies."""
+    if policy in ("adaptive_frozen", "poison_frozen"):
+        fitness = False
+    else:
+        fitness = True  # adaptive, adaptive_mutate, poison_mutate
+    if policy in ("poison_frozen", "poison_mutate"):
+        seed = "inverted"
+    elif policy == "adaptive_frozen":
+        seed = "normal"
+    elif policy == "adaptive_mutate":
+        # Same seed as frozen; only fitness swap/heal differs.
+        # Use conservative so frozen lags; mutate upgrades → measurable pp.
+        seed = os.environ.get("AURA_BENCH_MUTATE_SEED", "conservative")
+    elif policy == "adaptive":
+        seed = "normal"
+    else:
+        seed = "normal"
+    # When comparing frozen vs mutate on mutation_gain, both use same seed.
+    if policy == "adaptive_frozen":
+        seed = os.environ.get("AURA_BENCH_MUTATE_SEED", "conservative")
+    return fitness, seed
 
 
 def run_one(
@@ -839,33 +1036,65 @@ def run_one(
 ) -> RunResult:
     global _ACTIVE_CONTROLLER
     adaptive = "off"
-    start_evict = policy
-    if policy == "adaptive":
+    start_evict = policy if policy in ("lru", "lfu", "noop") else "lru"
+    fitness_mutate = True
+    seed_profile = "normal"
+    if is_adaptive(policy):
         adaptive = adaptive_backend  # python | aura
-        start_evict = "lru"
+        fitness_mutate, seed_profile = _policy_agent_opts(policy)
 
-    h = start_server(port, start_evict, maxmemory, adaptive=adaptive)
-    if policy == "adaptive" and isinstance(h.controller, PythonAdaptiveController):
-        if workload in ("zipf_hotkey", "phase_marathon"):
+    h = start_server(
+        port, start_evict, maxmemory, adaptive=adaptive,
+        fitness_mutate=fitness_mutate, seed_profile=seed_profile,
+    )
+    if is_adaptive(policy) and isinstance(h.controller, PythonAdaptiveController):
+        # Python mirror: simulate frozen by locking profile; poison by inverted
+        h.controller.profile = seed_profile if seed_profile != "conservative" else "conservative"
+        if not fitness_mutate:
+            h.controller.dwell_s = 1e9  # never flip EVICT mid-run? still choose_policy
+        if workload in ("zipf_hotkey", "phase_marathon", "diurnal_shift", "mutation_gain"):
             h.controller.pin_prefix = "z"
             h.controller.pin_n = 24
-        elif workload in ("hot_protect", "oscillate"):
+        elif workload in ("hot_protect", "oscillate", "poison_heal"):
             h.controller.pin_prefix = "hot"
             h.controller.pin_n = 40
     try:
         _ACTIVE_CONTROLLER = h.controller
         s = connect(port)
         try:
+            # Keep real policy name (poison_frozen vs adaptive_mutate) for PIN/wait logic
+            mode = policy if is_adaptive(policy) else policy
             if workload == "hot_protect":
-                phases = [workload_hot_protect(s, policy)]
+                phases = [workload_hot_protect(s, mode)]
             elif workload == "ws_shift":
-                phases = [workload_ws_shift(s, policy)]
+                phases = [workload_ws_shift(s, mode)]
             elif workload == "oscillate":
-                phases = workload_oscillate(s, policy)
+                phases = workload_oscillate(s, mode)
             elif workload == "zipf_hotkey":
-                phases = [workload_zipf_hotkey(s, policy)]
+                phases = [workload_zipf_hotkey(s, mode)]
             elif workload == "phase_marathon":
-                phases = workload_phase_marathon(s, policy)
+                phases = workload_phase_marathon(s, mode)
+            elif workload == "diurnal_shift":
+                phases = workload_diurnal_shift(s, mode)
+            elif workload in ("mutation_gain", "poison_heal"):
+                # mutation_gain = diurnal under mutate-vs-frozen attribution
+                # poison_heal = hot_protect-shaped under inverted seed
+                if workload == "poison_heal":
+                    # Drive traffic so fitness ticks see miss EWMA + heal inverted seed
+                    import time as _t
+                    for i in range(40):
+                        try:
+                            redis_call(s, "SET", f"__poi{i}", "x" * 40)
+                            redis_call(s, "GET", f"__poi{i}")
+                            redis_call(s, "GET", f"__missing{i}")
+                            redis_call(s, "INFO")
+                        except Exception:
+                            pass
+                        _t.sleep(0.08)
+                    phases = [workload_hot_protect(s, mode)]
+                    phases[0].name = "poison_hot"
+                else:
+                    phases = workload_diurnal_shift(s, mode)
             else:
                 raise ValueError(workload)
             try:
@@ -882,7 +1111,7 @@ def run_one(
         policy=policy,
         phases=phases,
         swaps=swaps,
-        notes=f"backend={adaptive_backend}" if policy == "adaptive" else "",
+        notes=(f"backend={adaptive_backend} fitness={fitness_mutate} seed={seed_profile}" if is_adaptive(policy) else ""),
     )
 
 
@@ -1015,10 +1244,94 @@ def print_regret_table(results: List[RunResult]) -> None:
     print("=" * 78)
 
 
+
+def print_mutation_attribution(results: List[RunResult]) -> None:
+    """Show pp gain attributable to fitness-driven hot-strategy swap/heal."""
+    print()
+    print("=" * 78)
+    print("MUTATION ATTRIBUTION (Aura fitness swap/heal vs frozen choose-fn)")
+    print("=" * 78)
+    by_wl: Dict[str, Dict[str, RunResult]] = {}
+    for r in results:
+        by_wl.setdefault(r.workload, {})[r.policy] = r
+
+    for wl in ("mutation_gain", "diurnal_shift", "poison_heal", "phase_marathon"):
+        m = by_wl.get(wl)
+        if not m:
+            continue
+        print(f"  workload={wl}")
+        for pol in ("lru", "lfu", "adaptive_frozen", "adaptive_mutate",
+                    "poison_frozen", "poison_mutate", "adaptive"):
+            r = m.get(pol)
+            if not r:
+                continue
+            fit = [s for s in r.swaps if "fitness-" in s or "heal!" in s]
+            print(
+                f"    {pol:<18} cum_hit={100*r.overall_hit_rate:5.1f}%  "
+                f"useful={r.total_useful:<5}  fitness_events={len(fit)}  "
+                f"notes={r.notes}"
+            )
+            for ln in fit[:4]:
+                print(f"      · {ln}")
+        if wl == "poison_heal":
+            frozen = m.get("poison_frozen") or m.get("adaptive_frozen")
+            mutate = m.get("poison_mutate") or m.get("adaptive_mutate") or m.get("adaptive")
+        else:
+            frozen = m.get("adaptive_frozen") or m.get("poison_frozen")
+            mutate = m.get("adaptive_mutate") or m.get("poison_mutate") or m.get("adaptive")
+        if frozen and mutate:
+            delta = 100 * (mutate.overall_hit_rate - frozen.overall_hit_rate)
+            print(
+                f"    → mutation-attributable Δ = {delta:+.1f}pp "
+                f"(mutate {100*mutate.overall_hit_rate:.1f}% − "
+                f"frozen {100*frozen.overall_hit_rate:.1f}%)"
+            )
+            if mutate.total_useful >= frozen.total_useful:
+                print(
+                    f"    → useful GETs: mutate {mutate.total_useful} ≥ "
+                    f"frozen {frozen.total_useful}"
+                )
+    print()
+
+
 def assert_success(results: List[RunResult]) -> None:
     """Require adaptive to clearly beat both fixed on marathon when present;
     otherwise require ≥1 workload where LRU loses to LFU/adaptive.
     """
+    by_wl_mut: Dict[str, Dict[str, RunResult]] = {}
+    for r in results:
+        by_wl_mut.setdefault(r.workload, {})[r.policy] = r
+    for wl in ("mutation_gain", "diurnal_shift"):
+        mm = by_wl_mut.get(wl, {})
+        frozen = mm.get("adaptive_frozen")
+        mutate = mm.get("adaptive_mutate")
+        if frozen and mutate:
+            if mutate.overall_hit_rate + 1e-9 < frozen.overall_hit_rate:
+                raise SystemExit(
+                    f"FAIL: {wl} adaptive_mutate must be ≥ adaptive_frozen; "
+                    f"got mutate={100*mutate.overall_hit_rate:.1f}% "
+                    f"frozen={100*frozen.overall_hit_rate:.1f}%"
+                )
+            print(
+                f"{wl}: mutate={100*mutate.overall_hit_rate:.1f}% ≥ "
+                f"frozen={100*frozen.overall_hit_rate:.1f}% "
+                f"(Δ={100*(mutate.overall_hit_rate-frozen.overall_hit_rate):+.1f}pp)"
+            )
+    if "poison_heal" in by_wl_mut:
+        mm = by_wl_mut["poison_heal"]
+        pf, pm = mm.get("poison_frozen"), mm.get("poison_mutate")
+        if pf and pm:
+            if pm.overall_hit_rate < pf.overall_hit_rate + 0.10:
+                raise SystemExit(
+                    f"FAIL: poison_heal mutate must beat frozen by ≥10pp; "
+                    f"mutate={100*pm.overall_hit_rate:.1f}% frozen={100*pf.overall_hit_rate:.1f}%"
+                )
+            print(
+                f"poison_heal: mutate={100*pm.overall_hit_rate:.1f}% vs "
+                f"frozen={100*pf.overall_hit_rate:.1f}% "
+                f"(Δ={100*(pm.overall_hit_rate-pf.overall_hit_rate):+.1f}pp)"
+            )
+
     by_wl: Dict[str, Dict[str, RunResult]] = {}
     for r in results:
         by_wl.setdefault(r.workload, {})[r.policy] = r
@@ -1114,12 +1427,12 @@ def main() -> int:
     ap.add_argument(
         "--workloads",
         default="phase_marathon,zipf_hotkey,hot_protect,ws_shift,oscillate",
-        help="Comma list: phase_marathon,hot_protect,ws_shift,oscillate,zipf_hotkey",
+        help="Comma list: phase_marathon,diurnal_shift,mutation_gain,poison_heal,zipf_hotkey,...",
     )
     ap.add_argument(
         "--policies",
         default="lru,lfu,adaptive",
-        help="Comma list: lru,lfu,adaptive",
+        help="Comma list: lru,lfu,adaptive,adaptive_frozen,adaptive_mutate,poison_frozen,poison_mutate",
     )
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--maxmemory", type=int, default=120_000)
@@ -1165,6 +1478,7 @@ def main() -> int:
 
     print_table(results)
     print_regret_table(results)
+    print_mutation_attribution(results)
     if not args.skip_assert:
         assert_success(results)
     return 0

@@ -1,6 +1,6 @@
 # Runtime mutation exploration / 运行时变异探索
 
-**Status:** design exploration (2026-09-22)  
+**Status:** design exploration (2026-09-22) — **A–C in progress** (see [`mutation-gains.md`](mutation-gains.md) / M6 fitness swap+heal landed)  
 **Scope:** aura-redis only — Aura mutates **policy**; C executes **dumb kernels**.  
 **Do not:** grow aura-grok / Aura core for Redis-shaped prims.  
 **Companion:** [`aura-native-control.md`](aura-native-control.md) · [`workloads.md`](workloads.md) · [`architecture.md`](architecture.md)

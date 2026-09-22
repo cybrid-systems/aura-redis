@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Headline regret harness — phase_marathon cumulative hit% vs per-phase oracle.
+"""Headline regret + mutation_gain harness.
 
 DEFAULT adaptive control plane = Aura policy_agent.aura (Docker).
 Pass --python-ctl for the host-only Python mirror of choose_*.aura.
 
   python3 scripts/bench_regret.py
   python3 scripts/bench_regret.py phase_marathon,zipf_hotkey
-  python3 scripts/bench_regret.py phase_marathon --python-ctl
+  python3 scripts/bench_regret.py mutation_gain --  # frozen vs mutate
+  python3 scripts/bench_regret.py poison_heal
 """
 from __future__ import annotations
 
@@ -20,22 +21,40 @@ ROOT = Path(__file__).resolve().parents[1]
 def main() -> int:
     workloads = "phase_marathon,zipf_hotkey,oscillate"
     extra: list[str] = []
-    if len(sys.argv) > 1:
-        # First non-flag arg = workload list; remaining flags forward to bench.
-        if not sys.argv[1].startswith("-"):
-            workloads = sys.argv[1]
-            extra = sys.argv[2:]
-        else:
-            extra = sys.argv[1:]
+    policies = "lru,lfu,adaptive"
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        workloads = sys.argv[1]
+        extra = sys.argv[2:]
+    else:
+        extra = sys.argv[1:]
+
+    if workloads in ("mutation_gain", "diurnal_shift"):
+        policies = "lru,lfu,adaptive_frozen,adaptive_mutate"
+    elif workloads == "poison_heal":
+        policies = "lru,lfu,poison_frozen,poison_mutate"
+    elif "mutation_gain" in workloads or "diurnal_shift" in workloads:
+        # keep adaptive + frozen/mutate if user listed them
+        if "adaptive_frozen" not in ",".join(extra):
+            policies = "lru,lfu,adaptive_frozen,adaptive_mutate,adaptive"
+
     cmd = [
         sys.executable,
         str(ROOT / "scripts/bench_dynamic_evict.py"),
         "--workloads",
         workloads,
         "--policies",
-        "lru,lfu,adaptive",
+        policies,
         *extra,
     ]
+    # If user already passed --policies in extra, drop our default
+    if any(a == "--policies" or a.startswith("--policies=") for a in extra):
+        cmd = [
+            sys.executable,
+            str(ROOT / "scripts/bench_dynamic_evict.py"),
+            "--workloads",
+            workloads,
+            *extra,
+        ]
     print("bench_regret:", " ".join(cmd[2:]))
     return subprocess.call(cmd)
 
