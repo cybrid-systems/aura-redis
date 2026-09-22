@@ -77,9 +77,19 @@ static void sample_pick_lru(ArCore* db, ArEntry** best, size_t* best_b,
     if (!table || nb == 0)
       continue;
     size_t i = (size_t)(rand() % (int)nb);
-    for (ArEntry* e = table[i]; e && *samples < max_samples; e = e->next) {
-      if (e->pinned)
+    for (ArEntry* e = table[i]; e && *samples < max_samples; ) {
+      ArEntry* next = e->next;
+      /* P0.3: due TTL → expire (not eviction candidate) */
+      if (e->expire_at && ar_now_ms() >= e->expire_at) {
+        ar_entry_free_ex(db, i, use_cold ? 1 : 0, e);
+        db->expired++;
+        e = next;
         continue;
+      }
+      if (e->pinned) {
+        e = next;
+        continue;
+      }
       (*samples)++;
       if (e->last_access < *best_t) {
         *best_t = e->last_access;
@@ -87,6 +97,7 @@ static void sample_pick_lru(ArCore* db, ArEntry** best, size_t* best_b,
         *best_b = i;
         *best_tier = use_cold ? 1 : 0;
       }
+      e = next;
     }
   }
 }
@@ -103,9 +114,18 @@ static void sample_pick_lfu(ArCore* db, ArEntry** best, size_t* best_b,
     if (!table || nb == 0)
       continue;
     size_t i = (size_t)(rand() % (int)nb);
-    for (ArEntry* e = table[i]; e && *samples < max_samples; e = e->next) {
-      if (e->pinned)
+    for (ArEntry* e = table[i]; e && *samples < max_samples; ) {
+      ArEntry* next = e->next;
+      if (e->expire_at && ar_now_ms() >= e->expire_at) {
+        ar_entry_free_ex(db, i, use_cold ? 1 : 0, e);
+        db->expired++;
+        e = next;
         continue;
+      }
+      if (e->pinned) {
+        e = next;
+        continue;
+      }
       (*samples)++;
       if (e->lfu_freq < *best_f ||
           (e->lfu_freq == *best_f && e->last_access < *best_t)) {
@@ -115,6 +135,7 @@ static void sample_pick_lfu(ArCore* db, ArEntry** best, size_t* best_b,
         *best_b = i;
         *best_tier = use_cold ? 1 : 0;
       }
+      e = next;
     }
   }
 }
@@ -213,9 +234,18 @@ static void sample_pick_ttl_aware(ArCore* db, ArEntry** best, size_t* best_b,
     if (!table || nb == 0)
       continue;
     size_t i = (size_t)(rand() % (int)nb);
-    for (ArEntry* e = table[i]; e && *samples < max_samples; e = e->next) {
-      if (e->pinned)
+    for (ArEntry* e = table[i]; e && *samples < max_samples; ) {
+      ArEntry* next = e->next;
+      if (e->expire_at && ar_now_ms() >= e->expire_at) {
+        ar_entry_free_ex(db, i, use_cold ? 1 : 0, e);
+        db->expired++;
+        e = next;
         continue;
+      }
+      if (e->pinned) {
+        e = next;
+        continue;
+      }
       (*samples)++;
       if (e->expire_at) {
         if (!*found_ttl || e->expire_at < *best_exp ||
@@ -237,6 +267,7 @@ static void sample_pick_ttl_aware(ArCore* db, ArEntry** best, size_t* best_b,
           *best_tier = use_cold ? 1 : 0;
         }
       }
+      e = next;
     }
   }
 }
@@ -845,8 +876,41 @@ int64_t ar_ttl(ArCore* core, const char* key, size_t klen) {
     return -1;
   uint64_t now = ar_now_ms();
   if (now >= e->expire_at)
-    return -2; /* should have been lazy-deleted */
+    return -2; /* unreachable if find lazy-deletes */
   return (int64_t)((e->expire_at - now + 999) / 1000);
+}
+
+/* P0.3: sample random buckets; free expired keys (active expire). */
+int ar_core_active_expire(ArCore* core, int effort) {
+  if (!core || effort <= 0 || core->nkeys == 0)
+    return 0;
+  if (effort > 64)
+    effort = 64;
+  int freed = 0;
+  uint64_t now = ar_now_ms();
+  for (int s = 0; s < effort; ++s) {
+    int use_cold = (core->layout == AR_LAYOUT_HOT_COLD && core->cold_buckets &&
+                    core->cold_nkeys > 0 && (s & 1));
+    ArEntry** table = use_cold ? core->cold_buckets : core->buckets;
+    size_t nb = use_cold ? core->cold_nbuckets : core->nbuckets;
+    if (!table || nb == 0)
+      continue;
+    size_t b = (size_t)(rand() % (int)nb);
+    int tier = use_cold ? 1 : 0;
+    ArEntry* e = table[b];
+    while (e) {
+      ArEntry* next = e->next;
+      if (e->expire_at && now >= e->expire_at) {
+        ar_entry_free_ex(core, b, tier, e);
+        core->expired++;
+        freed++;
+        /* one expiry credit per sampled bucket (Redis-ish effort) */
+        break;
+      }
+      e = next;
+    }
+  }
+  return freed;
 }
 
 char* ar_get_bin(ArCore* core, const char* key, size_t klen, size_t* out_len) {

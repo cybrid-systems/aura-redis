@@ -846,6 +846,9 @@ int ar_core_listen(ArCore* core, int port) {
 }
 
 static int serve_once(ArCore* core, int timeout_ms) {
+  /* P0.3: active expire between epoll wakes (also on idle timeout). */
+  if (core->keys_with_ttl)
+    ar_core_active_expire(core, 16);
   struct epoll_event events[AR_MAX_EVENTS];
   int n = epoll_wait(core->epfd, events, AR_MAX_EVENTS, timeout_ms);
   if (n < 0) {

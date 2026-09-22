@@ -122,6 +122,10 @@ uint64_t ar_core_pinned_keys(ArCore* core);
 size_t ar_core_list_pinned(ArCore* core, char** out_keys, size_t max_out);
 uint64_t ar_core_nkeys(ArCore* core);
 
+/* P0.3 — active expire sampling (Redis-ish). Walks random buckets and frees
+ * keys past expire_at. Returns number expired this call. effort ≈ samples. */
+int ar_core_active_expire(ArCore* core, int effort);
+
 /* M12 — per-prefix policy namespace hints */
 int ar_core_policy_set(ArCore* core, const char* prefix, const char* profile);
 /* Write "pfx:=prof;..." into buf; returns length (excl NUL). */
