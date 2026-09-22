@@ -65,3 +65,15 @@ python3 scripts/bench_regret.py poison_heal
 - [`high-roi-iterations.md`](high-roi-iterations.md) — M6–M12
 - [`runtime-mutation-explore.md`](runtime-mutation-explore.md) — axes A–C
 - [`mvp-plan.md`](mvp-plan.md)
+
+
+## M7 — threshold string mutation
+
+Aura rebuilds the choose-fn **body string** with lowered `min-ops` / `miss-pin`
+and `hot-strategy:swap!`s it (not a Python mutator):
+
+```text
+policy_agent: fitness-threshold-mutate min-ops=40→28 miss-pin=30→22 reason=fitness result=(#t 4 3)
+```
+
+Tried before profile swap when seed is normal/conservative/thresholded.

@@ -6,7 +6,7 @@ DEFAULT. Do not grow aura-grok for Redis-shaped prims.
 | ID | Theme | Status | Exit |
 |----|-------|--------|------|
 | **M6** | Fitness-driven hot-strategy swap/heal + mutation_gain vs frozen | **DONE** | +14.8pp mutation_gain; +100pp poison_heal; log proof swap/heal |
-| **M7** | Threshold string mutation (min-ops / ratios in choose-fn body) | next | Aura rewrites numeric thresholds under fitness; frozen thresholds lose on noisy diurnal |
+| **M7** | Threshold string mutation (min-ops / ratios in choose-fn body) | **DONE** (with M6 follow-on) | `fitness-threshold-mutate min-ops=40→28` via hot-strategy:swap! of rebuilt body |
 | **M8** | `diurnal_shift` harness (quiet→peak→flash→cool) | **DONE** (with M6) | used as mutation_gain workload; regret vs fixed |
 | **M9** | TTL-aware kernel + EXPIRE (or stub) | pending | Aura chooses `ttl_aware` on ttl_wave; stub EXPIRE+lazy expire if full TTL hard |
 | **M10** | Soft-goal choose (hit% s.t. evict CPU) | pending | refuse expensive kernel over budget |

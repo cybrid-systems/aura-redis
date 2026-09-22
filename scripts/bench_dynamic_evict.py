@@ -411,7 +411,8 @@ class AuraAgentController:
                 continue
             if ("EVICT" in ln and "→" in ln) or "LAYOUT" in ln or "PIN" in ln or "UNPIN" in ln:
                 self.swaps.append(ln.strip())
-            if "fitness-swap" in ln or "fitness-heal" in ln or "hot-strategy:heal!" in ln:
+            if ("fitness-swap" in ln or "fitness-heal" in ln or "fitness-threshold-mutate" in ln
+                    or "hot-strategy:heal!" in ln):
                 self.fitness_events.append(ln.strip())
                 self.swaps.append(ln.strip())
 

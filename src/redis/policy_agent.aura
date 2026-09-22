@@ -52,6 +52,9 @@
 (define *post-swap-bad* 0)
 (define *fitness-swaps* 0)
 (define *fitness-heals* 0)
+(define *thresh-min-ops* 40)
+(define *thresh-miss-pin* 30)
+(define *threshold-mutates* 0)
 (define *phase-hint* "unknown")
 
 (define *prev-gets* 0)
@@ -252,6 +255,65 @@
     ((string=? name "broken") *policy-choose-broken*)
     (else *policy-choose-normal*)))
 
+;; M7 — mutate numeric thresholds inside choose-fn body string (Aura-native)
+(define (build-threshold-body min-ops miss-pin)
+  (string-append
+    "(lambda (dgets dsets dhits dmisses devicted nkeys) "
+    "(let ((ops (+ dgets dsets))) "
+    "(if (< ops " (number->string min-ops) ") \"\" "
+    "(let ((hit-pct (if (> (+ dhits dmisses) 0) "
+    "(quotient (* 100 dhits) (+ dhits dmisses)) 0)) "
+    "(miss-pct (if (> (+ dhits dmisses) 0) "
+    "(quotient (* 100 dmisses) (+ dhits dmisses)) 0))) "
+    "(cond "
+    "((and (>= dsets dgets) (> miss-pct " (number->string miss-pin) ") (> nkeys 0)) "
+    "\"lfu|flat|pin\") "
+    "((> dsets (* dgets 2)) \"lfu|flat\") "
+    "((and (> devicted 0) (> miss-pct " (number->string (+ miss-pin 10)) ")) "
+    "\"lfu|flat|pin\") "
+    "((and (> dgets (* dsets 3)) (>= hit-pct 50)) \"lru|flat\") "
+    "((and (> dgets (* dsets 2)) (< hit-pct 55) (> miss-pct 15)) \"lru|flat\") "
+    "((and (> dgets (* dsets 5)) (>= hit-pct 60)) \"lru|flat\") "
+    "(else \"\"))))))"))
+
+(define (do-fitness-threshold-mutate! reason)
+  (let ((old-min *thresh-min-ops*)
+        (old-miss *thresh-miss-pin*)
+        (new-min (if (> *thresh-min-ops* 18) (- *thresh-min-ops* 12) *thresh-min-ops*))
+        (new-miss (if (> *thresh-miss-pin* 16) (- *thresh-miss-pin* 8) *thresh-miss-pin*)))
+    (if (and (= new-min old-min) (= new-miss old-miss))
+      #f
+      (if (not (mutate:boundary-safe?))
+        (begin
+          (display "policy_agent: skip threshold-mutate (boundary not safe)\n")
+          #f)
+        (begin
+          (mutate:safety-snapshot)
+          (set! *thresh-min-ops* new-min)
+          (set! *thresh-miss-pin* new-miss)
+          (let ((body (build-threshold-body new-min new-miss))
+                (r #f))
+            (set! r (hot-strategy:swap! "choose-fn" body "fitness-thresholds"))
+            (display "policy_agent: fitness-threshold-mutate min-ops=")
+            (display old-min)
+            (display "→")
+            (display new-min)
+            (display " miss-pin=")
+            (display old-miss)
+            (display "→")
+            (display new-miss)
+            (display " reason=")
+            (display reason)
+            (display " result=")
+            (display r)
+            (newline)
+            (set! *threshold-mutates* (+ *threshold-mutates* 1))
+            (set! *swaps* (+ *swaps* 1))
+            (set! *fitness-swaps* (+ *fitness-swaps* 1))
+            (set! *ticks-since-fitness* 0)
+            (set! *profile-name* "thresholded")
+            #t))))))
+
 (define (phase-hint-of dgets dsets dhits dmisses)
   (cond
     ((and (>= dsets dgets) (> dmisses dhits)) "miss_spike")
@@ -374,8 +436,14 @@
                            (else "fitness"))))
              (if (string=? to *profile-name*)
                (do-fitness-heal! reason)
-               (do-fitness-swap! to reason))))
-          (else #f))))))
+               (if (or (string=? *profile-name* "normal")
+                       (string=? *profile-name* "conservative")
+                       (string=? *profile-name* "thresholded"))
+                 (if (do-fitness-threshold-mutate! reason)
+                   #t
+                   (do-fitness-swap! to reason))
+                 (do-fitness-swap! to reason))))
+          (else #f)))))))
 
 (define (maybe-reload-profile!)
   (if (or (not (string? *profile-file*)) (= (string-length *profile-file*) 0))
@@ -682,6 +750,8 @@
 (display *fitness-swaps*)
 (display " fitness-heals=")
 (display *fitness-heals*)
+(display " threshold-mutates=")
+(display *threshold-mutates*)
 (display " profile=")
 (display *profile-name*)
 (newline)
