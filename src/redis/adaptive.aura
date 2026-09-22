@@ -2,12 +2,12 @@
 ;
 ; Policy rules (windowed deltas; keep in sync with adaptive_body.aura and the
 ; inlined tick in server_ffi.aura):
-;   1. Ignore windows with fewer than *ad-min-ops* ops (noise).
-;   2. Write-heavy:  if sets > gets * 2            → prefer "lfu"
-;   3. Read-heavy:   if gets > sets * 5 AND
-;                    hit_rate_pct >= 60            → prefer "lru"
-;   4. Otherwise keep the current strategy.
+;   1. Ignore windows with fewer than *ad-min-ops* ops (now 40).
+;   2. Write-ish + miss spike: sets≥gets AND miss>30% → prefer "lfu"
+;   3. Classic write-heavy: sets > gets * 2 → prefer "lfu"
+;   4. Read-heavy: gets > sets * 3 AND hit≥50% → prefer "lru"
 ;   5. Hysteresis: *ad-votes-need* consecutive votes + *ad-cooldown-ms*.
+; Joint EVICT|LAYOUT|PIN lives in choose_*.aura / policy_agent (not this FFI file).
 ;
 ; Usage:
 ;   - Unit tests (no FFI): (require "src/redis/adaptive" all:)

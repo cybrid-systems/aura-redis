@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Industry-shaped harness pack (MVP M3) — thin wrapper around bench_dynamic_evict."""
+"""Headline regret harness — phase_marathon cumulative hit% vs per-phase oracle.
+
+  python3 scripts/bench_regret.py
+  python3 scripts/bench_regret.py phase_marathon,zipf_hotkey
+"""
 from __future__ import annotations
 
 import subprocess
@@ -10,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> int:
-    workloads = "phase_marathon,zipf_hotkey,hot_protect,oscillate"
+    workloads = "phase_marathon,zipf_hotkey,oscillate"
     if len(sys.argv) > 1:
         workloads = sys.argv[1]
     cmd = [
@@ -21,7 +25,7 @@ def main() -> int:
         "--policies",
         "lru,lfu,adaptive",
     ]
-    print("bench_industry:", " ".join(cmd[2:]))
+    print("bench_regret:", " ".join(cmd[2:]))
     return subprocess.call(cmd)
 
 

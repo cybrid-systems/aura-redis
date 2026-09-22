@@ -162,6 +162,32 @@
                     #t)))))))
       result)))
 
+
+; ── pin helpers (best-effort; PIN list is RESP array — agent may not parse it) ──
+(define (pad4 n)
+  (cond
+    ((< n 10) (string-append "000" (number->string n)))
+    ((< n 100) (string-append "00" (number->string n)))
+    ((< n 1000) (string-append "0" (number->string n)))
+    (else (number->string n))))
+
+(define (pin-prefix-set! sock prefix n)
+  (let ((i 0))
+    (while (< i n)
+      (begin
+        ; ignore missing-key errors — redis-call! returns ERR string
+        (redis-call! sock "PIN" (string-append prefix (pad4 i)))
+        (set! i (+ i 1))))
+    #t))
+
+(define (unpin-prefix-set! sock prefix n)
+  (let ((i 0))
+    (while (< i n)
+      (begin
+        (redis-call! sock "UNPIN" (string-append prefix (pad4 i)))
+        (set! i (+ i 1))))
+    #t))
+
 ; ── seed choose-fn in workspace for hot-strategy ──
 (display "policy_agent: seeding choose-fn (hot-strategy)\n")
 (set-code "(define (choose-fn dgets dsets dhits dmisses devicted nkeys) \"\")")
@@ -296,11 +322,25 @@
                               (redis-call! *sock* "LAYOUT" ly-name)
                               (set! *applies* (+ *applies* 1)))
                             #t)
+                          ; On LRU: drop stale pins so WS shift is not glued to set A
+                          (if (string=? ev-name "lru")
+                            (begin
+                              (display "policy_agent: UNPIN stale hot/z prefixes\n")
+                              (unpin-prefix-set! *sock* "hot" 40)
+                              (unpin-prefix-set! *sock* "z" 24)
+                              #t)
+                            #t)
                           (if want-pin
                             (begin
-                              (display "policy_agent: pin hint (policy)\n")
-                              ; Best-effort: bump samples under pressure
-                              (redis-call! *sock* "EVICT" "samples" "32")
+                              (display "policy_agent: PIN hot set + samples=64\n")
+                              (redis-call! *sock* "EVICT" "samples" "64")
+                              ; Prefer flat during pin-protect (avoid migrate hurt)
+                              (if (not (string=? cur-layout "flat"))
+                                (redis-call! *sock* "LAYOUT" "flat")
+                                #t)
+                              (pin-prefix-set! *sock* "hot" 40)
+                              (pin-prefix-set! *sock* "z" 24)
+                              (set! *applies* (+ *applies* 1))
                               #t)
                             #t))))
                     #t)))))))

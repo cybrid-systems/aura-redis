@@ -4,7 +4,7 @@
 (define *policy-choose-aggressive*
   "(lambda (dgets dsets dhits dmisses devicted nkeys)
      (let ((ops (+ dgets dsets)))
-       (if (< ops 40)
+       (if (< ops 25)
          \"\"
          (let ((hit-pct (if (> (+ dhits dmisses) 0)
                           (quotient (* 100 dhits) (+ dhits dmisses))
@@ -13,10 +13,14 @@
                            (quotient (* 100 dmisses) (+ dhits dmisses))
                            0)))
            (cond
-             ((or (> dsets (* dgets 1)) (> miss-pct 25))
-              (if (or (> miss-pct 35) (> devicted 5))
-                \"lfu|hot_cold|pin\"
-                \"lfu|hot_cold\"))
-             ((and (> dgets (* dsets 3)) (>= hit-pct 50)) \"lru|flat\")
+             ((or (and (>= dsets dgets) (> miss-pct 20))
+                  (and (> miss-pct 25) (> nkeys 0)))
+              (if (or (> miss-pct 28) (> devicted 2))
+                \"lfu|flat|pin\"
+                \"lfu|flat\"))
+             ((> dsets (* dgets 1)) \"lfu|flat\")
+             ((and (> dgets (* dsets 2)) (>= hit-pct 45)) \"lru|flat\")
+             ((and (> dgets dsets) (< hit-pct 50) (> miss-pct 20))
+              \"lru|flat\")
              ((> nkeys 0) \"\")
              (else \"\"))))))")

@@ -14,6 +14,7 @@ Chosen names are applied to the C data plane via RESP **`EVICT`** / **`LAYOUT`**
 (lambda (dgets dsets dhits dmisses [devicted nkeys]) …)
   → "" | "lfu" | "lru" | "noop"
   → "lfu|hot_cold" | "lru|flat"     # joint EVICT+LAYOUT
+  → "lfu|flat|pin"              # pin on miss spike (flat: no migrate hurt)
   → "lfu|hot_cold|pin"              # optional pin hint
 ```
 

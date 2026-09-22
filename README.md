@@ -58,7 +58,8 @@ python3 tests/test_layout.py                # flat↔hot_cold migrate under load
 ./scripts/build-native.sh
 ./scripts/demo-mvp.sh                 # ~2 min: LRU lose → Aura adaptive win → WS shift
 python3 tests/test_mvp.py
-python3 scripts/bench_dynamic_evict.py --workloads zipf_hotkey,oscillate
+python3 scripts/bench_regret.py          # HEADLINE: phase_marathon cum hit% / regret
+python3 scripts/bench_dynamic_evict.py --workloads phase_marathon,zipf_hotkey,oscillate
 ```
 
 Under Meta-like hot-key / Zipf pressure, **static LRU hit% collapses**; Aura-mutated
@@ -77,7 +78,7 @@ source scripts/sandbox-policy-profile.sh   # DENY_PLUGIN=1; no ffi required for 
 
 Story: mutate `choose-fn` under sandbox → `EVICT lru|lfu|noop`. Not “swap a .so”.
 
-**Perf (2026-09-22 e2e):** C data plane memtier vs Redis **~1.15–1.35×** (lru/adaptive); Lisp ~14 ops/s. Adaptive wins hit% on `hot_protect`/`oscillate`; fixed LRU fine on `ws_shift`. Full tables: [`docs/perf-eval.md`](docs/perf-eval.md). Also [`docs/perf-log.md`](docs/perf-log.md), [`docs/workloads.md`](docs/workloads.md).
+**Perf (2026-09-22 e2e):** C data plane memtier vs Redis **~1.15–1.35×** (lru/adaptive); Lisp ~14 ops/s. Adaptive wins **cumulative** hit% on `phase_marathon` (+18pp vs LRU, +54pp vs LFU); zipf adaptive≈LFU (0pp regret). Do not cite adaptive for throughput. Full tables: [`docs/perf-eval.md`](docs/perf-eval.md). Also [`docs/perf-log.md`](docs/perf-log.md), [`docs/workloads.md`](docs/workloads.md).
 
 Loopback bind **127.0.0.1** for both engines (documented).
 

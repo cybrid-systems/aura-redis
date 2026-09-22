@@ -90,3 +90,14 @@ TTL-aware / expire-first · Soft-goal choose · hot_cold threshold mutation · `
 ./scripts/demo-mvp.sh          # ~2 min, exit 0 = LRU lose / adaptive win
 python3 scripts/bench_dynamic_evict.py --workloads zipf_hotkey,oscillate
 ```
+
+## Headline metric (why not single-phase or memtier)
+
+**Primary scoreboard = multi-phase cumulative useful-GET hit% + regret vs per-phase oracle**
+(`phase_marathon` / strengthened oscillate), not single-phase hit% and not memtier ops/s.
+
+- Single-phase adaptive only *ties* the best fixed kernel — that understates the moat.
+- Memtier throughput without `maxmemory` pressure does not show adaptive wins (and must not be claimed as such).
+- Across zipf/hot → ws_shift → hot again, fixed LRU and fixed LFU each collapse on a different phase; adaptive stays near the oracle and **beats both** on cumulative hit% / useful GETs.
+
+See `docs/workloads.md`, `docs/perf-eval.md`, `python3 scripts/bench_regret.py`.

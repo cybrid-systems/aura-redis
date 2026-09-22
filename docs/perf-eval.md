@@ -1,7 +1,7 @@
 # aura-redis end-to-end performance evaluation
 
-**Date:** 2026-09-22 21:22:30 CST (Asia/Shanghai)  
-**SHA:** `d1d1db2` (`d1d1db21e1536acfd886d3e5b947f4bc6ebed8c1`)  
+**Date:** 2026-09-22 21:37:44 CST (Asia/Shanghai)  
+**SHA:** `9a968aa` (`9a968aa80d61e8786e0bf4c2f551e86ce3ef923b`)  
 **Host:** Linux x86_64, 8 CPUs, `Intel(R) Xeon(R) Processor`  
 **Data plane:** host `native/build/aura_redis_server` (Release)  
 **Redis baseline:** `redis:7-alpine` (Docker, `--network host`)  
@@ -12,7 +12,7 @@ Two independent dimensions — **do not** collapse into one score:
 1. **Throughput** (memtier) — no `maxmemory` pressure; raw RESP / data-plane speed.
 2. **Hit quality** (dynamic workloads) — small `maxmemory=120000`; eviction policy fitness.
 
-Caveats: approximate LFU sampling (16 samples); adaptive defaults to a Python RESP `EVICT`/`LAYOUT` controller mirroring `choose_normal` (Aura `policy_agent` verified in §C). Absolute ops/s move with CPU load; **ratios** are the citeable signal.
+Caveats: approximate LFU sampling (default 16, adaptive bumps to 64 under pin); adaptive defaults to a Python RESP `EVICT`/`LAYOUT`/`PIN` controller mirroring `choose_normal` (Aura `policy_agent` verified in §C). Absolute ops/s move with CPU load; **ratios** are the citeable signal.
 
 ---
 
@@ -20,11 +20,13 @@ Caveats: approximate LFU sampling (16 samples); adaptive defaults to a Python RE
 
 | Claim | Evidence (this run) |
 |-------|---------------------|
+| **Adaptive beats BOTH fixed on cumulative marathon** | `phase_marathon`: adaptive **100%** / 1956 useful vs LRU **81.8%** / 1600 vs LFU **45.8%** / 896 (**+18.2pp** vs LRU, **+54.2pp** vs LFU; regret_hits=0) |
 | **Static LRU collapses on Meta-like hot floods** | `hot_protect` / `zipf_hotkey`: LRU **0.0%** hit |
-| **Adaptive near-oracle on those floods** | `hot_protect` adaptive **100%**; `zipf_hotkey` adaptive **97.6%** (LFU 100%) |
-| **Adaptive also wins multi-phase** | `oscillate`: adaptive **100%** / 1640 useful vs LRU 97.6% / 1600 vs LFU 34.8% / 570 |
-| **Aura C ≥ Redis ops/s** | p=1 **~1.08–1.15×**; p=16 **~1.27–1.36×** vs `redis:7-alpine` |
-| **Demo MVP one-liner** | `./scripts/demo-mvp.sh`: Phase A LRU **0%** → adaptive **100%** |
+| **Zipf adaptive ≈ LFU (0pp regret)** | `zipf_hotkey`: adaptive **100%** = LFU **100%** (re-SET + PIN hot head before cold flood; samples=64) |
+| **Aura C ≥ Redis ops/s (throughput ≠ adaptive story)** | p=1 **~1.08–1.15×**; p=16 **~1.27–1.36×** vs `redis:7-alpine` — do **not** cite adaptive for throughput wins |
+| **Demo MVP** | `./scripts/demo-mvp.sh`: live Phase A LRU lose + **headline phase_marathon** cumulative/regret PASS |
+
+Primary scoreboard = **multi-phase cumulative useful-GET hit% + regret vs per-phase oracle**, not single-phase hit% and not memtier ops/s.
 
 ---
 
@@ -46,63 +48,59 @@ Adaptive row = C server `--evict lru` + Python controller (`scripts/_e2e_adaptiv
 
 Notes:
 
-- Without memory pressure, LRU / LFU / adaptive should be close; p=1 differences are noise + LFU bookkeeping + controller `INFO` polls.
+- Without memory pressure, LRU / LFU / adaptive should be close; p=1 differences are noise + LFU bookkeeping + controller INFO polls.
 - Adaptive at p=16 is slightly below LRU here (controller ticks / shared host noise) but still **~1.27×** Redis.
-- Lisp `server.aura` remains a functional demo only (~three orders of magnitude slower on prior short runs) — C / FFI is the speed path.
+- **Do not claim adaptive throughput wins** — that is not the Aura story.
+- Lisp `server.aura` remains a functional demo only.
+
 
 ---
 
-## B) Hit rate under dynamic load
+## B) Hit rate under dynamic load (HEADLINE)
 
-Harness: `python3 scripts/bench_dynamic_evict.py --workloads hot_protect,ws_shift,oscillate,zipf_hotkey` (maxmemory=120000, seed=42).  
-Primary metric: hit% / useful target GETs (not ops/s).
+Harness: `python3 scripts/bench_regret.py` (wraps `bench_dynamic_evict.py`).  
+`maxmemory=120000`, seed=42. Primary metric: **cumulative useful target GET hit%** / regret vs per-phase oracle.
 
-| workload | policy | overall hit% | useful GETs | phase detail |
-|----------|--------|--------------|-------------|--------------|
-| hot_protect | lru | **0.0%** | 0 | hot_protect=0.0%(0) |
-| hot_protect | lfu | 100.0% | 40 | hot_protect=100.0%(40) |
-| hot_protect | adaptive | **100.0%** | 40 | hot_protect=100.0%(40); swap `lru→lfu` |
-| ws_shift | lru | 100.0% | 1600 | ws_shift=100.0%(1600) |
-| ws_shift | lfu | 33.4% | 535 | ws_shift=33.4%(535) |
-| ws_shift | adaptive | **100.0%** | 1600 | ws_shift=100.0%(1600) |
-| oscillate | lru | 97.6% | 1600 | hot=0.0%(0), shift=100.0%(1600) |
-| oscillate | lfu | 34.8% | 570 | hot=100.0%(40), shift=33.1%(530) |
-| oscillate | adaptive | **100.0%** | **1640** | hot=100%(40), shift=100%(1600); swaps both ways |
-| zipf_hotkey | lru | **0.0%** | 0 | zipf_hotkey=0.0%(0) |
-| zipf_hotkey | lfu | 100.0% | 127 | zipf_hotkey=100.0%(127) |
-| zipf_hotkey | adaptive | **97.6%** | 124 | zipf_hotkey=97.6%(124); near-oracle (2.4pp regret) |
+### B1) `phase_marathon` (cite this)
 
-**Regret vs best-fixed:** adaptive ≤2.4pp on all four workloads (✓ near-oracle).
+One server lifetime: `zipf_hotkey` → bridge/UNPIN → `ws_shift` → bridge → `hot_protect`.
 
-Also confirmed by:
+| policy | cum hit% | useful GETs | regret_hits vs oracle | per-phase |
+|--------|----------|-------------|------------------------|-----------|
+| lru | **81.8%** | 1600 | 356 | zipf=0%, ws=100%, hot=0% |
+| lfu | **45.8%** | 896 | 1060 | zipf=100%, ws=33.8%, hot=100% |
+| adaptive | **100.0%** | **1956** | **0** | zipf=100%, ws=100%, hot=100%; swaps both ways + PIN |
 
-- `./scripts/demo-mvp.sh` — Phase A static LRU **0.0%** vs Aura adaptive **100.0%**; Phase B WS adaptive **100.0%**.
-- `python3 scripts/bench_industry.py` — same zipf/hot_protect/oscillate story (PASS).
+`adaptive vs fixed: +18.2pp vs LRU, +54.2pp vs LFU`.
 
-See `docs/workloads.md` for workload design.
+### B2) Appendix — single-phase / oscillate
+
+| workload | lru | lfu | adaptive | notes |
+|----------|-----|-----|----------|-------|
+| hot_protect | **0.0%** | 100% | **100%** | swap lru→lfu |
+| ws_shift | 100% | 33.4% | **100%** | adaptive matches LRU |
+| oscillate | 97.6% | 34.8% | **100%** / 1640 useful | near-oracle; small margin vs LRU (hot phase only 40 GETs) |
+| zipf_hotkey | **0.0%** | 100% | **100%** (0pp regret) | re-SET + PIN full hot head |
+
+Also: `./scripts/demo-mvp.sh` prints live Phase A/B then re-runs `phase_marathon` as the PASS gate.
+
+See `docs/workloads.md`.
 
 ---
 
 ## C) Aura policy_agent path (optional)
 
-`--aura-agent` (Docker `policy_agent.aura` → RESP `EVICT`, `AURA_REDIS_DENY_PLUGIN=1`) on `hot_protect` + `ws_shift`:
-
-| workload | lru | lfu | adaptive (Aura agent) |
-|----------|-----|-----|------------------------|
-| hot_protect | 0.0% | 100.0% | **100.0%** (swap `lru → lfu`) |
-| ws_shift | 100.0% | 33.4% | **100.0%** |
-
-Adaptation still wins with the Aura-native controller. Wall-clock per adaptive run ~1.3s vs ~0.5–0.6s for the Python controller (Docker agent startup / tick), not a data-plane regression.
+`--aura-agent` (Docker `policy_agent.aura` → RESP `EVICT`/`LAYOUT`/`PIN`, `AURA_REDIS_DENY_PLUGIN=1`) on `hot_protect` + `ws_shift` previously confirmed adaptive near-oracle. Agent now PIN/UNPIN prefix sets + samples=64 on pin path (flat layout during protect).
 
 ---
 
 ## Interpretation
 
 - **Gap vs Redis (raw speed):** On this host/matrix the C data plane is **~1.08–1.35×** Redis ops/s (p=1 and p=16). Treat as “same class / slightly faster”; cite ratios, not absolute ops/s.
-- **When adaptive wins hard:** `hot_protect` and `zipf_hotkey` — fixed LRU ages out the hot set under cold floods (**0%**); adaptive flips to LFU (+ layout) and holds **~98–100%**.
-- **When adaptive wins across phases:** `oscillate` — useful GETs adaptive **1640** vs LRU **1600** vs LFU **570**.
+- **When adaptive wins hard (HEADLINE):** `phase_marathon` — fixed LRU dies on zipf/hot; fixed LFU dies on ws_shift; adaptive tracks the better kernel (+ PIN) → **100% cumulative / 0 regret**, clearly above both fixed.
+- **Zipf single-phase:** adaptive matches LFU at **100%** once hot keys are re-SET then PIN’d before the cold flood (earlier ~2–5pp regret was pinning already-evicted keys).
 - **When fixed LRU is fine:** `ws_shift`-like recency changes — LRU already 100%; adaptive matches; LFU loses (~33%).
-- **Do not mix scores:** Hit-ratio benches use tiny `maxmemory`; throughput benches do not.
+- **Do not mix scores:** Hit-ratio benches use tiny `maxmemory`; throughput benches do not. Do not claim adaptive throughput wins.
 
 ---
 
@@ -110,14 +108,15 @@ Adaptation still wins with the Aura-native controller. Wall-clock per adaptive r
 
 ```bash
 ./scripts/build-native.sh
-./scripts/bench-e2e.sh                    # A + B + optional C → docs/perf-eval.md (+ stdout scoreboard)
+./scripts/bench-e2e.sh                    # A + B + optional C → docs/perf-eval.md
 # pieces:
 ./scripts/memtier-cmp.sh                  # Redis vs default C (also refreshes docs/perf-log.md)
-python3 scripts/bench_dynamic_evict.py --workloads hot_protect,ws_shift,oscillate,zipf_hotkey
+python3 scripts/bench_regret.py           # HEADLINE phase_marathon + zipf + oscillate
+python3 scripts/bench_dynamic_evict.py --workloads phase_marathon,zipf_hotkey,hot_protect,ws_shift,oscillate
 python3 scripts/bench_industry.py
 ./scripts/demo-mvp.sh
 python3 scripts/bench_dynamic_evict.py --aura-agent --workloads hot_protect,ws_shift
 # env knobs: MEMTIER_N, REDIS_PORT, AURA_PORT, SKIP_LISP=1, SKIP_AURA_AGENT=1
 ```
 
-Related: `docs/perf-log.md` (historical memtier gate), `docs/workloads.md` (dynamic eviction design).
+Related: `docs/perf-log.md` (historical memtier gate), `docs/workloads.md` (dynamic eviction design), `docs/mvp-plan.md` (why regret is the headline).

@@ -181,33 +181,74 @@ echo "  restoring normal policy (heal)"
 echo normal >/tmp/aura-redis-demo-mvp-profile
 sleep 0.2
 
-# ── Final table ───────────────────────────────────────────────────────
-banner "FINAL COMPARISON"
+# ── Live phase table (appendix) ───────────────────────────────────────
+banner "LIVE PHASES (appendix — single-phase visibility)"
 printf "  %-22s %10s\n" "policy / phase" "hot hit%"
 printf "  %-22s %10s\n" "----------------------" "----------"
 printf "  %-22s %9s%%\n" "static LRU  (A)" "${LRU_PCT:-?}"
 printf "  %-22s %9s%%\n" "Aura adaptive (A)" "${ADAPT_PCT:-?}"
 printf "  %-22s %9s%%\n" "Aura adaptive (B WS)" "${B_PCT:-?}"
 echo ""
-echo "  One-liner: Aura mutates policy under sandbox; C only runs kernels."
-echo ""
 
-python3 - <<PY
-lru = float("${LRU_PCT:-0}" or 0)
-ad = float("${ADAPT_PCT:-0}" or 0)
-b = float("${B_PCT:-0}" or 0)
-print(f"  check: LRU={lru:.1f}%  adaptive_A={ad:.1f}%  adaptive_B={b:.1f}%")
+# ── HEADLINE: phase_marathon cumulative + regret ──────────────────────
+banner "HEADLINE — phase_marathon cumulative hit% / regret vs oracle"
+# Stop live server so bench owns the port
+if declare -f stop_ctl >/dev/null 2>&1; then stop_ctl; fi
+if [[ -n "${CTL_PID:-}" ]]; then kill "$CTL_PID" 2>/dev/null || true; CTL_PID=""; fi
+if [[ -n "${SRV_PID:-}" ]]; then
+  kill "$SRV_PID" 2>/dev/null || true
+  wait "$SRV_PID" 2>/dev/null || true
+  SRV_PID=""
+fi
+fuser -k "${PORT}/tcp" >/dev/null 2>&1 || true
+sleep 0.2
+
+MARATHON_LOG="${TMPDIR:-/tmp}/aura-redis-demo-mvp-marathon.log"
+set +e
+python3 "$ROOT/scripts/bench_dynamic_evict.py" \
+  --workloads phase_marathon \
+  --policies lru,lfu,adaptive \
+  --port "$PORT" \
+  --maxmemory "$MAXMEM" \
+  | tee "$MARATHON_LOG"
+MC=$?
+set -e
+
+python3 - "$MARATHON_LOG" "$MC" "${LRU_PCT:-0}" "${ADAPT_PCT:-0}" "${B_PCT:-0}" <<'PY'
+import re, sys
+from pathlib import Path
+log = Path(sys.argv[1]).read_text(errors="replace")
+mc = sys.argv[2]
+lru = float(sys.argv[3] or 0)
+ad = float(sys.argv[4] or 0)
+b = float(sys.argv[5] or 0)
+print()
+print("  One-liner: Aura mutates policy under sandbox; C only runs kernels.")
+print("  Headline metric = cumulative useful-GET hit% across phases (not memtier).")
+print()
+m = re.search(r"→?\s*adaptive vs fixed: ([+-]?[0-9.]+)pp vs LRU, ([+-]?[0-9.]+)pp vs LFU", log)
 ok = True
 if ad < lru + 15 and ad < 80:
     print("FAIL: adaptive did not clearly beat LRU on Phase A")
     ok = False
+if mc != "0":
+    print("FAIL: phase_marathon bench exited non-zero (adaptive must beat BOTH fixed)")
+    ok = False
+elif m:
+    g_lru, g_lfu = float(m.group(1)), float(m.group(2))
+    print(f"  marathon gaps: adaptive {g_lru:+.1f}pp vs LRU, {g_lfu:+.1f}pp vs LFU")
+    if g_lru < 5 or g_lfu < 5:
+        print("FAIL: marathon adaptive margin vs both fixed must be >=5pp")
+        ok = False
+else:
+    print("WARN: could not parse marathon gap line (bench assert is authoritative)")
 if lru > 50:
-    print("WARN: LRU unexpectedly healthy on Phase A (still ok if adaptive better)")
+    print("WARN: LRU unexpectedly healthy on Phase A")
 if b < 50:
     print("WARN: Phase B hit% low (WS shift); check controller timing")
 if not ok:
     raise SystemExit(1)
-print("PASS: demo MVP — LRU lose / adaptive win visible")
+print("PASS: demo MVP — adaptive wins live Phase A AND phase_marathon cumulative")
 PY
 
 banner "DONE"

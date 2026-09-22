@@ -2,12 +2,12 @@
 ; Same rules as adaptive.aura — keep in sync.
 
 (define (adaptive-rules-doc _)
-  "write-heavy→lfu; read-heavy+hit≥60%→lru; min-ops/hysteresis/cooldown")
+  "write/miss-spike→lfu; read-heavy+hit→lru; min-ops=40/hysteresis/cooldown")
 
-(define *ad-min-ops* 80)
+(define *ad-min-ops* 40)
 (define *ad-votes-need* 2)
-(define *ad-cooldown-ms* 400)
-(define *ad-window-ms* 200)
+(define *ad-cooldown-ms* 300)
+(define *ad-window-ms* 150)
 
 (define *ad-set-evict!* #f)
 (define *ad-evict-name* #f)
@@ -37,9 +37,14 @@
       ""
       (let ((hit-pct (if (> (+ dhits dmisses) 0)
                        (quotient (* 100 dhits) (+ dhits dmisses))
-                       0)))
+                       0))
+            (miss-pct (if (> (+ dhits dmisses) 0)
+                        (quotient (* 100 dmisses) (+ dhits dmisses))
+                        0)))
         (cond
+          ((and (>= dsets dgets) (> miss-pct 30)) "lfu")
           ((> dsets (* dgets 2)) "lfu")
+          ((and (> dgets (* dsets 3)) (>= hit-pct 50)) "lru")
           ((and (> dgets (* dsets 5)) (>= hit-pct 60)) "lru")
           (else ""))))))
 

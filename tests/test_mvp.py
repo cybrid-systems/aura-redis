@@ -44,8 +44,13 @@ def start() -> subprocess.Popen:
 
 def main() -> int:
     # unit: choose contract
-    assert choose_policy("normal", 10, 100, 5, 5, 0, 50).startswith("lfu")
-    assert "hot_cold" in choose_policy("normal", 10, 100, 5, 5, 0, 50)
+    # miss-spike + write-ish → lfu|flat|pin (pin path avoids layout migrate)
+    c_pin = choose_policy("normal", 10, 100, 5, 5, 0, 50)
+    assert c_pin.startswith("lfu"), c_pin
+    assert "pin" in c_pin, c_pin
+    # classic write-heavy low-miss → lfu|flat (avoid migrate during protect)
+    c_wr = choose_policy("normal", 10, 100, 90, 5, 0, 50)
+    assert c_wr.startswith("lfu") and "flat" in c_wr, c_wr
     assert choose_policy("normal", 100, 5, 90, 10, 0, 50).startswith("lru")
     assert choose_policy("inverted", 10, 100, 5, 5, 0, 50).startswith("lru")
     print("choose_policy unit OK")
