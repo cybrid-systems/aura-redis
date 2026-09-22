@@ -1,8 +1,9 @@
 # Dynamic eviction workloads
 
 These workloads are designed so **fixed LRU is not always optimal**. Aura-adaptive
-eviction (`lru` ↔ `lfu` via RESP `EVICT`, driven by Aura `policy_agent` or a
-Python mirror of `choose_normal`) tracks the better kernel across phases.
+eviction (`lru` ↔ `lfu` via RESP `EVICT`, driven by Aura `policy_agent.aura` —
+the product control plane; Python `choose_policy` is a host-only CI mirror)
+tracks the better kernel across phases.
 
 Data plane: host `aura_redis_server` (C). Control plane: Aura policy mutation under
 sandbox (`AURA_REDIS_DENY_PLUGIN=1`); `PLUGIN` is not the feature under test.
@@ -33,15 +34,15 @@ Bench prints a **regret vs best-fixed** table.
 
 ```bash
 ./scripts/build-native.sh
-python3 scripts/bench_dynamic_evict.py
-# optional Aura-native controller (Docker ghcr.io/cybrid-systems/dev):
-python3 scripts/bench_dynamic_evict.py --aura-agent --workloads hot_protect,ws_shift
-python3 scripts/bench_dynamic_evict.py --workloads zipf_hotkey,oscillate
-./scripts/demo-mvp.sh
+python3 scripts/bench_dynamic_evict.py              # Aura policy_agent DEFAULT
+python3 scripts/bench_dynamic_evict.py --workloads hot_protect,ws_shift
+python3 scripts/bench_dynamic_evict.py --python-ctl # host-only CI mirror
+./scripts/demo-mvp.sh                               # Aura agent; fail if unavailable
 ```
 
-Defaults: `--maxmemory 120000`, port `26730`, Python adaptive controller
-(mirrors `choose_normal.aura`; **owns layout** — do not set `AURA_REDIS_LAYOUT_ADAPTIVE`).
+Defaults: `--maxmemory 120000`, port `26730`, **Aura `policy_agent.aura`** adaptive
+control (Docker). Python mirror via `--python-ctl` / `AURA_AGENT=0` for host-only CI.
+Agent **owns layout** — do not set `AURA_REDIS_LAYOUT_ADAPTIVE`.
 
 ## Expected shape (illustrative)
 

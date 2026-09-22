@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Thin adaptive EVICT+LAYOUT controller for bench-e2e (mirrors choose_normal.aura)."""
+"""Host-only CI mirror of choose_normal.aura for bench-e2e throughput path.
+
+Product adaptive control plane is policy_agent.aura (see --aura-agent default).
+"""
 from __future__ import annotations
 
 import socket

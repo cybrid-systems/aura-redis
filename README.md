@@ -59,7 +59,7 @@ python3 tests/test_layout.py                # flat↔hot_cold migrate under load
 ./scripts/demo-mvp.sh                 # ~2 min: LRU lose → Aura adaptive win → WS shift
 python3 tests/test_mvp.py
 python3 scripts/bench_regret.py          # HEADLINE: phase_marathon cum hit% / regret
-python3 scripts/bench_dynamic_evict.py --workloads phase_marathon,zipf_hotkey,oscillate
+python3 scripts/bench_dynamic_evict.py --workloads phase_marathon,zipf_hotkey,oscillate  # Aura policy_agent default
 ```
 
 Under Meta-like hot-key / Zipf pressure, **static LRU hit% collapses**; Aura-mutated

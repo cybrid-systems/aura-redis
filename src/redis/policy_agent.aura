@@ -13,6 +13,9 @@
 ;   AURA_REDIS_HOST          default 127.0.0.1
 ;   AURA_REDIS_POLICY_DEMO=1 timed swap+heal demo then exit
 ;   AURA_REDIS_POLICY_MS     tick period (default 200)
+;   AURA_REDIS_POLICY_PROFILE_FILE  path whose contents name a choose body
+;                                   (normal|aggressive|conservative|inverted|broken);
+;                                   on change, hot-strategy:swap! (demo-mvp invert/heal)
 
 (require "std/mutate" all:)
 (require "std/hot-strategy" all:)
@@ -34,6 +37,8 @@
 (define *swaps* 0)
 (define *applies* 0)
 (define *heals* 0)
+(define *profile-file* "")
+(define *profile-name* "normal")
 
 (define *prev-gets* 0)
 (define *prev-sets* 0)
@@ -63,6 +68,10 @@
   (set! *demo*
     (and (string? e)
          (or (string=? e "1") (string=? e "true") (string=? e "yes")))))
+(let ((e (getenv "AURA_REDIS_POLICY_PROFILE_FILE")))
+  (if (and (string? e) (> (string-length e) 0))
+    (set! *profile-file* e)
+    #t))
 
 ; ── tiny string helpers ──
 (define (find-substr s pat start)
@@ -188,6 +197,76 @@
         (set! i (+ i 1))))
     #t))
 
+;; ── profile file → hot-strategy:swap! (product path for demo-mvp invert/heal) ──
+(define (trim-ws s)
+  (let ((n (string-length s))
+        (i 0)
+        (j 0))
+    (set! j n)
+    (while (and (< i n)
+                (let ((c (substring s i (+ i 1))))
+                  (or (string=? c " ") (string=? c "\n")
+                      (string=? c "\r") (string=? c "\t"))))
+      (set! i (+ i 1)))
+    (while (and (> j i)
+                (let ((c (substring s (- j 1) j)))
+                  (or (string=? c " ") (string=? c "\n")
+                      (string=? c "\r") (string=? c "\t"))))
+      (set! j (- j 1)))
+    (if (>= i j) "" (substring s i j))))
+
+(define (body-for-profile name)
+  (cond
+    ((string=? name "aggressive") *policy-choose-aggressive*)
+    ((string=? name "conservative") *policy-choose-conservative*)
+    ((string=? name "inverted") *policy-choose-inverted*)
+    ((string=? name "broken") *policy-choose-broken*)
+    (else *policy-choose-normal*)))
+
+(define (maybe-reload-profile!)
+  (if (or (not (string? *profile-file*)) (= (string-length *profile-file*) 0))
+    #f
+    (let ((raw (read-file *profile-file*)))
+      (if (not (string? raw))
+        #f
+        (let ((name (trim-ws raw)))
+          (if (or (= (string-length name) 0) (string=? name *profile-name*))
+            #f
+            (begin
+              (display "policy_agent: profile file -> ")
+              (display name)
+              (newline)
+              (if (mutate:boundary-safe?)
+                (begin
+                  (mutate:safety-snapshot)
+                  (let ((r (hot-strategy:swap! "choose-fn" (body-for-profile name)
+                                               (string-append "profile-" name))))
+                    (display "policy_agent: hot-strategy:swap! profile=")
+                    (display name)
+                    (display " result=")
+                    (display r)
+                    (newline)
+                    (set! *profile-name* name)
+                    (set! *swaps* (+ *swaps* 1))
+                    (if (string=? name "broken")
+                      (begin
+                        (let ((probe (try (choose-fn 100 10 90 10 0 100)
+                                          (catch (e) "FAIL"))))
+                          (if (or (not (car r))
+                                  (not (string? probe))
+                                  (string=? probe "FAIL"))
+                            (begin
+                              (display "policy_agent: hot-strategy:heal!\n")
+                              (hot-strategy:heal!)
+                              (set! *heals* (+ *heals* 1))
+                              (set! *profile-name* "normal"))
+                            #t)))
+                      #t)
+                    #t))
+                (begin
+                  (display "policy_agent: skip profile swap (boundary not safe)\n")
+                  #f)))))))))
+
 ; ── seed choose-fn in workspace for hot-strategy ──
 (display "policy_agent: seeding choose-fn (hot-strategy)\n")
 (set-code "(define (choose-fn dgets dsets dhits dmisses devicted nkeys) \"\")")
@@ -232,6 +311,7 @@
   (while *running*
     (begin
       (busy-wait-ms *tick-ms*)
+      (maybe-reload-profile!)
       ; safety before any swap in demo phases
       (let ((info (redis-call! *sock* "INFO")))
         (if (or (not (string? info)) (string=? (substring info 0 (if (< (string-length info) 3) (string-length info) 3)) "ERR"))

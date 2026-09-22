@@ -12,7 +12,7 @@ Two independent dimensions — **do not** collapse into one score:
 1. **Throughput** (memtier) — no `maxmemory` pressure; raw RESP / data-plane speed.
 2. **Hit quality** (dynamic workloads) — small `maxmemory=120000`; eviction policy fitness.
 
-Caveats: approximate LFU sampling (default 16, adaptive bumps to 64 under pin); adaptive defaults to a Python RESP `EVICT`/`LAYOUT`/`PIN` controller mirroring `choose_normal` (Aura `policy_agent` verified in §C). Absolute ops/s move with CPU load; **ratios** are the citeable signal.
+Caveats: approximate LFU sampling (default 16, adaptive bumps to 64 under pin); adaptive DEFAULT is Aura `policy_agent.aura` (Docker) writing RESP `EVICT`/`LAYOUT`/`PIN` from `choose_normal.aura`. Python `choose_policy` is a host-only CI mirror (`--python-ctl`). Absolute ops/s move with CPU load; **ratios** are the citeable signal.
 
 ---
 
@@ -33,7 +33,7 @@ Primary scoreboard = **multi-phase cumulative useful-GET hit% + regret vs per-ph
 ## A) Throughput (ops/s)
 
 Frozen matrix: **1c×1t**, SET:GET=**1:10**, value **32B**, key 1..10000 **R:R**, `-n 20000`.  
-Adaptive row = C server `--evict lru` + Python controller (`scripts/_e2e_adaptive_ctl.py`, same rules as `choose_normal`).
+Adaptive throughput row = C server `--evict lru` + host Python mirror (`scripts/_e2e_adaptive_ctl.py`, same rules as `choose_normal`) — throughput benches are not the Aura story; hit-quality benches use Aura `policy_agent` by default.
 
 | Engine | pipeline | Totals ops/s | Avg latency (ms) | vs Redis |
 |--------|----------|--------------|------------------|----------|
@@ -88,9 +88,11 @@ See `docs/workloads.md`.
 
 ---
 
-## C) Aura policy_agent path (optional)
+## C) Aura policy_agent path (DEFAULT for adaptive)
 
-`--aura-agent` (Docker `policy_agent.aura` → RESP `EVICT`/`LAYOUT`/`PIN`, `AURA_REDIS_DENY_PLUGIN=1`) on `hot_protect` + `ws_shift` previously confirmed adaptive near-oracle. Agent now PIN/UNPIN prefix sets + samples=64 on pin path (flat layout during protect).
+Adaptive benches default to Docker `policy_agent.aura` → RESP `EVICT`/`LAYOUT`/`PIN` (`AURA_REDIS_DENY_PLUGIN=1`). Use `--python-ctl` only for host-only CI. Agent PIN/UNPIN prefix sets + samples=64 on pin path (flat layout during protect).
+
+Fresh `phase_marathon` with Aura agent (2026-09-22): adaptive **100%** / 1956 useful vs LRU **81.8%** / 1600 vs LFU **45.8%** / 896 (**+18.2pp** vs LRU, **+54.2pp** vs LFU; regret_hits=0). Log proof: `policy_agent: EVICT lru → lfu` / `EVICT lfu → lru` / `UNPIN`.
 
 ---
 
@@ -115,8 +117,9 @@ python3 scripts/bench_regret.py           # HEADLINE phase_marathon + zipf + osc
 python3 scripts/bench_dynamic_evict.py --workloads phase_marathon,zipf_hotkey,hot_protect,ws_shift,oscillate
 python3 scripts/bench_industry.py
 ./scripts/demo-mvp.sh
-python3 scripts/bench_dynamic_evict.py --aura-agent --workloads hot_protect,ws_shift
-# env knobs: MEMTIER_N, REDIS_PORT, AURA_PORT, SKIP_LISP=1, SKIP_AURA_AGENT=1
+python3 scripts/bench_dynamic_evict.py --workloads hot_protect,ws_shift          # Aura default
+python3 scripts/bench_dynamic_evict.py --python-ctl --workloads hot_protect,ws_shift
+# env knobs: MEMTIER_N, REDIS_PORT, AURA_PORT, SKIP_LISP=1, AURA_AGENT=0
 ```
 
 Related: `docs/perf-log.md` (historical memtier gate), `docs/workloads.md` (dynamic eviction design), `docs/mvp-plan.md` (why regret is the headline).

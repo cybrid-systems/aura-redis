@@ -30,7 +30,7 @@ Product rule: **Aura mutates policy under sandbox; C only runs named kernels.** 
 
 **INFO (C)** adds / keeps at least: `gets`, `sets`, `hits`, `misses`, `evicted`, `keys`, `layout`, `evict`, `samples`, `pinned`, `used_memory`, `maxmemory`.
 
-**choose-fn contract** (Aura body string / Python mirror):
+**choose-fn contract** (Aura body string; Python `choose_policy` mirrors it for host-only CI):
 
 ```text
 (lambda (dgets dsets dhits dmisses [devicted nkeys]) …)
@@ -68,7 +68,7 @@ Story arc in `scripts/demo-mvp.sh` (+ optional `tests/test_mvp.py`):
 
 1. C server, `DENY_PLUGIN`, small `maxmemory`
 2. Phase A Meta-like Zipf / `hot_protect` under **static LRU** → catastrophic hit%
-3. Same load under **Aura adaptive** (Docker `policy_agent` if reliable; else Python mirror of `choose_*.aura`, announced) → swap `lru→lfu` (+ layout), hit% ≈100%
+3. Same load under **Aura adaptive** (`policy_agent.aura` DEFAULT; Python mirror only with `AURA_ALLOW_PYTHON_FALLBACK=1`) → swap `lru→lfu` (+ layout), hit% ≈100%
 4. Phase B working-set shift → adaptive toward `lru` / stays optimal vs stuck LFU
 5. Optional: invert policy → behavior flips; heal restores
 6. Final table + one-liner: *Aura mutates policy under sandbox; C only runs kernels*
@@ -88,7 +88,7 @@ TTL-aware / expire-first · Soft-goal choose · hot_cold threshold mutation · `
 ```bash
 ./scripts/build-native.sh
 ./scripts/demo-mvp.sh          # ~2 min, exit 0 = LRU lose / adaptive win
-python3 scripts/bench_dynamic_evict.py --workloads zipf_hotkey,oscillate
+python3 scripts/bench_dynamic_evict.py --workloads zipf_hotkey,oscillate   # Aura agent default
 ```
 
 ## Headline metric (why not single-phase or memtier)

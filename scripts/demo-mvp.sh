@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
-# Demo MVP (M5): Aura mutates policy under Meta/Twitter-shaped load; C runs kernels.
-# ~2 minutes. Exit 0 iff static LRU loses and adaptive wins on Phase A.
+# Demo MVP (M5): Aura policy_agent mutates policy under Meta/Twitter-shaped load;
+# C runs kernels. ~2 minutes. Exit 0 iff static LRU loses and adaptive wins on Phase A,
+# and phase_marathon cumulative adaptive beats BOTH fixed.
+#
+# Control plane DEFAULT = Docker policy_agent.aura (Aura writes EVICT/LAYOUT/PIN).
+# Python choose_policy() is ONLY used if AURA_ALLOW_PYTHON_FALLBACK=1 when Aura
+# cannot start, or if AURA_AGENT=0 / --python-ctl style env is set (degraded story).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT="${1:-26880}"
 MAXMEM="${AURA_REDIS_MAXMEMORY:-120000}"
+IMG="${AURA_DEV_IMAGE:-ghcr.io/cybrid-systems/dev:v1.0.7}"
 LOG_SRV="${TMPDIR:-/tmp}/aura-redis-demo-mvp-srv.log"
 CTL_LOG="${TMPDIR:-/tmp}/aura-redis-demo-mvp-ctl.log"
 RESULTS="${TMPDIR:-/tmp}/aura-redis-demo-mvp-results.txt"
+PROFILE_FILE="${TMPDIR:-/tmp}/aura-redis-demo-mvp-profile"
 SRV_PID=""
 CTL_PID=""
+AGENT_CID=""
+CTL_BACKEND=""   # aura | python
 
 banner() {
   echo ""
@@ -19,13 +28,19 @@ banner() {
 }
 
 cleanup() {
-  if [[ -n "${CTL_PID}" ]]; then kill "$CTL_PID" 2>/dev/null || true; fi
+  if [[ -n "${AGENT_CID}" ]]; then
+    sudo docker kill "$AGENT_CID" >/dev/null 2>&1 || true
+    sudo docker rm -f "$AGENT_CID" >/dev/null 2>&1 || true
+    AGENT_CID=""
+  fi
+  if [[ -n "${CTL_PID}" ]]; then kill "$CTL_PID" 2>/dev/null || true; CTL_PID=""; fi
   if [[ -n "${SRV_PID}" ]]; then
     kill "$SRV_PID" 2>/dev/null || true
     wait "$SRV_PID" 2>/dev/null || true
+    SRV_PID=""
   fi
   fuser -k "${PORT}/tcp" >/dev/null 2>&1 || true
-  rm -f /tmp/aura-redis-demo-mvp-profile
+  rm -f "$PROFILE_FILE"
 }
 trap cleanup EXIT
 
@@ -34,14 +49,22 @@ trap cleanup EXIT
 source "$ROOT/scripts/sandbox-policy-profile.sh" 2>/dev/null || true
 export AURA_REDIS_DENY_PLUGIN=1
 export AURA_REDIS_ROOT="$ROOT"
+export AURA_REDIS_POLICY_PROFILE_FILE="$PROFILE_FILE"
+echo "normal" >"$PROFILE_FILE"
 
 : >"$LOG_SRV"
 : >"$RESULTS"
+: >"$CTL_LOG"
+
+want_python=0
+case "${AURA_AGENT:-1}" in
+  0|false|no|python) want_python=1 ;;
+esac
 
 banner "AURA-REDIS DEMO MVP — policy mutation under big-tech load"
 echo "  C data plane: aura_redis_server  DENY_PLUGIN=1  maxmemory=$MAXMEM"
-echo "  Control:      Python mirror of choose_normal.aura (joint EVICT|LAYOUT)"
-echo "  (set AURA_AGENT=1 to prefer Docker policy_agent.aura when available)"
+echo "  Control:      Aura policy_agent.aura (Docker) — DEFAULT"
+echo "  Fallback:     Python mirror only if AURA_ALLOW_PYTHON_FALLBACK=1"
 echo "  Port: $PORT"
 
 start_server() {
@@ -65,6 +88,12 @@ start_server() {
 }
 
 stop_ctl() {
+  if [[ -n "${AGENT_CID}" ]]; then
+    sudo docker logs "$AGENT_CID" >>"$CTL_LOG" 2>&1 || true
+    sudo docker kill "$AGENT_CID" >/dev/null 2>&1 || true
+    sudo docker rm -f "$AGENT_CID" >/dev/null 2>&1 || true
+    AGENT_CID=""
+  fi
   if [[ -n "${CTL_PID}" ]]; then
     kill "$CTL_PID" 2>/dev/null || true
     wait "$CTL_PID" 2>/dev/null || true
@@ -72,11 +101,14 @@ stop_ctl() {
   fi
 }
 
-start_ctl() {
+start_ctl_python() {
   stop_ctl
   : >"$CTL_LOG"
   local profile="${1:-normal}"
-  PROFILE="$profile" AURA_REDIS_ROOT="$ROOT" python3 - "$PORT" <<'PY' >>"$CTL_LOG" 2>&1 &
+  echo "$profile" >"$PROFILE_FILE"
+  echo "WARNING: DEGRADED STORY — Python choose_policy() mirror (not Aura policy_agent)" | tee -a "$CTL_LOG"
+  PROFILE="$profile" AURA_REDIS_ROOT="$ROOT" PROFILE_FILE="$PROFILE_FILE" \
+    python3 - "$PORT" <<'PY' >>"$CTL_LOG" 2>&1 &
 import os, socket, sys, time
 from pathlib import Path
 root = Path(os.environ["AURA_REDIS_ROOT"])
@@ -87,6 +119,7 @@ from bench_dynamic_evict import apply_choice, choose_policy, parse_info, info_in
 
 port = int(sys.argv[1])
 profile = os.environ.get("PROFILE", "normal")
+pf = Path(os.environ.get("PROFILE_FILE", "/tmp/aura-redis-demo-mvp-profile"))
 prev = None
 s = None
 for _ in range(60):
@@ -97,7 +130,7 @@ for _ in range(60):
         time.sleep(0.05)
 if not s:
     sys.exit(1)
-print(f"ctl: mirrors choose_{profile}.aura joint EVICT|LAYOUT (DENY_PLUGIN)", flush=True)
+print(f"ctl: PYTHON MIRROR choose_{profile}.aura joint EVICT|LAYOUT (DENY_PLUGIN)", flush=True)
 last_swap = 0.0
 dwell = 0.6
 while True:
@@ -133,12 +166,76 @@ while True:
         except Exception as e:
             print(f"ctl: err {e}", flush=True)
     prev = (g, se, h, m, ev)
-    pf = Path("/tmp/aura-redis-demo-mvp-profile")
     if pf.exists():
         profile = pf.read_text().strip() or profile
     time.sleep(0.08)
 PY
   CTL_PID=$!
+  CTL_BACKEND=python
+}
+
+start_ctl_aura() {
+  stop_ctl
+  : >"$CTL_LOG"
+  local profile="${1:-normal}"
+  echo "$profile" >"$PROFILE_FILE"
+  echo "ctl: starting Aura policy_agent.aura (Docker) profile=$profile" | tee -a "$CTL_LOG"
+  AGENT_CID=$(sudo docker run -d --network host --entrypoint '' \
+    -v "$ROOT:/work" -v /tmp:/tmp -w /work \
+    -e AURA_SANDBOX=off \
+    -e AURA_PIPELINE_STRICT=0 \
+    -e AURA_PATH=/work/.deps/aura/lib \
+    -e AURA_REDIS_PORT="$PORT" \
+    -e AURA_REDIS_HOST=127.0.0.1 \
+    -e AURA_REDIS_POLICY_MS=100 \
+    -e AURA_REDIS_DENY_PLUGIN=1 \
+    -e AURA_REDIS_POLICY_PROFILE_FILE="$PROFILE_FILE" \
+    "$IMG" \
+    /work/.deps/aura/build/aura /work/src/redis/policy_agent.aura) || {
+      echo "FAIL: docker run for policy_agent failed" >&2
+      return 1
+    }
+  for _ in $(seq 1 80); do
+    sudo docker logs "$AGENT_CID" >"$CTL_LOG" 2>&1 || true
+    if grep -q "PING" "$CTL_LOG" 2>/dev/null; then
+      echo "ctl: Aura policy_agent connected (PING ok)" | tee -a "$CTL_LOG"
+      CTL_BACKEND=aura
+      return 0
+    fi
+    if ! sudo docker inspect -f '{{.State.Running}}' "$AGENT_CID" 2>/dev/null | grep -q true; then
+      echo "FAIL: policy_agent container exited before PING:" >&2
+      cat "$CTL_LOG" >&2
+      return 1
+    fi
+    sleep 0.15
+  done
+  echo "FAIL: policy_agent did not PING in time:" >&2
+  cat "$CTL_LOG" >&2
+  return 1
+}
+
+start_ctl() {
+  local profile="${1:-normal}"
+  if [[ "$want_python" -eq 1 ]]; then
+    start_ctl_python "$profile"
+    return
+  fi
+  if start_ctl_aura "$profile"; then
+    return 0
+  fi
+  if [[ "${AURA_ALLOW_PYTHON_FALLBACK:-0}" == "1" ]]; then
+    echo ""
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "  WARNING: Aura policy_agent FAILED to start."
+    echo "  Falling back to Python choose_policy() mirror."
+    echo "  STORY IS DEGRADED — decisions are NOT Aura-written."
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo ""
+    start_ctl_python "$profile"
+    return
+  fi
+  echo "FAIL: Aura policy_agent could not start (set AURA_ALLOW_PYTHON_FALLBACK=1 to degrade)" >&2
+  exit 1
 }
 
 # ── Phase A under STATIC LRU ──────────────────────────────────────────
@@ -152,17 +249,26 @@ kill "$SRV_PID" 2>/dev/null || true
 wait "$SRV_PID" 2>/dev/null || true
 SRV_PID=""
 
-# ── Phase A under ADAPTIVE ────────────────────────────────────────────
-banner "PHASE A — same load under AURA ADAPTIVE (mirrors choose_normal.aura)"
+# ── Phase A under ADAPTIVE (Aura policy_agent) ─────────────────────────
+banner "PHASE A — same load under AURA policy_agent (choose_normal.aura)"
 start_server lru
 start_ctl normal
 sleep 0.25
 OUT_ADAPT=$(python3 "$ROOT/scripts/_demo_mvp_load.py" a --port "$PORT" --wait-lfu)
 echo "  $OUT_ADAPT"
 ADAPT_PCT=$(echo "$OUT_ADAPT" | sed -n 's/.*hit_pct=\([0-9.]*\).*/\1/p')
-echo "adaptive_phase_a $OUT_ADAPT" >>"$RESULTS"
-echo "  controller swaps:"
-grep -E 'ctl: ' "$CTL_LOG" | tail -n 16 || true
+echo "adaptive_phase_a $OUT_ADAPT backend=$CTL_BACKEND" >>"$RESULTS"
+echo "  policy_agent / ctl log (EVICT/LAYOUT/PIN):"
+if [[ "$CTL_BACKEND" == "aura" ]]; then
+  sudo docker logs "$AGENT_CID" >>"$CTL_LOG" 2>&1 || true
+  grep -E 'policy_agent: (EVICT|LAYOUT|PIN|UNPIN)' "$CTL_LOG" | tail -n 20 || true
+  if ! grep -qE 'policy_agent: EVICT' "$CTL_LOG"; then
+    echo "FAIL: no policy_agent EVICT lines — Aura did not drive decisions" >&2
+    exit 1
+  fi
+else
+  grep -E 'ctl: ' "$CTL_LOG" | tail -n 16 || true
+fi
 
 # ── Phase B WS shift ──────────────────────────────────────────────────
 banner "PHASE B — working-set shift (expect adaptive → lru / stay optimal)"
@@ -170,16 +276,29 @@ OUT_B=$(python3 "$ROOT/scripts/_demo_mvp_load.py" b --port "$PORT")
 echo "  $OUT_B"
 echo "adaptive_phase_b $OUT_B" >>"$RESULTS"
 B_PCT=$(echo "$OUT_B" | sed -n 's/.*hit_pct=\([0-9.]*\).*/\1/p')
-echo "  controller swaps (tail):"
-grep -E 'ctl: ' "$CTL_LOG" | tail -n 10 || true
+echo "  controller log (tail):"
+if [[ "$CTL_BACKEND" == "aura" ]]; then
+  sudo docker logs "$AGENT_CID" >>"$CTL_LOG" 2>&1 || true
+  grep -E 'policy_agent: (EVICT|LAYOUT|PIN|UNPIN|profile)' "$CTL_LOG" | tail -n 16 || true
+else
+  grep -E 'ctl: ' "$CTL_LOG" | tail -n 10 || true
+fi
 
-# ── Optional invert mutation ──────────────────────────────────────────
+# ── Optional invert mutation via hot-strategy (Aura) / profile (Python) ─
 banner "MUTATION — hot-strategy style swap → inverted policy"
-echo inverted >/tmp/aura-redis-demo-mvp-profile
+echo inverted >"$PROFILE_FILE"
 python3 "$ROOT/scripts/_demo_mvp_load.py" invert --port "$PORT"
-echo "  restoring normal policy (heal)"
-echo normal >/tmp/aura-redis-demo-mvp-profile
-sleep 0.2
+echo "  restoring normal policy (heal / profile→normal)"
+echo normal >"$PROFILE_FILE"
+sleep 0.3
+if [[ "$CTL_BACKEND" == "aura" ]]; then
+  sudo docker logs "$AGENT_CID" >>"$CTL_LOG" 2>&1 || true
+  if grep -q 'profile file -> inverted\|hot-strategy:swap! profile=inverted\|swap! → inverted' "$CTL_LOG"; then
+    echo "  ok: saw hot-strategy profile swap toward inverted"
+  else
+    echo "  WARN: no inverted profile swap line (timing?); see demo-aura-native for full swap+heal"
+  fi
+fi
 
 # ── Live phase table (appendix) ───────────────────────────────────────
 banner "LIVE PHASES (appendix — single-phase visibility)"
@@ -188,13 +307,12 @@ printf "  %-22s %10s\n" "----------------------" "----------"
 printf "  %-22s %9s%%\n" "static LRU  (A)" "${LRU_PCT:-?}"
 printf "  %-22s %9s%%\n" "Aura adaptive (A)" "${ADAPT_PCT:-?}"
 printf "  %-22s %9s%%\n" "Aura adaptive (B WS)" "${B_PCT:-?}"
+echo "  control backend: $CTL_BACKEND"
 echo ""
 
 # ── HEADLINE: phase_marathon cumulative + regret ──────────────────────
 banner "HEADLINE — phase_marathon cumulative hit% / regret vs oracle"
-# Stop live server so bench owns the port
-if declare -f stop_ctl >/dev/null 2>&1; then stop_ctl; fi
-if [[ -n "${CTL_PID:-}" ]]; then kill "$CTL_PID" 2>/dev/null || true; CTL_PID=""; fi
+stop_ctl
 if [[ -n "${SRV_PID:-}" ]]; then
   kill "$SRV_PID" 2>/dev/null || true
   wait "$SRV_PID" 2>/dev/null || true
@@ -205,6 +323,7 @@ sleep 0.2
 
 MARATHON_LOG="${TMPDIR:-/tmp}/aura-redis-demo-mvp-marathon.log"
 set +e
+# Adaptive defaults to Aura agent inside bench_dynamic_evict.py
 python3 "$ROOT/scripts/bench_dynamic_evict.py" \
   --workloads phase_marathon \
   --policies lru,lfu,adaptive \
@@ -214,7 +333,7 @@ python3 "$ROOT/scripts/bench_dynamic_evict.py" \
 MC=$?
 set -e
 
-python3 - "$MARATHON_LOG" "$MC" "${LRU_PCT:-0}" "${ADAPT_PCT:-0}" "${B_PCT:-0}" <<'PY'
+python3 - "$MARATHON_LOG" "$MC" "${LRU_PCT:-0}" "${ADAPT_PCT:-0}" "${B_PCT:-0}" "$CTL_BACKEND" <<'PY'
 import re, sys
 from pathlib import Path
 log = Path(sys.argv[1]).read_text(errors="replace")
@@ -222,12 +341,16 @@ mc = sys.argv[2]
 lru = float(sys.argv[3] or 0)
 ad = float(sys.argv[4] or 0)
 b = float(sys.argv[5] or 0)
+backend = sys.argv[6]
 print()
 print("  One-liner: Aura mutates policy under sandbox; C only runs kernels.")
 print("  Headline metric = cumulative useful-GET hit% across phases (not memtier).")
+print(f"  Live adaptive backend: {backend}")
 print()
 m = re.search(r"→?\s*adaptive vs fixed: ([+-]?[0-9.]+)pp vs LRU, ([+-]?[0-9.]+)pp vs LFU", log)
 ok = True
+if "adaptive_backend=aura" not in log and "adaptive_backend=python" in log:
+    print("WARN: marathon used Python mirror (set AURA_AGENT=1 / omit --python-ctl)")
 if ad < lru + 15 and ad < 80:
     print("FAIL: adaptive did not clearly beat LRU on Phase A")
     ok = False
@@ -248,7 +371,7 @@ if b < 50:
     print("WARN: Phase B hit% low (WS shift); check controller timing")
 if not ok:
     raise SystemExit(1)
-print("PASS: demo MVP — adaptive wins live Phase A AND phase_marathon cumulative")
+print("PASS: demo MVP — Aura adaptive wins live Phase A AND phase_marathon cumulative")
 PY
 
 banner "DONE"

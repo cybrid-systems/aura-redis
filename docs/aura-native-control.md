@@ -5,6 +5,10 @@ sandbox discipline. The C core only executes the chosen kernels (`lru` / `lfu` /
 `noop`, plus layout). Swapping a `.so` (`PLUGIN`) is an **escape hatch**, not the
 product moat.
 
+**Product control plane:** `policy_agent.aura` (Docker) is the DEFAULT for
+`demo-mvp.sh` and adaptive benches. Python `choose_policy()` only mirrors
+`choose_*.aura` for host-only CI (`--python-ctl` / `AURA_AGENT=0`).
+
 ## Split process (why)
 
 On the pinned Aura rev, many top-level `(c-func)` binds in one workspace make

@@ -2,7 +2,7 @@
 """Dynamic eviction workloads: static LRU vs LFU vs Aura-adaptive.
 
 Design goal: show cases where fixed LRU loses, and adaptive (lru↔lfu via
-RESP EVICT, mirroring policy choose_normal / policy_agent rules) tracks the
+RESP EVICT, via Aura policy_agent by default) tracks the
 better kernel across phases.
 
 Workloads
@@ -29,17 +29,17 @@ Workloads
    hot_protect (LFU+pin again). Primary scoreboard: cumulative useful-GET
    hit% and regret vs per-phase oracle (best fixed kernel per phase).
 
-Adaptive path (default): Python controller with the same rules as
-src/redis/policy/choose_normal.aura (min-ops=40, miss-spike→lfu|flat|pin,
-read-heavy→lru|flat + UNPIN). Optional --aura-agent uses policy_agent.aura
-in Docker against the C data plane (Aura-native story; DENY_PLUGIN=1).
+Adaptive path (DEFAULT): Aura policy_agent.aura in Docker writes EVICT /
+LAYOUT / PIN decisions (choose_normal.aura: min-ops=40, miss-spike→lfu|flat|pin,
+WS→lru|flat + UNPIN). Python choose_policy() is a host-only mirror for CI /
+--python-ctl / AURA_AGENT=0 — not the product control plane.
 
 Usage
 -----
   ./scripts/build-native.sh
-  python3 scripts/bench_dynamic_evict.py
+  python3 scripts/bench_dynamic_evict.py                  # Aura agent default
   python3 scripts/bench_dynamic_evict.py --workloads hot_protect,ws_shift
-  python3 scripts/bench_dynamic_evict.py --aura-agent   # needs docker+Aura image
+  python3 scripts/bench_dynamic_evict.py --python-ctl     # host-only mirror
 """
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ def choose_policy(
     devicted: int,
     nkeys: int,
 ) -> str:
-    """Mirror choose_*.aura multi-signal joint contract.
+    """HOST-ONLY CI MIRROR of choose_*.aura (policy_agent is the product path).
 
     Returns "" | "lfu" | "lru" | "lfu|hot_cold" | "lru|flat" | "lfu|flat|pin" | …
     Pin path prefers flat layout so migrate does not hurt zipf/hot retention.
@@ -228,7 +228,7 @@ def apply_choice(sock: socket.socket, choice: str, cur_evict: str, cur_layout: s
 
 
 class PythonAdaptiveController(threading.Thread):
-    """Mirrors choose_*.aura via RESP EVICT+LAYOUT (joint). Owns layout."""
+    """Host-only CI mirror of choose_*.aura via RESP (not the product control plane)."""
 
     def __init__(
         self,
@@ -330,9 +330,10 @@ class AuraAgentController:
 
     def start(self) -> None:
         self.log.write_text("")
+        profile = os.environ.get("AURA_REDIS_POLICY_PROFILE_FILE", "")
         cmd = [
             "sudo", "docker", "run", "-d", "--network", "host", "--entrypoint", "",
-            "-v", f"{ROOT}:/work", "-w", "/work",
+            "-v", f"{ROOT}:/work", "-v", "/tmp:/tmp", "-w", "/work",
             "-e", "AURA_SANDBOX=off",
             "-e", "AURA_PIPELINE_STRICT=0",
             "-e", "AURA_PATH=/work/.deps/aura/lib",
@@ -341,10 +342,14 @@ class AuraAgentController:
             "-e", f"AURA_REDIS_POLICY_MS={self.tick_ms}",
             "-e", "AURA_REDIS_DENY_PLUGIN=1",
             # no AURA_REDIS_POLICY_DEMO → run forever
+        ]
+        if profile:
+            cmd.extend(["-e", f"AURA_REDIS_POLICY_PROFILE_FILE={profile}"])
+        cmd.extend([
             IMG,
             "/work/.deps/aura/build/aura",
             "/work/src/redis/policy_agent.aura",
-        ]
+        ])
         self.cid = subprocess.check_output(cmd, text=True).strip()
         # wait for PING
         for _ in range(80):
@@ -368,7 +373,9 @@ class AuraAgentController:
         text = self.log.read_text(errors="replace")
         self.swaps = []
         for ln in text.splitlines():
-            if "EVICT" in ln and "→" in ln:
+            if not ln.strip().startswith("policy_agent:"):
+                continue
+            if ("EVICT" in ln and "→" in ln) or "LAYOUT" in ln or "PIN" in ln or "UNPIN" in ln:
                 self.swaps.append(ln.strip())
 
     def stop(self) -> None:
@@ -1119,7 +1126,13 @@ def main() -> int:
     ap.add_argument(
         "--aura-agent",
         action="store_true",
-        help="Use Aura policy_agent.aura (Docker) instead of Python controller",
+        default=None,
+        help="Use Aura policy_agent.aura (Docker) — DEFAULT for adaptive",
+    )
+    ap.add_argument(
+        "--python-ctl",
+        action="store_true",
+        help="Host-only Python mirror of choose_*.aura (CI without Docker)",
     )
     ap.add_argument("--seed", type=int, default=42, help="Reserved for future RNG (deterministic phases today)")
     ap.add_argument("--skip-assert", action="store_true")
@@ -1127,7 +1140,12 @@ def main() -> int:
 
     workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]
     policies = [p.strip() for p in args.policies.split(",") if p.strip()]
-    backend = "aura" if args.aura_agent else "python"
+    # Default = Aura agent. Explicit --python-ctl or AURA_AGENT=0 → Python mirror.
+    env_agent = os.environ.get("AURA_AGENT", "1").strip().lower()
+    force_python = args.python_ctl or env_agent in ("0", "false", "no", "python")
+    if force_python and args.aura_agent:
+        raise SystemExit("conflicting flags: --aura-agent and --python-ctl")
+    backend = "python" if force_python else "aura"
 
     print(f"bench_dynamic_evict: maxmemory={args.maxmemory} port={args.port} "
           f"adaptive_backend={backend} seed={args.seed}")
