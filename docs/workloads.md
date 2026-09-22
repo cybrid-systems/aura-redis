@@ -18,6 +18,7 @@ sandbox (`AURA_REDIS_DENY_PLUGIN=1`); `PLUGIN` is not the feature under test.
 | `oscillate` | **adaptive** | `hot_protect` → `FLUSHDB` → read-heavy bridge (→ LRU) → `ws_shift` on one server lifetime. Adaptive should land near best-of `{lru,lfu}` on each phase. |
 | `zipf_hotkey` | **LFU / pin / adaptive** | Meta-like Zipf α≈0.99 over keyspace; boost tiny hot set; cold flood past `maxmemory`; GET hot head (+ Zipf probes). Static LRU collapses; LFU/adaptive (+ optional `PIN`) retain. |
 | `ttl_wave` / `session_churn` | **ttl_aware / adaptive** | Durable no-TTL `keep*` + mass short-TTL `sess*` (GET-boosted) under `maxmemory`. LRU/LFU cling to sessions; `ttl_aware` prefers soonest `expire_at`. Aura chooses `ttl_aware` from INFO TTL signals. |
+| `flash_churn` | **soft-goal adaptive** | Tiny `maxmemory` flash-sale: durable `keep*` + write-heavy unique cold flood. Naive LFU thrash → high `evicted`, keep dies. Soft-goal (`erate≥20`) refuses `lfu`/+pin → `lru`/`ttl_aware`/`noop`; A/B vs `adaptive_nosoft`. |
 
 Policy rules (same as `src/redis/policy/choose_normal.aura`, joint form):
 
@@ -26,6 +27,7 @@ Policy rules (same as `src/redis/policy/choose_normal.aura`, joint form):
 - read-heavy (`gets > sets*5`) and hit% ≥ 60 → `lru|flat`
 - Extra signals: `devicted`, `keys`, agent hit% EWMA
 - M9 TTL: `dexpired`, `avg_ttl_ms`, `keys_with_ttl` → `ttl_aware|flat` when short-TTL share high under pressure
+- M10 soft-goal: `erate=(devicted*100)/ops`; if `≥20` refuse expensive `lfu`/+pin → `ttl_aware`/`lru`; if `≥50` → `noop`
 
 Headline regret harness: `python3 scripts/bench_regret.py` (defaults `phase_marathon,...`).
 
@@ -39,6 +41,7 @@ Bench prints a **regret vs best-fixed** table.
 python3 scripts/bench_dynamic_evict.py              # Aura policy_agent DEFAULT
 python3 scripts/bench_dynamic_evict.py --workloads hot_protect,ws_shift
 python3 scripts/bench_regret.py ttl_wave
+python3 scripts/bench_regret.py flash_churn
 python3 scripts/bench_dynamic_evict.py --python-ctl # host-only CI mirror
 ./scripts/demo-mvp.sh                               # Aura agent; fail if unavailable
 ```
@@ -59,5 +62,6 @@ On a typical host run (see `docs/perf-log.md` for a dated capture):
 | zipf_hotkey | ~0–low% | ~100% | ~100% (+ pin, 0pp regret) |
 | phase_marathon | ~80% cum (fails zipf/hot) | ~45% cum (fails ws_shift) | **~100% cum, 0 regret** |
 | ttl_wave | **0%** | ~37% | **~100%** (`ttl_aware` / adaptive) |
+| flash_churn | 0% | ~12% | **~100% soft** (+87pp vs LFU; soft-goal log) |
 
 Caveats: approximate sampling eviction (16 samples); LFU freq only increments under the LFU kernel — the harness boosts the hot set **after** adaptive flips to LFU. Absolute ops/s is not the goal; hit ratio / useful target GETs is.

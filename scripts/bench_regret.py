@@ -9,6 +9,7 @@ Pass --python-ctl for the host-only Python mirror of choose_*.aura.
   python3 scripts/bench_regret.py mutation_gain --  # frozen vs mutate
   python3 scripts/bench_regret.py poison_heal
   python3 scripts/bench_regret.py ttl_wave
+  python3 scripts/bench_regret.py flash_churn
 """
 from __future__ import annotations
 
@@ -33,6 +34,8 @@ def main() -> int:
         policies = "lru,lfu,adaptive_frozen,adaptive_mutate"
     elif workloads in ("ttl_wave", "session_churn"):
         policies = "lru,lfu,ttl_aware,adaptive"
+    elif workloads == "flash_churn":
+        policies = "lfu,lru,adaptive_nosoft,adaptive_soft"
     elif workloads == "poison_heal":
         policies = "lru,lfu,poison_frozen,poison_mutate"
     elif "mutation_gain" in workloads or "diurnal_shift" in workloads:

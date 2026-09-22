@@ -1,4 +1,4 @@
-; choose_aggressive — faster flips, pin sooner on miss spikes (MVP M1); M9 TTL
+; choose_aggressive — faster flips, pin sooner on miss spikes (MVP M1); M9 TTL; M10 soft
 (export *policy-choose-aggressive*)
 
 (define *policy-choose-aggressive*
@@ -14,8 +14,16 @@
                            0))
                (ttl-share (if (> nkeys 0)
                             (quotient (* 100 keys_ttl) nkeys)
-                            0)))
+                            0))
+               (erate (if (> ops 0)
+                        (quotient (* 100 devicted) ops)
+                        0)))
            (cond
+             ; M10 soft-goal (aggressive: budget 18 / extreme 45)
+             ((>= erate 18)
+              (if (and (> keys_ttl 0) (< avg_ttl 12000))
+                \"ttl_aware|flat|soft\"
+                \"lru|flat|soft\"))
              ((and (> keys_ttl 0) (< avg_ttl 12000)
                    (or (>= ttl-share 15) (> keys_ttl 10)))
               \"ttl_aware|flat\")

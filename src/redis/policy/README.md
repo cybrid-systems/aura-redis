@@ -12,7 +12,7 @@ Chosen names are applied to the C data plane via RESP **`EVICT`** / **`LAYOUT`**
 
 ```text
 (lambda (dgets dsets dhits dmisses [devicted nkeys]) …)
-  → "" | "lfu" | "lru" | "noop"
+  → "" | "lfu" | "lru" | "noop" | "ttl_aware"
   → "lfu|hot_cold" | "lru|flat"     # joint EVICT+LAYOUT
   → "lfu|flat|pin"              # pin on miss spike (flat: no migrate hurt)
   → "lfu|hot_cold|pin"              # optional pin hint
@@ -25,5 +25,18 @@ Chosen names are applied to the C data plane via RESP **`EVICT`** / **`LAYOUT`**
 | `choose_conservative.aura` | higher thresholds; layout often stays flat |
 | `choose_inverted.aura` | inverted (demo: prove mutation changed choice) |
 | `choose_broken.aura` | invalid body used to smoke `hot-strategy:heal!` |
+| `choose_nosoft.aura` | M10 A/B: pre-soft normal (no eviction-rate budget) |
 
 See `docs/aura-native-control.md` · `docs/mvp-plan.md`.
+
+## Soft-goal (M10)
+
+`choose_normal` / `choose_aggressive` / `choose_conservative` maximize hit%
+subject to an eviction-CPU soft budget:
+
+```text
+erate = (devicted * 100) / ops
+if erate ≥ 20 → "ttl_aware|flat|soft" or "lru|flat|soft"   # refuse lfu|+pin
+```
+
+See `docs/high-roi-iterations.md` (M10) and workload `flash_churn`.

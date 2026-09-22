@@ -29,6 +29,7 @@
 (require "src/redis/policy/choose_conservative" all:)
 (require "src/redis/policy/choose_inverted" all:)
 (require "src/redis/policy/choose_broken" all:)
+(require "src/redis/policy/choose_nosoft" all:)
 
 (define *host* "127.0.0.1")
 (define *port* 6379)
@@ -57,6 +58,7 @@
 (define *threshold-mutates* 0)
 (define *phase-hint* "unknown")
 (define *ttl-pressure* #f) ; M9: short-TTL churn this tick
+(define *soft-fires* 0) ; M10: soft-goal choose overrode expensive kernel
 
 (define *prev-gets* 0)
 (define *prev-sets* 0)
@@ -255,6 +257,7 @@
     ((string=? name "conservative") *policy-choose-conservative*)
     ((string=? name "inverted") *policy-choose-inverted*)
     ((string=? name "broken") *policy-choose-broken*)
+    ((string=? name "nosoft") *policy-choose-nosoft*)
     (else *policy-choose-normal*)))
 
 ;; M7 — mutate numeric thresholds inside choose-fn body string (Aura-native)
@@ -267,8 +270,12 @@
     "(quotient (* 100 dhits) (+ dhits dmisses)) 0)) "
     "(miss-pct (if (> (+ dhits dmisses) 0) "
     "(quotient (* 100 dmisses) (+ dhits dmisses)) 0)) "
-    "(ttl-share (if (> nkeys 0) (quotient (* 100 keys_ttl) nkeys) 0))) "
+    "(ttl-share (if (> nkeys 0) (quotient (* 100 keys_ttl) nkeys) 0)) "
+    "(erate (if (> ops 0) (quotient (* 100 devicted) ops) 0))) "
     "(cond "
+    ""
+    "((>= erate 20) (if (and (> keys_ttl 0) (< avg_ttl 12000)) "
+    "\"ttl_aware|flat\" \"lru|flat\")) "
     "((and (> keys_ttl 0) (< avg_ttl 12000) (or (>= ttl-share 20) (> keys_ttl 15))) "
     "\"ttl_aware|flat\") "
     "((and (>= dsets dgets) (> miss-pct " (number->string miss-pin) ") (> nkeys 0)) "
@@ -647,30 +654,56 @@
                               (want-pin (and (pair? parts)
                                              (pair? (cdr parts))
                                              (pair? (cddr parts))
-                                             (string=? (caddr parts) "pin"))))
+                                             (string=? (caddr parts) "pin")))
+                              (want-soft (and (pair? parts)
+                                              (or (string=? (car parts) "soft")
+                                                  (and (pair? (cdr parts))
+                                                       (string=? (cadr parts) "soft"))
+                                                  (and (pair? (cdr parts))
+                                                       (pair? (cddr parts))
+                                                       (string=? (caddr parts) "soft"))))))
                           (if (and (> (string-length ev-name) 0)
                                    (not (string=? ev-name cur)))
                             (begin
-                              (display "policy_agent: EVICT ")
-                              (display cur)
-                              (display " → ")
-                              (display ev-name)
-                              (display " (dgets=")
-                              (display dgets)
-                              (display " dsets=")
-                              (display dsets)
-                              (display " ewma=")
-                              (display *hit-ewma*)
-                              (display " dexpired=")
-                              (display dexpired)
-                              (display " avg_ttl=")
-                              (display at)
-                              (display " keys_ttl=")
-                              (display kt)
-                              (display ")\n")
-                              (redis-call! *sock* "EVICT" ev-name)
-                              (set! *applies* (+ *applies* 1))
-                              (set! *swaps* (+ *swaps* 1)))
+                              (let ((erate (if (> (+ dgets dsets) 0)
+                                             (quotient (* 100 devicted)
+                                                       (+ dgets dsets))
+                                             0)))
+                                (if want-soft
+                                  (begin
+                                    (set! *soft-fires* (+ *soft-fires* 1))
+                                    (display "policy_agent: soft-goal refuse expensive (erate=")
+                                    (display erate)
+                                    (display " devicted=")
+                                    (display devicted)
+                                    (display " ops=")
+                                    (display (+ dgets dsets))
+                                    (display ")\n"))
+                                  #t)
+                                (display "policy_agent: EVICT ")
+                                (display cur)
+                                (display " → ")
+                                (display ev-name)
+                                (display " (dgets=")
+                                (display dgets)
+                                (display " dsets=")
+                                (display dsets)
+                                (display " ewma=")
+                                (display *hit-ewma*)
+                                (display " dexpired=")
+                                (display dexpired)
+                                (display " avg_ttl=")
+                                (display at)
+                                (display " keys_ttl=")
+                                (display kt)
+                                (display " devicted=")
+                                (display devicted)
+                                (display " erate=")
+                                (display erate)
+                                (display ")\n")
+                                (redis-call! *sock* "EVICT" ev-name)
+                                (set! *applies* (+ *applies* 1))
+                                (set! *swaps* (+ *swaps* 1))))
                             #t)
                           (if (and (> (string-length ly-name) 0)
                                    (not (string=? ly-name cur-layout)))
@@ -786,6 +819,8 @@
 (display *fitness-heals*)
 (display " threshold-mutates=")
 (display *threshold-mutates*)
+(display " soft-fires=")
+(display *soft-fires*)
 (display " profile=")
 (display *profile-name*)
 (newline)

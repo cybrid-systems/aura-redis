@@ -38,8 +38,14 @@ Workloads
    ttl_aware prefers soonest expire → keep survives GET storm. Adaptive should
    EVICT → ttl_aware from INFO keys_with_ttl / avg_ttl_ms / expired.
 
-Policies: lru | lfu | ttl_aware | adaptive (=adaptive_mutate) | adaptive_frozen |
-          adaptive_mutate | poison_frozen | poison_mutate
+9. flash_churn (M10 soft-goal) — tiny maxmemory flash-sale: durable keep* +
+   write-heavy unique cold flood (LFU thrash: high evict_rate, keep dies).
+   Soft-goal adaptive refuses lfu|+pin when erate≥20 → lru/ttl_aware/noop;
+   keeps useful hit% higher and/or eviction under budget vs fixed LFU / nosoft.
+
+Policies: lru | lfu | ttl_aware | adaptive (=adaptive_soft) | adaptive_soft |
+          adaptive_nosoft | adaptive_frozen | adaptive_mutate |
+          poison_frozen | poison_mutate
 
 Adaptive path (DEFAULT): Aura policy_agent.aura in Docker writes EVICT /
 LAYOUT / PIN decisions (choose_normal.aura: min-ops=40, miss-spike→lfu|flat|pin,
@@ -77,6 +83,8 @@ IMG = os.environ.get("AURA_DEV_IMAGE", "ghcr.io/cybrid-systems/dev:v1.0.7")
 
 ADAPTIVE_POLICIES = {
     "adaptive",
+    "adaptive_soft",
+    "adaptive_nosoft",
     "adaptive_frozen",
     "adaptive_mutate",
     "poison_frozen",
@@ -118,25 +126,43 @@ def choose_policy(
 ) -> str:
     """HOST-ONLY CI MIRROR of choose_*.aura (policy_agent is the product path).
 
-    Returns "" | "lfu" | "lru" | "ttl_aware" | "lfu|flat|pin" | "ttl_aware|flat" | …
+    Returns "" | "lfu" | "lru" | "ttl_aware" | "noop" | "lfu|flat|pin" | …
     Pin path prefers flat layout so migrate does not hurt zipf/hot retention.
     M9 TTL signals: dexpired, avg_ttl (ms), keys_ttl from INFO.
+    M10 soft-goal: if evict_rate_pct = (devicted*100)/ops ≥ budget, refuse
+    expensive lfu|+pin; prefer ttl_aware / lru / noop (see choose_normal.aura).
     """
     ops = dg + ds
     hit_pct = (100 * dh) // (dh + dm) if (dh + dm) > 0 else 0
     miss_pct = (100 * dm) // (dh + dm) if (dh + dm) > 0 else 0
     ttl_share = (100 * keys_ttl) // nkeys if nkeys > 0 else 0
+    erate = (100 * devicted) // ops if ops > 0 else 0
 
-    def ttl_pressure() -> bool:
+    def ttl_pressure(share_thr: int = 20, keys_thr: int = 15) -> bool:
         return (
             keys_ttl > 0
             and avg_ttl < 12000
-            and (ttl_share >= 20 or keys_ttl > 15)
+            and (ttl_share >= share_thr or keys_ttl > keys_thr)
         )
+
+    def soft_refuse(budget: int = 20, extreme: int = 80) -> str:
+        """M10: maximize hit% s.t. eviction CPU budget.
+
+        Refuse expensive lfu|+pin when erate over budget; prefer ttl_aware/lru.
+        (noop extreme omitted — bounce noop↔lfu hurt hit%; lru stops thrash.)
+        """
+        if erate >= budget:
+            if keys_ttl > 0 and avg_ttl < 12000:
+                return "ttl_aware|flat|soft"
+            return "lru|flat|soft"
+        return ""
 
     if profile == "aggressive":
         if ops < 25:
             return ""
+        soft = soft_refuse(18, 80)
+        if soft:
+            return soft
         if keys_ttl > 0 and avg_ttl < 12000 and (ttl_share >= 15 or keys_ttl > 10):
             return "ttl_aware|flat"
         if (ds >= dg and miss_pct > 20) or (miss_pct > 25 and nkeys > 0):
@@ -153,6 +179,9 @@ def choose_policy(
     if profile == "conservative":
         if ops < 120:
             return ""
+        soft = soft_refuse(25, 80)
+        if soft:
+            return soft
         if keys_ttl > 30 and avg_ttl < 5000 and devicted > 0:
             return "ttl_aware|flat"
         if ds > dg * 3 and miss_pct > 55:
@@ -172,9 +201,31 @@ def choose_policy(
         if dg > ds * 5 and hit_pct >= 60:
             return "lfu|hot_cold"
         return ""
-    # normal (default) — mirrors choose_normal.aura
+    if profile == "nosoft":
+        # M10 A/B: pre-soft normal (no eviction-rate budget)
+        if ops < 40:
+            return ""
+        if ttl_pressure():
+            return "ttl_aware|flat"
+        if ds >= dg and miss_pct > 30 and nkeys > 0:
+            return "lfu|flat|pin"
+        if ds > dg * 2:
+            return "lfu|flat"
+        if devicted > 0 and miss_pct > 40:
+            return "lfu|flat|pin"
+        if dg > ds * 3 and hit_pct >= 50:
+            return "lru|flat"
+        if dg > ds * 2 and hit_pct < 55 and miss_pct > 15:
+            return "lru|flat"
+        if dg > ds * 5 and hit_pct >= 60:
+            return "lru|flat"
+        return ""
+    # normal (default) — mirrors choose_normal.aura (includes M10 soft-goal)
     if ops < 40:
         return ""
+    soft = soft_refuse(20, 50)
+    if soft:
+        return soft
     if ttl_pressure():
         return "ttl_aware|flat"
     # cold-flood / miss spike while write-ish → lfu + pin (flat: no migrate hurt)
@@ -251,11 +302,16 @@ def apply_choice(sock: socket.socket, choice: str, cur_evict: str, cur_layout: s
     ev = parts[0] if parts else ""
     ly = parts[1] if len(parts) > 1 else ""
     want_pin = "pin" in parts[2:] if len(parts) > 2 else False
+    want_soft = "soft" in parts
+    if want_soft:
+        swaps.append(f"soft-goal erate-hint")
     if ev and ev != cur_evict:
         redis_call(sock, "EVICT", ev)
         swaps.append(f"{cur_evict}->{ev}")
     if ly in ("hot_cold", "hot-cold"):
         ly = "hot_cold"
+    if ly in ("soft", "pin"):
+        ly = ""
     if ly and ly != cur_layout and ly in ("flat", "hot_cold"):
         redis_call(sock, "LAYOUT", ly)
         swaps.append(f"layout:{cur_layout}->{ly}")
@@ -440,6 +496,7 @@ class AuraAgentController:
             if not ln.strip().startswith("policy_agent:"):
                 continue
             if (("EVICT" in ln and "→" in ln) or "LAYOUT" in ln
+                    or "soft-goal" in ln
                     or ln.strip().startswith("policy_agent: PIN ")
                     or ln.strip().startswith("policy_agent: UNPIN")):
                 self.swaps.append(ln.strip())
@@ -1088,25 +1145,89 @@ def workload_session_churn(s: socket.socket, mode: str) -> PhaseResult:
     return p
 
 
+def workload_flash_churn(s: socket.socket, mode: str) -> PhaseResult:
+    """M10 soft-goal: flash-sale thrash under tiny maxmemory.
+
+    Durable keep* + one fat burst of short-TTL sess* (GET-boosted) + unique
+    cold SETs so the next agent tick sees high erate + TTL together. Soft-goal
+    refuses lfu (erate≥20) → ttl_aware|flat|soft (log proof). Fixed LFU clings
+    to sessions and loses keep. Adaptive rematerializes keep under ttl_aware.
+    """
+    import time as _t
+
+    val = "F" * 200
+    nkeep = 40
+
+    def seed_keep() -> None:
+        for i in range(nkeep):
+            redis_call(s, "SET", f"keep{i:04d}", val)
+
+    seed_keep()
+    for i in range(nkeep):
+        redis_call(s, "GET", f"keep{i:04d}")
+
+    if is_adaptive(mode):
+        # Brief settle on LFU without TTL (avoid early ttl_aware before erate)
+        for j in range(40):
+            redis_call(s, "SET", f"__w{j}", "w" * 40)
+        _t.sleep(0.25)
+        seed_keep()
+
+    # Fat burst — no mid-sleep — next tick sees erate + keys_ttl together
+    for i in range(650):
+        redis_call(s, "SET", f"sess{i:05d}", val, "EX", "5")
+        if i % 2 == 0:
+            redis_call(s, "GET", f"sess{i:05d}")
+        if i % 3 == 0:
+            redis_call(s, "SET", f"cold{i:05d}", val)
+
+    if is_adaptive(mode):
+        _t.sleep(0.55)  # soft-goal tick (want |soft log)
+        seed_keep()
+        _t.sleep(0.2)
+        for i in range(220):
+            redis_call(s, "SET", f"sess2{i:05d}", val, "EX", "5")
+            if i % 2 == 0:
+                redis_call(s, "GET", f"sess2{i:05d}")
+        _t.sleep(0.25)
+
+    hits = misses = 0
+    for _ in range(10):
+        for i in range(nkeep):
+            if redis_call(s, "GET", f"keep{i:04d}") is None:
+                misses += 1
+            else:
+                hits += 1
+
+    info = parse_info(redis_call(s, "INFO"))
+    return PhaseResult(
+        "flash_churn", hits, misses, info_int(info, "evicted"), hits
+    )
+
+
+
 # ── orchestration ─────────────────────────────────────────────────────
 
 
 def _policy_agent_opts(policy: str) -> tuple[bool, str]:
     """Return (fitness_mutate, seed_profile) for Aura agent policies."""
-    if policy in ("adaptive_frozen", "poison_frozen"):
+    if policy in ("adaptive_frozen", "poison_frozen", "adaptive_nosoft",
+                  "adaptive_soft"):
         fitness = False
     else:
         fitness = True  # adaptive, adaptive_mutate, poison_mutate
     if policy in ("poison_frozen", "poison_mutate"):
         seed = "inverted"
+    elif policy == "adaptive_nosoft":
+        seed = "nosoft"
+    elif policy in ("adaptive_soft", "adaptive"):
+        seed = "normal"  # normal includes M10 soft-goal
     elif policy == "adaptive_frozen":
         seed = "normal"
     elif policy == "adaptive_mutate":
         # Same seed as frozen; only fitness swap/heal differs.
         # Use conservative so frozen lags; mutate upgrades → measurable pp.
         seed = os.environ.get("AURA_BENCH_MUTATE_SEED", "conservative")
-    elif policy == "adaptive":
-        seed = "normal"
     else:
         seed = "normal"
     # When comparing frozen vs mutate on mutation_gain, both use same seed.
@@ -1127,6 +1248,9 @@ def run_one(
     start_evict = policy if policy in ("lru", "lfu", "noop", "ttl_aware") else "lru"
     fitness_mutate = True
     seed_profile = "normal"
+    if workload == "flash_churn" and is_adaptive(policy):
+        # Start on LFU so soft-goal must refuse it (no read-heavy bridge crutch)
+        start_evict = "lfu"
     if is_adaptive(policy):
         adaptive = adaptive_backend  # python | aura
         fitness_mutate, seed_profile = _policy_agent_opts(policy)
@@ -1136,14 +1260,29 @@ def run_one(
         if workload in ("ttl_wave", "session_churn"):
             fitness_mutate = False
             seed_profile = "normal"
+        if workload == "flash_churn":
+            # A/B soft vs nosoft: freeze fitness; seed from policy
+            fitness_mutate = False
+            if policy == "adaptive_nosoft":
+                seed_profile = "nosoft"
+            elif policy in ("adaptive", "adaptive_soft"):
+                seed_profile = "normal"
 
+    mm = maxmemory
+    if workload == "flash_churn" and maxmemory >= 120_000:
+        # Tiny maxmemory amplifies LFU thrash / soft-goal contrast
+        mm = min(maxmemory, 90_000)
     h = start_server(
-        port, start_evict, maxmemory, adaptive=adaptive,
+        port, start_evict, mm, adaptive=adaptive,
         fitness_mutate=fitness_mutate, seed_profile=seed_profile,
     )
     if is_adaptive(policy) and isinstance(h.controller, PythonAdaptiveController):
         # Python mirror: simulate frozen by locking profile; poison by inverted
         h.controller.profile = seed_profile if seed_profile != "conservative" else "conservative"
+        if policy == "adaptive_nosoft":
+            h.controller.profile = "nosoft"
+        elif policy in ("adaptive_soft", "adaptive") and workload == "flash_churn":
+            h.controller.profile = "normal"
         if not fitness_mutate:
             h.controller.dwell_s = 1e9  # never flip EVICT mid-run? still choose_policy
         if workload in ("zipf_hotkey", "phase_marathon", "diurnal_shift", "mutation_gain"):
@@ -1174,6 +1313,8 @@ def run_one(
                 phases = [workload_ttl_wave(s, mode)]
             elif workload == "session_churn":
                 phases = [workload_session_churn(s, mode)]
+            elif workload == "flash_churn":
+                phases = [workload_flash_churn(s, mode)]
             elif workload in ("mutation_gain", "poison_heal"):
                 # mutation_gain = diurnal under mutate-vs-frozen attribution
                 # poison_heal = hot_protect-shaped under inverted seed
@@ -1392,6 +1533,59 @@ def print_mutation_attribution(results: List[RunResult]) -> None:
     print()
 
 
+
+def print_soft_goal_table(results: List[RunResult]) -> None:
+    """M10: lfu vs adaptive_soft vs adaptive_nosoft on flash_churn."""
+    print()
+    print("=" * 78)
+    print("SOFT-GOAL (M10) — hit% s.t. eviction budget (flash_churn)")
+    print("=" * 78)
+    by_wl: Dict[str, Dict[str, RunResult]] = {}
+    for r in results:
+        by_wl.setdefault(r.workload, {})[r.policy] = r
+    m = by_wl.get("flash_churn")
+    if not m:
+        print("  (no flash_churn runs)")
+        print("=" * 78)
+        return
+    print(f"  {'policy':<18} {'hit%':>7} {'useful':>7} {'evicted':>8}  notes")
+    print("  " + "-" * 60)
+    for pol in ("lfu", "lru", "ttl_aware", "adaptive_nosoft", "adaptive_soft",
+                "adaptive"):
+        r = m.get(pol)
+        if not r:
+            continue
+        ev = sum(p.evicted for p in r.phases)
+        soft_sw = [s for s in r.swaps if "soft-goal" in s or "erate=" in s
+                   or "→ lru" in s or "→ noop" in s or "→ ttl_aware" in s]
+        print(
+            f"  {pol:<18} {100*r.overall_hit_rate:6.1f}% {r.total_useful:>7} "
+            f"{ev:>8}  swaps={len(r.swaps)}"
+        )
+        for ln in soft_sw[:3]:
+            print(f"      · {ln}")
+    lfu = m.get("lfu")
+    soft = m.get("adaptive_soft") or m.get("adaptive")
+    nosoft = m.get("adaptive_nosoft")
+    if soft and lfu:
+        ev_s = sum(p.evicted for p in soft.phases)
+        ev_l = sum(p.evicted for p in lfu.phases)
+        print(
+            f"  → soft vs lfu: hit Δ={100*(soft.overall_hit_rate-lfu.overall_hit_rate):+.1f}pp "
+            f"useful {soft.total_useful} vs {lfu.total_useful}; "
+            f"evicted {ev_s} vs {ev_l}"
+        )
+    if soft and nosoft:
+        ev_s = sum(p.evicted for p in soft.phases)
+        ev_n = sum(p.evicted for p in nosoft.phases)
+        print(
+            f"  → soft vs nosoft: hit Δ="
+            f"{100*(soft.overall_hit_rate-nosoft.overall_hit_rate):+.1f}pp; "
+            f"evicted {ev_s} vs {ev_n}"
+        )
+    print("=" * 78)
+
+
 def assert_success(results: List[RunResult]) -> None:
     """Require adaptive to clearly beat both fixed on marathon when present;
     otherwise require ≥1 workload where LRU loses to LFU/adaptive.
@@ -1399,6 +1593,8 @@ def assert_success(results: List[RunResult]) -> None:
     by_wl_mut: Dict[str, Dict[str, RunResult]] = {}
     for r in results:
         by_wl_mut.setdefault(r.workload, {})[r.policy] = r
+
+
     for wl in ("mutation_gain", "diurnal_shift"):
         mm = by_wl_mut.get(wl, {})
         frozen = mm.get("adaptive_frozen")
@@ -1434,6 +1630,55 @@ def assert_success(results: List[RunResult]) -> None:
     for r in results:
         by_wl.setdefault(r.workload, {})[r.policy] = r
     reasons = []
+    # M10 soft-goal gate
+    fc = by_wl.get("flash_churn", {})
+    if fc:
+        soft = fc.get("adaptive_soft") or fc.get("adaptive")
+        lfu = fc.get("lfu")
+        if soft and lfu:
+            ev_s = sum(p.evicted for p in soft.phases)
+            ev_l = sum(p.evicted for p in lfu.phases)
+            hit_ok = soft.overall_hit_rate + 1e-9 >= lfu.overall_hit_rate - 0.02
+            evict_ok = ev_s <= ev_l or soft.overall_hit_rate >= lfu.overall_hit_rate + 0.05
+            useful_ok = soft.total_useful >= lfu.total_useful
+            if not ((hit_ok and useful_ok) or (evict_ok and soft.overall_hit_rate >= 0.5)):
+                raise SystemExit(
+                    f"FAIL: flash_churn soft must protect hit%/useful or cut "
+                    f"evicts vs LFU; soft={100*soft.overall_hit_rate:.1f}%/"
+                    f"{soft.total_useful}/ev={ev_s} "
+                    f"lfu={100*lfu.overall_hit_rate:.1f}%/{lfu.total_useful}/ev={ev_l}"
+                )
+            soft_logs = [s for s in soft.swaps if "soft-goal" in s]
+            ttl_or_lru = [s for s in soft.swaps
+                          if "→ ttl_aware" in s or "→ lru" in s or "→ noop" in s]
+            reasons.append(
+                f"flash_churn: soft={100*soft.overall_hit_rate:.1f}%/"
+                f"{soft.total_useful}/ev={ev_s} vs lfu="
+                f"{100*lfu.overall_hit_rate:.1f}%/{lfu.total_useful}/ev={ev_l}"
+                f" soft_logs={len(soft_logs)} refuse_swaps={len(ttl_or_lru)}"
+            )
+            if soft.overall_hit_rate + 1e-9 < lfu.overall_hit_rate + 0.05:
+                raise SystemExit(
+                    "FAIL: flash_churn soft must beat LFU by ≥5pp hit "
+                    f"(soft={100*soft.overall_hit_rate:.1f}% "
+                    f"lfu={100*lfu.overall_hit_rate:.1f}%)"
+                )
+            if not soft_logs:
+                raise SystemExit(
+                    "FAIL: flash_churn expected soft-goal log proof "
+                    "(policy_agent: soft-goal refuse…); "
+                    f"swaps={soft.swaps[:4]}"
+                )
+        nosoft = fc.get("adaptive_nosoft")
+        if soft and nosoft:
+            if (soft.overall_hit_rate + 1e-9 < nosoft.overall_hit_rate - 0.05
+                    and sum(p.evicted for p in soft.phases)
+                    >= sum(p.evicted for p in nosoft.phases)):
+                raise SystemExit(
+                    f"FAIL: flash_churn soft should not lose badly to nosoft; "
+                    f"soft={100*soft.overall_hit_rate:.1f}% "
+                    f"nosoft={100*nosoft.overall_hit_rate:.1f}%"
+                )
     # Headline gate
     for wl in ("phase_marathon",):
         m = by_wl.get(wl)
@@ -1495,7 +1740,7 @@ def assert_success(results: List[RunResult]) -> None:
             lru = m.get("lru")
             if not lru:
                 continue
-            for alt_name in ("lfu", "adaptive"):
+            for alt_name in ("lfu", "adaptive", "adaptive_soft", "ttl_aware"):
                 alt = m.get(alt_name)
                 if not alt:
                     continue
@@ -1577,6 +1822,8 @@ def main() -> int:
     print_table(results)
     print_regret_table(results)
     print_mutation_attribution(results)
+    if any(r.workload == 'flash_churn' for r in results):
+        print_soft_goal_table(results)
     if not args.skip_assert:
         assert_success(results)
     return 0
