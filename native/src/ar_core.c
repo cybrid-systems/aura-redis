@@ -785,6 +785,7 @@ ArCore* ar_core_create(void) {
   c->maxclients = 128;
   c->timeout_sec = 0;
   c->tcp_backlog = 512;
+  c->slowlog_slower_than_us = 10000;
   c->shutting_down = 0;
   return c;
 }
@@ -1454,4 +1455,15 @@ void ar_core_request_shutdown(ArCore* core) {
     return;
   core->quit = 1;
   core->shutting_down = 1;
+}
+
+int ar_core_set_slowlog_slower_than(ArCore* core, int us) {
+  if (!core || us < 0)
+    return 0;
+  core->slowlog_slower_than_us = us;
+  return 1;
+}
+
+int ar_core_slowlog_slower_than(ArCore* core) {
+  return core ? core->slowlog_slower_than_us : 0;
 }

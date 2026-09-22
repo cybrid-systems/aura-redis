@@ -15,7 +15,7 @@ Last audited: 2026-09-22 (CST) for P0.4 AUTH / protected-mode.
 | `PING` | 1 or 2 | `+PONG` or bulk | Extra args → wrong-arity error; allowed pre-AUTH |
 | `AUTH` | 2 or 3 | `+OK` / WRONGPASS | `AUTH <pass>` or `AUTH <user> <pass>` (user ignored); need `--requirepass` / `AURA_REDIS_REQUIREPASS` |
 | `HELLO` | 1+ | array map | Minimal stub; optional `AUTH` inline; allowed pre-AUTH |
-| `CONFIG` | GET 3 / SET 4 | array / `+OK` | P1.1+P1.12: `maxmemory`, `requirepass`, `protected-mode`, `evict-samples`, `bind`, `maxclients`, `timeout`, `tcp-backlog` |
+| `CONFIG` | GET 3 / SET 4 | array / `+OK` | P1.1+P1.12: `maxmemory`, `requirepass`, `protected-mode`, `evict-samples`, `bind`, `maxclients`, `timeout`, `tcp-backlog`, `slowlog-log-slower-than` |
 | `QUIT` | any | `+OK` then close | Allowed pre-AUTH |
 | `GET` | 2 | bulk / null | |
 | `SET` | ≥3 | `+OK` / `ERR OOM` | Optional `EX <sec>` only (no PX/NX/XX on C path) |

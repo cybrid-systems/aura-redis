@@ -83,6 +83,12 @@ struct ArCore {
   int maxclients; /* P1.12: soft cap ≤ AR_MAX_CONN; default 128 */
   int timeout_sec; /* P1.12: idle client timeout seconds; 0=off */
   int tcp_backlog; /* P1.12: listen backlog; default 512 */
+  /* P1.10 — command latency / slowlog */
+  int slowlog_slower_than_us; /* threshold µs; default 10000 */
+  uint64_t slowlog_count; /* commands slower than threshold */
+  uint64_t cmd_lt_1ms, cmd_lt_10ms, cmd_lt_100ms, cmd_ge_100ms;
+  uint64_t cmd_latency_sum_us; /* for avg */
+  uint64_t cmd_latency_samples;
   ArConn conns[AR_MAX_CONN];
   int nconns;
   int quit;

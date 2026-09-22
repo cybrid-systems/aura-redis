@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <unistd.h>
+#include <time.h>
 #include <signal.h>
 
 #define AR_MAX_ARGV 64
@@ -304,6 +305,33 @@ static int pass_eq(const char* a, size_t alen, const char* pass) {
 static int cmd_allowed_unauth(const char* cmd, size_t clen) {
   return cmd_eq(cmd, clen, "auth") || cmd_eq(cmd, clen, "ping") ||
          cmd_eq(cmd, clen, "quit") || cmd_eq(cmd, clen, "hello");
+}
+
+
+static uint64_t ar_now_us(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    return 0;
+  return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000ull);
+}
+
+static void note_cmd_latency(ArCore* core, uint64_t us) {
+  if (!core)
+    return;
+  core->cmd_latency_sum_us += us;
+  core->cmd_latency_samples++;
+  if (us < 1000)
+    core->cmd_lt_1ms++;
+  else if (us < 10000)
+    core->cmd_lt_10ms++;
+  else if (us < 100000)
+    core->cmd_lt_100ms++;
+  else
+    core->cmd_ge_100ms++;
+  /* 0 = log all (Redis-ish); negative disabled via CONFIG guard */
+  if (core->slowlog_slower_than_us >= 0 &&
+      us >= (uint64_t)core->slowlog_slower_than_us)
+    core->slowlog_count++;
 }
 
 static int connected_clients(ArCore* core) {
@@ -629,6 +657,11 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         snprintf(vbuf, sizeof(vbuf), "%d", core->tcp_backlog);
         AR_CFG_ADD("tcp-backlog", "%s", vbuf);
       }
+      {
+        char vbuf[32];
+        snprintf(vbuf, sizeof(vbuf), "%d", core->slowlog_slower_than_us);
+        AR_CFG_ADD("slowlog-log-slower-than", "%s", vbuf);
+      }
 #undef AR_CFG_ADD
       char hdr[32];
       int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", nitems);
@@ -691,6 +724,12 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
           return reply_err(c, "ERR config set tcp-backlog");
         return reply_ok(c);
       }
+      if (cmd_eq(argv[2].p, argv[2].len, "slowlog-log-slower-than")) {
+        int n = atoi(val);
+        if (!ar_core_set_slowlog_slower_than(core, n))
+          return reply_err(c, "ERR config set slowlog-log-slower-than");
+        return reply_ok(c);
+      }
       return reply_err(c, "ERR Unknown option or number of arguments for CONFIG "
                           "SET");
     }
@@ -720,6 +759,13 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         "maxmemory:%llu\n"
         "# Stats\n"
         "ops:%llu\n"
+        "cmd_lt_1ms:%llu\n"
+        "cmd_lt_10ms:%llu\n"
+        "cmd_lt_100ms:%llu\n"
+        "cmd_ge_100ms:%llu\n"
+        "cmd_avg_us:%llu\n"
+        "slowlog_count:%llu\n"
+        "slowlog_log_slower_than:%d\n"
         "gets:%llu\n"
         "sets:%llu\n"
         "hits:%llu\n"
@@ -756,6 +802,15 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         (unsigned long long)ar_core_used_memory(core),
         (unsigned long long)ar_core_maxmemory(core),
         (unsigned long long)ar_metric_ops(core),
+        (unsigned long long)core->cmd_lt_1ms,
+        (unsigned long long)core->cmd_lt_10ms,
+        (unsigned long long)core->cmd_lt_100ms,
+        (unsigned long long)core->cmd_ge_100ms,
+        (unsigned long long)(core->cmd_latency_samples
+                                 ? core->cmd_latency_sum_us / core->cmd_latency_samples
+                                 : 0),
+        (unsigned long long)core->slowlog_count,
+        core->slowlog_slower_than_us,
         (unsigned long long)ar_metric_gets(core),
         (unsigned long long)ar_metric_sets(core),
         (unsigned long long)ar_metric_hits(core),
@@ -949,9 +1004,14 @@ static int process_reads(ArCore* core, ArConn* c) {
       c->should_close = 1;
       break;
     }
-    if (dispatch(core, c, argv, argc) < 0) {
-      c->should_close = 1;
-      break;
+    {
+      uint64_t t0 = ar_now_us();
+      int dr = dispatch(core, c, argv, argc);
+      note_cmd_latency(core, ar_now_us() - t0);
+      if (dr < 0) {
+        c->should_close = 1;
+        break;
+      }
     }
     c->last_active_ms = ar_now_ms();
     pos += (size_t)consumed;

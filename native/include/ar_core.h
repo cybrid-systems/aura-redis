@@ -44,6 +44,8 @@ int ar_core_set_timeout(ArCore* core, int sec); /* 0=disabled */
 int ar_core_timeout(ArCore* core);
 int ar_core_set_tcp_backlog(ArCore* core, int n); /* ≥1; applied on next listen */
 int ar_core_tcp_backlog(ArCore* core);
+int ar_core_set_slowlog_slower_than(ArCore* core, int us);
+int ar_core_slowlog_slower_than(ArCore* core);
 
 /* P0.5 — request graceful shutdown (also from SIGTERM/SIGINT when installed). */
 void ar_core_request_shutdown(ArCore* core);
