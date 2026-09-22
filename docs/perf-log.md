@@ -34,3 +34,22 @@ Added `flat` / `hot_cold` layouts with quiescent `ar_core_set_layout` migrate. N
 ### Iteration 7 stretch — plugin live-reload (2026-09-22 Asia/Shanghai)
 
 `PLUGIN` / `ar_core_load_evict_plugin` swaps eviction `.so` under concurrent SET/GET without closing the listen fd. Evidence: `tests/test_plugin_reload.py` (control socket survives; new clients connect; worker errors=0; `reloads>=4`). Not a memtier gate change.
+
+### Dynamic eviction workloads (2026-09-22 Asia/Shanghai)
+
+Harness: `python3 scripts/bench_dynamic_evict.py` (C `aura_redis_server`, maxmemory=120000).
+Adaptive = Python controller mirroring `choose_normal` (optional `--aura-agent` for Aura `policy_agent`).
+
+| workload | policy | phase | hit% | useful GETs | notes |
+|----------|--------|-------|------|-------------|-------|
+| hot_protect | lru | hot_protect | 0.0% | 0 | cold flood ages hot keys out |
+| hot_protect | lfu | hot_protect | 100.0% | 40 | frequency retains hot set |
+| hot_protect | adaptive | hot_protect | 100.0% | 40 | swap lru→lfu before flood |
+| ws_shift | lru | ws_shift | 100.0% | 1600 | follows new working set B |
+| ws_shift | lfu | ws_shift | 34.4% | 551 | clings to boosted set A |
+| ws_shift | adaptive | ws_shift | 100.0% | 1600 | on/bridges to lru |
+| oscillate | lru | hot+shift | 97.6% | 1600 | 0% then 100% |
+| oscillate | lfu | hot+shift | 35.8% | 587 | 100% then ~34% |
+| oscillate | adaptive | hot+shift | **100.0%** | **1640** | swaps lru→lfu, lfu→lru |
+
+Reproduce: see `docs/workloads.md`.

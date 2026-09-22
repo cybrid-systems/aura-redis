@@ -55,11 +55,12 @@ python3 tests/test_layout.py                # flat↔hot_cold migrate under load
 python3 tests/test_aura_native.py          # EVICT / INFO / DENY_PLUGIN smoke
 python3 tests/test_aura_native.py --unit-aura
 source scripts/sandbox-policy-profile.sh   # DENY_PLUGIN=1; no ffi required for agent
+./scripts/bench-dynamic-evict.sh           # LRU vs LFU vs adaptive hit-rate workloads
 ```
 
 Story: mutate `choose-fn` under sandbox → `EVICT lru|lfu|noop`. Not “swap a .so”.
 
-**Perf (2026-09-22):** C data plane memtier p=1 **~1.13× Redis**, p=16 **~1.30× Redis**; Lisp path ~143 ops/s. Details: [`docs/perf-log.md`](docs/perf-log.md).
+**Perf (2026-09-22):** C data plane memtier p=1 **~1.13× Redis**, p=16 **~1.30× Redis**; Lisp path ~143 ops/s. Details: [`docs/perf-log.md`](docs/perf-log.md). Dynamic workloads where static LRU loses (and adaptive tracks best-of lru/lfu): [`docs/workloads.md`](docs/workloads.md).
 
 Loopback bind **127.0.0.1** for both engines (documented).
 
