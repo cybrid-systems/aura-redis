@@ -44,15 +44,19 @@
     (or (= ex 0) (> ex now))))
 
 ; Drop key if expired; return live entry or #f. O(1) hot path.
+; If ex==0 (no TTL), skip current-time-ms entirely.
 (define (store-touch! db key)
   (let ((e (hash-ref db key #f)))
     (if (not e)
       #f
-      (if (store-alive? e (current-time-ms))
-        e
-        (begin
-          (hash-remove! db key)
-          #f)))))
+      (let ((ex (hash-ref e "ex" 0)))
+        (if (= ex 0)
+          e
+          (if (> ex (current-time-ms))
+            e
+            (begin
+              (hash-remove! db key)
+              #f)))))))
 
 ; Full scan — use for KEYS / DBSIZE / periodic maintenance, not hot path.
 (define (store-purge! db)
@@ -70,13 +74,21 @@
 (define (store-get db key)
   (store-touch! db key))
 
+; Mutate in place when key already has a string entry (avoid alloc every SET).
 (define (store-set-string! db key val ex-ms)
-  (let ((entry (hash)))
-    (hash-set! entry "t" "string")
-    (hash-set! entry "v" val)
-    (hash-set! entry "ex" (if (and (number? ex-ms) (> ex-ms 0)) ex-ms 0))
-    (hash-set! db key entry)
-    #t))
+  (let ((ex (if (and (number? ex-ms) (> ex-ms 0)) ex-ms 0))
+        (e (hash-ref db key #f)))
+    (if (and e (string=? (hash-ref e "t" "") "string"))
+      (begin
+        (hash-set! e "v" val)
+        (hash-set! e "ex" ex)
+        #t)
+      (let ((entry (hash)))
+        (hash-set! entry "t" "string")
+        (hash-set! entry "v" val)
+        (hash-set! entry "ex" ex)
+        (hash-set! db key entry)
+        #t))))
 
 (define (store-del! db keys)
   (let ((n 0)
@@ -321,6 +333,7 @@
             (out (list)))
         (while (lambda () (pair? ks))
           (lambda ()
-            (set! out (append out (list (car ks) (hash-ref h (car ks) ""))))
+            (set! out (cons (hash-ref h (car ks) "") out))
+            (set! out (cons (car ks) out))
             (set! ks (cdr ks))))
-        out))))
+        (reverse out)))))

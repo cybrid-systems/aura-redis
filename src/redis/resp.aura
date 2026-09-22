@@ -13,6 +13,11 @@
 ; Complete → (list next-index wire-value)
 
 (export resp-crlf
+        *RESP-OK*
+        *RESP-PONG*
+        *RESP-NULL*
+        *RESP-ZERO*
+        *RESP-ONE*
         resp-encode-simple
         resp-encode-error
         resp-encode-int
@@ -28,6 +33,13 @@
         resp-unwrap-bulk
         resp-cmd-args)
 
+; Constant wire replies — avoid string-append on hot path
+(define *RESP-OK* "+OK\r\n")
+(define *RESP-PONG* "+PONG\r\n")
+(define *RESP-NULL* "$-1\r\n")
+(define *RESP-ZERO* ":0\r\n")
+(define *RESP-ONE* ":1\r\n")
+
 (define (resp-crlf) "\r\n")
 
 (define (resp-encode-simple s)
@@ -37,18 +49,20 @@
   (string-append "-" s "\r\n"))
 
 (define (resp-encode-int n)
-  (string-append ":" n "\r\n"))
+  (cond
+    ((= n 0) *RESP-ZERO*)
+    ((= n 1) *RESP-ONE*)
+    (else (string-append ":" n "\r\n"))))
 
 (define (resp-encode-bulk s)
   (if (not (string? s))
-    (resp-encode-null)
+    *RESP-NULL*
     (string-append "$" (string-length s) "\r\n" s "\r\n")))
 
-(define (resp-encode-null)
-  "$-1\r\n")
+(define (resp-encode-null) *RESP-NULL*)
 
-(define (resp-encode-ok) (resp-encode-simple "OK"))
-(define (resp-encode-pong) (resp-encode-simple "PONG"))
+(define (resp-encode-ok) *RESP-OK*)
+(define (resp-encode-pong) *RESP-PONG*)
 
 (define (resp-encode-array items)
   (let ((n (length items))
@@ -72,7 +86,7 @@
     ((string=? (car v) "error") (resp-encode-error (car (cdr v))))
     ((string=? (car v) "int") (resp-encode-int (car (cdr v))))
     ((string=? (car v) "bulk") (resp-encode-bulk (car (cdr v))))
-    ((string=? (car v) "null") (resp-encode-null))
+    ((string=? (car v) "null") *RESP-NULL*)
     ((string=? (car v) "array") (resp-encode-array (car (cdr v))))
     (else (resp-encode-error "ERR encode"))))
 
@@ -167,11 +181,12 @@
                       (begin (set! ok #f) (set! fail #t))
                       (begin
                         (set! pos (car r))
-                        (set! items (append items (list (car (cdr r)))))
+                        ; cons + reverse (not append) — O(n) not O(n²)
+                        (set! items (cons (car (cdr r)) items))
                         (set! k (+ k 1)))))))
               (if fail
                 #f
-                (list pos (list "array" items))))))))))
+                (list pos (list "array" (reverse items)))))))))))
 
 ; Unwrap bulk/simple/int to a string (for command args)
 (define (resp-unwrap-bulk v)
@@ -184,6 +199,7 @@
     (else "")))
 
 ; Convert a top-level array wire value into a list of string args
+; cons + reverse (not append) — O(n) not O(n²)
 (define (resp-cmd-args v)
   (if (and (pair? v) (string=? (car v) "array"))
     (let ((xs (car (cdr v)))
@@ -191,7 +207,7 @@
       (while (lambda () (pair? xs))
         (lambda ()
           (let ((u (resp-unwrap-bulk (car xs))))
-            (set! out (append out (list (if u u ""))))
+            (set! out (cons (if u u "") out))
             (set! xs (cdr xs)))))
-      out)
+      (reverse out))
     (list)))

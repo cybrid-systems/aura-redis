@@ -27,25 +27,29 @@ Pinned Aura revision: [`b0c6b3555e4287c8807b019a8b9316ee94c988b6`](https://githu
 
 ---
 
-## Perf notes (v0.2)
+## Perf notes (v0.2 → memtier hot-path)
 
 | Change | Effect |
 |--------|--------|
-| **Lazy per-key TTL** | Hot-path get/exists/type/ttl/incr/list/hash touch **one** key; `store-purge!` only for KEYS / DBSIZE |
-| **Pipelined write** | `process-buffer` accumulates replies → **one `tcp-send`** per recv burst |
-| **`ascii-upcase`** | Build via char list → `list->string` (no O(n²) `string-append`) |
-| **Fiber-per-client** | `fiber:spawn` per accept (fallback / `AURA_REDIS_SYNC=1` = sequential) |
+| **Constant RESP replies** | `*RESP-OK*` / `*RESP-PONG*` / `*RESP-NULL*` / `:0` / `:1` — no `string-append` on OK/PONG/null |
+| **`cmd-eq?` / `ascii-cmd=?`** | Case-insensitive command match **without** allocating `ascii-upcase` on every dispatch |
+| **SET/GET fast paths** | Exactly-3-arg SET skips `parse-set-opts`; 2-arg GET minimal touch+bulk; in-place `store-set-string!` mutate |
+| **`store-touch!`** | Skip `current-time-ms` when `ex==0` |
+| **O(n) list builds** | `resp-cmd-args` / `resp-parse-array` / `args-from` use `cons`+`reverse` (not `append`) |
+| **Per-reply `tcp-send`** | Pipeline replies sent individually (beats O(n²) join; measured better than batched join for p=16) |
+| **Lazy per-key TTL** | Hot-path touch one key; `store-purge!` only for KEYS / DBSIZE |
+| **Fiber-per-client** | `fiber:spawn` per accept (`AURA_REDIS_SYNC=1` = sequential) |
 
-Rough local numbers (container `ghcr.io/cybrid-systems/dev:v1.0.7`, N=300, pipeline batch 30; FLUSH between phases):
+memtier (`1c/1t`, SET:GET=1:10, 32B, key 1..10000 R:R; aura N=2000, container `ghcr.io/cybrid-systems/dev:v1.0.7`):
 
-| Phase | Before (O(n) purge / per-cmd send) | After (lazy TTL + piped write) |
-|-------|-------------------------------------|--------------------------------|
-| SET sequential | ~52 ops/sec | ~88–100 ops/sec |
-| GET sequential | ~61 ops/sec | ~450 ops/sec |
-| SET pipelined | ~12 ops/sec | ~18–20 ops/sec (Aura hash/CPU bound) |
-| GET pipelined | ~35 ops/sec | ~560 ops/sec |
+| | Totals ops/s | SET | GET |
+|--|--|--|--|
+| aura p=1 (before) | 112 | 10 | 102 |
+| aura p=1 (after) | **~143** | **~13** | **~130** |
+| aura p=16 (before) | 29 | 2.7 | 27 |
+| aura p=16 (after) | **~81** | **~7.4** | **~74** |
 
-GET improved ~7–16×; SET ~1.7×. Pipelined SET remains CPU-bound inside Aura (hash writes), not RTT.
+Pipeline no longer collapses throughput (was worse than p=1). Absolute ops/s remain Aura interpreter / hash-write bound vs Redis (~38k / ~338k).
 
 Run: `python3 scripts/bench.py --port 16379 -n 300 --pipeline 30`
 

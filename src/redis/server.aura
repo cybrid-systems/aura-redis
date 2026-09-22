@@ -32,26 +32,15 @@
 (define (buf-append a b)
   (string-append a b))
 
-; Join list of strings (iterative).
-(define (join-strs xs)
-  (let ((out "")
-        (cur xs))
-    (while (lambda () (pair? cur))
-      (lambda ()
-        (set! out (string-append out (car cur)))
-        (set! cur (cdr cur))))
-    out))
-
 ; Process as many complete RESP messages as possible from buffer.
-; Uses an index walk (no per-command substring of the remainder) and
-; accumulates replies for ONE tcp-send per recv burst.
+; Per-reply tcp-send: no O(n^2) join of pipeline replies; measured faster
+; than batched join+send for memtier pipeline=16.
 ; Returns (list remaining-buffer should-quit)
 (define (process-buffer sock buf)
   (let ((done #f)
         (quit #f)
         (pos 0)
-        (n (string-length buf))
-        (reply-parts (list)))
+        (n (string-length buf)))
     (while (lambda () (not done))
       (lambda ()
         (if (>= pos n)
@@ -60,18 +49,12 @@
             (if (not r)
               (set! done #t)
               (let ((next (car r))
-                    (val (car (cdr r)))
-                    (args (list))
-                    (reply ""))
-                (set! args (resp-cmd-args val))
-                (set! reply (cmd-dispatch args))
-                (set! reply-parts (cons reply reply-parts))
-                (set! pos next)
-                (if (and (pair? args)
-                         (string=? (ascii-upcase (car args)) "QUIT"))
-                  (begin (set! quit #t) (set! done #t)))))))))
-    (if (pair? reply-parts)
-      (tcp-send sock (join-strs (reverse reply-parts))))
+                    (val (car (cdr r))))
+                (let ((args (resp-cmd-args val)))
+                  (tcp-send sock (cmd-dispatch args))
+                  (set! pos next)
+                  (if (and (pair? args) (cmd-eq? (car args) "QUIT"))
+                    (begin (set! quit #t) (set! done #t))))))))))
     (list (if (>= pos n) "" (substring buf pos n)) quit)))
 
 (define (serve-client sock)
