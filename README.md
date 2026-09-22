@@ -17,6 +17,29 @@ Iteration plan: [`docs/iteration-plan.md`](docs/iteration-plan.md)
 
 ---
 
+
+## Hybrid engine (C data plane) / 混合引擎
+
+| Env | Meaning |
+|-----|---------|
+| `AURA_REDIS_ENGINE` | `ffi` (C epoll/RESP/dict via `std/ffi`) or `aura` (pure Lisp) |
+| `AURA_REDIS_CORE_SO` | path to `libaura_redis_core.so` |
+| `AURA_REDIS_MAXMEMORY` | bytes; enables eviction when strategy ≠ `noop` |
+| `AURA_REDIS_EVICT` | `noop` \| `lru` \| `lfu` |
+
+```bash
+./scripts/build-native.sh
+./scripts/run-server-ffi.sh 6379          # Aura+FFI in dev container (host network)
+AURA_REDIS_ENGINE=ffi ./scripts/smoke-test.sh
+./scripts/memtier-cmp.sh                 # vs redis:7-alpine → docs/perf-log.md
+python3 tests/test_eviction.py --evict lru
+```
+
+**Perf (2026-09-22):** C data plane memtier p=1 **~1.13× Redis**, p=16 **~1.30× Redis**; Lisp path ~143 ops/s. Details: [`docs/perf-log.md`](docs/perf-log.md).
+
+Loopback bind **127.0.0.1** for both engines (documented).
+
+---
 ## Purpose / 目的
 
 | EN | 中文 |
@@ -167,7 +190,13 @@ AURA_REF                     pinned Aura SHA
 src/redis/resp.aura          RESP2 encode/decode
 src/redis/store.aura         in-memory KV (+ list/hash); lazy TTL
 src/redis/commands.aura      command dispatch
-src/redis/server.aura        listen / accept / fiber-per-client (entry)
+src/redis/server.aura        pure Lisp engine (AURA_REDIS_ENGINE=aura)
+src/redis/server_ffi.aura    FFI control plane → C serve_forever
+src/redis/ffi_boot.aura      in-process FFI helpers
+native/                      libaura_redis_core.so (epoll/RESP/dict/evict)
+scripts/build-native.sh
+scripts/run-server-ffi.sh
+scripts/memtier-cmp.sh
 scripts/fetch-aura.sh
 scripts/build-aura.sh
 scripts/run-server.sh

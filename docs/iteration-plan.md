@@ -18,48 +18,47 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 **Goal:** Build `libaura_redis_core.so`; Aura loads it via `std/ffi` and calls `ar_core_create` / `ar_ping` / in-process `ar_set`/`ar_get`.
 
-**Work:**
-
-1. `native/CMakeLists.txt` + `ar_core.h` / `ar_core.c` (or `.cpp`)
-2. In-memory dict (simple open-addressing or chained); string values only
-3. Eviction vtable stub (`noop` only)
-4. `scripts/build-native.sh` (container-friendly)
-5. `src/redis/ffi_boot.aura` — c-load + bind symbols
-6. `tests/test_ffi_core.py` or small Aura script: SET/GET roundtrip via FFI (no TCP yet)
-
 **Exit:** Aura process SET/GET through C ≥ 10× pure-Aura `store-set-string!` microbench (order-of-magnitude check).
 
 ---
 
-## Iteration 2 — TCP + RESP in C + memtier baseline
+## Iteration 2 — TCP + RESP in C + memtier baseline ✅
 
-**Goal:** C epoll (or poll) loop + RESP2 for PING/GET/SET/DEL/EXISTS; `server_ffi.aura` serve_forever; memtier vs Redis scripted.
+**Goal:** C epoll loop + RESP2 for PING/GET/SET/DEL/EXISTS; `server_ffi.aura` serve_forever; memtier vs Redis scripted.
 
 **Exit:** memtier p=1 Totals reported; target **≥20% Redis** (stretch); must beat Lisp engine by ≫10×.
 
+**Result:** p=1 ratio **1.125** vs Redis; ≈334× Lisp. See `docs/perf-log.md`.
+
 ---
 
-## Iteration 3 — Pipeline + command stretch toward gate
+## Iteration 3 — Pipeline + command stretch toward gate ✅
 
 **Goal:** Efficient pipelining; MGET/MSET; INCR; FLUSHDB; KEYS optional.
 
 **Exit:** memtier p=1 **≥50% Redis**; p=16 not regressing vs p=1.
 
+**Result:** Pipeline parse-many + MGET/MSET/INCR/DECR/FLUSHDB landed with iter2; p=1 **112%**, p=16 **130%** Redis.
+
 ---
 
-## Iteration 4 — Chase 80% gate
+## Iteration 4 — Chase 80% gate ✅
 
 **Goal:** Buffer sizing, parse/encode tight loops, dict load factor, syscall batching (`writev`), reduce copies.
 
 **Exit:** **`scripts/memtier-cmp.sh` ratio ≥ 0.80** on frozen matrix (primary gate).
 
+**Result:** Gate cleared at **1.125** without writev; remaining levers documented in `docs/perf-log.md`.
+
 ---
 
-## Iteration 5 — Eviction vtable: LRU + LFU + maxmemory
+## Iteration 5 — Eviction vtable: LRU + LFU + maxmemory ✅
 
 **Goal:** `ar_core_set_evict_by_name`; maxmemory; approximate LRU/LFU; metrics.
 
 **Exit:** Under maxmemory, eviction keeps RSS bound; smoke + a small eviction test.
+
+**Result:** `lru`/`lfu` + `ar_core_set_maxmemory` + `tests/test_eviction.py`; env `AURA_REDIS_MAXMEMORY` / `AURA_REDIS_EVICT`.
 
 ---
 
@@ -97,4 +96,4 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 ## Current position
 
-**Iteration 1 done** (`libaura_redis_core.so` + FFI smoke). **Next: Iteration 2** (TCP + RESP + memtier).
+**Iterations 0–5 done.** **Next: Iteration 6** (Aura adaptive supervisor).

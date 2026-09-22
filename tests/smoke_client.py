@@ -201,16 +201,84 @@ def run(host: str, port: int) -> int:
     return 0
 
 
+def run_ffi(host: str, port: int) -> int:
+    """Subset for C data-plane commands (Iteration 2+)."""
+    print(f"smoke-ffi: connect {host}:{port}")
+    with socket.create_connection((host, port), timeout=10) as sock:
+        expect("PING", redis_call(sock, "PING"), "PONG")
+        expect("PING msg", redis_call(sock, "PING", "hi"), "hi")
+        expect("SET", redis_call(sock, "SET", "a", "hello"), "OK")
+        expect("GET", redis_call(sock, "GET", "a"), "hello")
+        expect("EXISTS", redis_call(sock, "EXISTS", "a"), 1)
+        expect("INCR", redis_call(sock, "INCR", "n"), 1)
+        expect("INCR2", redis_call(sock, "INCR", "n"), 2)
+        expect("DECR", redis_call(sock, "DECR", "n"), 1)
+        expect("DEL", redis_call(sock, "DEL", "a"), 1)
+        expect("GET miss", redis_call(sock, "GET", "a"), None)
+        expect("FLUSHDB", redis_call(sock, "FLUSHDB"), "OK")
+        expect("MSET", redis_call(sock, "MSET", "x", "1", "y", "2"), "OK")
+        expect("MGET", redis_call(sock, "MGET", "x", "missing", "y"), ["1", None, "2"])
+        # pipeline
+        sock.sendall(encode_array(["PING"]) + encode_array(["GET", "x"]) + encode_array(["SET", "z", "9"]))
+        buf = bytearray()
+        vals = []
+        while len(vals) < 3:
+            try:
+                v, c = decode_one(buf)
+                del buf[:c]
+                if isinstance(v, Exception):
+                    raise RuntimeError(str(v))
+                vals.append(v)
+            except Incomplete:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    raise ConnectionError("closed in pipeline")
+                buf.extend(chunk)
+        expect("pipeline PING", vals[0], "PONG")
+        expect("pipeline GET", vals[1], "1")
+        expect("pipeline SET", vals[2], "OK")
+        redis_call(sock, "QUIT")
+    print("smoke: concurrent clients")
+    results: list[str | BaseException] = []
+
+    def worker(tag: str) -> None:
+        try:
+            with socket.create_connection((host, port), timeout=5) as s:
+                r = redis_call(s, "SET", f"c-{tag}", tag)
+                g = redis_call(s, "GET", f"c-{tag}")
+                if r != "OK" or g != tag:
+                    results.append(AssertionError(f"{tag}: {r!r} {g!r}"))
+                else:
+                    results.append("ok")
+                redis_call(s, "QUIT")
+        except BaseException as e:  # noqa: BLE001
+            results.append(e)
+
+    t1 = threading.Thread(target=worker, args=("A",))
+    t2 = threading.Thread(target=worker, args=("B",))
+    t1.start(); t2.start()
+    t1.join(timeout=15); t2.join(timeout=15)
+    for r in results:
+        if isinstance(r, BaseException):
+            raise r
+    expect_true("concurrent two clients", results == ["ok", "ok"], repr(results))
+    print("smoke-ffi: ALL PASSED")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="aura-redis RESP smoke client")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=6379)
     p.add_argument("--retries", type=int, default=90)
+    p.add_argument("--engine", choices=("aura", "ffi"), default="aura",
+                   help="aura=full Lisp command set; ffi=C core subset")
     args = p.parse_args(argv)
+    runner = run_ffi if args.engine == "ffi" else run
     last: Exception | None = None
     for _ in range(args.retries):
         try:
-            return run(args.host, args.port)
+            return runner(args.host, args.port)
         except (ConnectionRefusedError, TimeoutError, OSError) as e:
             last = e
             time.sleep(0.25)

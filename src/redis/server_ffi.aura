@@ -1,0 +1,80 @@
+; server_ffi.aura — Aura control plane + C data plane (Iteration 2+)
+; Loads libaura_redis_core.so via std/ffi and runs C epoll serve_forever.
+;
+; Env:
+;   AURA_REDIS_PORT       listen port (default 6379)
+;   AURA_REDIS_CORE_SO    path to .so (default native/build/libaura_redis_core.so)
+;   AURA_REDIS_MAXMEMORY  bytes (0/unset = unlimited)
+;   AURA_REDIS_EVICT      noop|lru|lfu (default noop)
+;
+; NOTE: (c-load path) returns a library INDEX; first success is 0 — not failure.
+; Verify with (procedure? (c-func ...)).
+; ar_core_listen returns 1 on success, 0 on error (Aura FFI-friendly; avoid 0-success).
+
+(require "std/ffi" all:)
+
+(define (env-or name fallback)
+  (let ((e (getenv name)))
+    (if (and (string? e) (> (string-length e) 0)) e fallback)))
+
+(define (env-port)
+  (let ((e (getenv "AURA_REDIS_PORT")))
+    (if (and (string? e) (number? (string->number e)))
+      (string->number e)
+      6379)))
+
+(define so-path (env-or "AURA_REDIS_CORE_SO" "native/build/libaura_redis_core.so"))
+(define lib (c-load so-path))
+(define create (c-func lib "ar_core_create" "() -> Opaque"))
+(if (not (procedure? create))
+  (begin
+    (display "server_ffi: c-load/c-func failed for ")
+    (display so-path)
+    (newline)
+    (display "  lib-index=")
+    (display lib)
+    (newline)
+    (exit 1))
+  #t)
+
+(define destroy (c-func lib "ar_core_destroy" "(Opaque) -> Void"))
+(define listen! (c-func lib "ar_core_listen" "(Opaque Int) -> Int"))
+(define serve! (c-func lib "ar_core_serve_forever" "(Opaque) -> Int"))
+(define set-evict! (c-func lib "ar_core_set_evict_by_name" "(Opaque String) -> Int"))
+(define set-maxmem! (c-func lib "ar_core_set_maxmemory" "(Opaque Int) -> Int"))
+
+(define core (create))
+(if (not (c-opaque? core))
+  (begin (display "server_ffi: ar_core_create failed\n") (exit 1))
+  #t)
+
+(define evict-name (env-or "AURA_REDIS_EVICT" "noop"))
+(set-evict! core evict-name)
+
+(define maxmem-env (getenv "AURA_REDIS_MAXMEMORY"))
+(if (and (string? maxmem-env)
+         (> (string-length maxmem-env) 0)
+         (number? (string->number maxmem-env)))
+  (set-maxmem! core (string->number maxmem-env))
+  #t)
+
+(define port (env-port))
+(display "server_ffi: binding port=")
+(display port)
+(newline)
+(define lr (listen! core port))
+(display "server_ffi: listen rc=")
+(display lr)
+(newline)
+(if (not (= lr 1))
+  (begin
+    (display "server_ffi: ar_core_listen failed\n")
+    (exit 1))
+  #t)
+
+(display "server_ffi: serve_forever (C data plane)\n")
+(define rc (serve! core))
+(display "aura-redis-ffi exit=")
+(display rc)
+(newline)
+(destroy core)
