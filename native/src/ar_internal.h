@@ -40,6 +40,7 @@ typedef struct ArConn {
   int should_close;
   int want_write;
   int authenticated; /* P0.4: 1 if AUTH ok or no requirepass */
+  uint64_t last_active_ms; /* P1.12: idle timeout clock */
 } ArConn;
 
 struct ArCore {
@@ -79,6 +80,9 @@ struct ArCore {
   char bind_addr[64]; /* e.g. 127.0.0.1 or 0.0.0.0 */
   int protected_mode; /* P0.4: Redis-ish; default 1 */
   char* requirepass; /* P0.4: NULL/empty = no AUTH required */
+  int maxclients; /* P1.12: soft cap ≤ AR_MAX_CONN; default 128 */
+  int timeout_sec; /* P1.12: idle client timeout seconds; 0=off */
+  int tcp_backlog; /* P1.12: listen backlog; default 512 */
   ArConn conns[AR_MAX_CONN];
   int nconns;
   int quit;

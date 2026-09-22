@@ -37,6 +37,14 @@ int ar_core_set_bind(ArCore* core, const char* addr); /* e.g. 127.0.0.1 / 0.0.0.
 const char* ar_core_bind_addr(ArCore* core);
 int ar_core_set_protected_mode(ArCore* core, int on); /* 1=on 0=off; default 1 */
 int ar_core_protected_mode(ArCore* core);
+/* P1.12 — client limits */
+int ar_core_set_maxclients(ArCore* core, int n); /* 1..AR_MAX_CONN */
+int ar_core_maxclients(ArCore* core);
+int ar_core_set_timeout(ArCore* core, int sec); /* 0=disabled */
+int ar_core_timeout(ArCore* core);
+int ar_core_set_tcp_backlog(ArCore* core, int n); /* ≥1; applied on next listen */
+int ar_core_tcp_backlog(ArCore* core);
+
 /* P0.5 — request graceful shutdown (also from SIGTERM/SIGINT when installed). */
 void ar_core_request_shutdown(ArCore* core);
 void ar_core_install_signal_handlers(ArCore* core);

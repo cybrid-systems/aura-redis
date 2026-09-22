@@ -280,3 +280,17 @@ python3 scripts/bench.py --port 16379 -n 1000 --pipeline 50 || true
 ## License
 
 Apache License 2.0 (same as Aura).
+
+## Persistence / restart semantics (production v1)
+
+**aura-redis is a cache/KV data plane by default — not a durable store.**
+
+On process restart (clean or crash):
+
+- All keys are **gone** (no RDB/AOF in v1).
+- Runtime `CONFIG SET` knobs reset to CLI/env/defaults.
+- The last `EVICT` / `LAYOUT` kernel also resets to server startup flags (`--evict`, `--layout`).
+- Aura `policy_agent` will reconnect and re-choose policy from live `INFO` (see P1.9 HA).
+
+If you need warm-start durability, that is a **P2** item (optional RDB/AOF). Do not assume Redis-compatible persistence.
+

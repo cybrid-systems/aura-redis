@@ -55,6 +55,7 @@ static ArConn* conn_alloc(ArCore* core, int fd) {
       conn_reset(c);
       c->fd = fd;
       c->in_use = 1;
+      c->last_active_ms = ar_now_ms();
       /* No password configured → treat as authenticated. */
       if (!core->requirepass || !core->requirepass[0])
         c->authenticated = 1;
@@ -613,6 +614,21 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       }
       AR_CFG_ADD("bind", "%s",
                  core->bind_addr[0] ? core->bind_addr : "127.0.0.1");
+      {
+        char vbuf[32];
+        snprintf(vbuf, sizeof(vbuf), "%d", core->maxclients);
+        AR_CFG_ADD("maxclients", "%s", vbuf);
+      }
+      {
+        char vbuf[32];
+        snprintf(vbuf, sizeof(vbuf), "%d", core->timeout_sec);
+        AR_CFG_ADD("timeout", "%s", vbuf);
+      }
+      {
+        char vbuf[32];
+        snprintf(vbuf, sizeof(vbuf), "%d", core->tcp_backlog);
+        AR_CFG_ADD("tcp-backlog", "%s", vbuf);
+      }
 #undef AR_CFG_ADD
       char hdr[32];
       int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", nitems);
@@ -657,6 +673,24 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
           return reply_err(c, "ERR config set evict-samples");
         return reply_ok(c);
       }
+      if (cmd_eq(argv[2].p, argv[2].len, "maxclients")) {
+        int n = atoi(val);
+        if (!ar_core_set_maxclients(core, n))
+          return reply_err(c, "ERR config set maxclients");
+        return reply_ok(c);
+      }
+      if (cmd_eq(argv[2].p, argv[2].len, "timeout")) {
+        int n = atoi(val);
+        if (!ar_core_set_timeout(core, n))
+          return reply_err(c, "ERR config set timeout");
+        return reply_ok(c);
+      }
+      if (cmd_eq(argv[2].p, argv[2].len, "tcp-backlog")) {
+        int n = atoi(val);
+        if (!ar_core_set_tcp_backlog(core, n))
+          return reply_err(c, "ERR config set tcp-backlog");
+        return reply_ok(c);
+      }
       return reply_err(c, "ERR Unknown option or number of arguments for CONFIG "
                           "SET");
     }
@@ -678,6 +712,9 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         "requirepass:%s\n"
         "# Clients\n"
         "connected_clients:%d\n"
+        "maxclients:%d\n"
+        "timeout:%d\n"
+        "tcp_backlog:%d\n"
         "# Memory\n"
         "used_memory:%llu\n"
         "maxmemory:%llu\n"
@@ -713,6 +750,9 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         core->protected_mode ? "yes" : "no",
         (core->requirepass && core->requirepass[0]) ? "yes" : "no",
         connected_clients(core),
+        core->maxclients,
+        core->timeout_sec,
+        core->tcp_backlog,
         (unsigned long long)ar_core_used_memory(core),
         (unsigned long long)ar_core_maxmemory(core),
         (unsigned long long)ar_metric_ops(core),
@@ -913,6 +953,7 @@ static int process_reads(ArCore* core, ArConn* c) {
       c->should_close = 1;
       break;
     }
+    c->last_active_ms = ar_now_ms();
     pos += (size_t)consumed;
     if (c->should_close)
       break;
@@ -988,8 +1029,18 @@ static int accept_clients(ArCore* core) {
     set_nonblock(fd);
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    if (connected_clients(core) >= core->maxclients) {
+      static const char full[] =
+          "-ERR max number of clients reached\r\n";
+      (void)!write(fd, full, sizeof(full) - 1);
+      close(fd);
+      continue;
+    }
     ArConn* c = conn_alloc(core, fd);
     if (!c) {
+      static const char full[] =
+          "-ERR max number of clients reached\r\n";
+      (void)!write(fd, full, sizeof(full) - 1);
       close(fd);
       continue;
     }
@@ -1053,7 +1104,8 @@ int ar_core_listen(ArCore* core, int port) {
     close(fd);
     return 0;
   }
-  if (listen(fd, 512) < 0) {
+  int backlog = core->tcp_backlog > 0 ? core->tcp_backlog : 512;
+  if (listen(fd, backlog) < 0) {
     close(fd);
     return 0;
   }
@@ -1086,10 +1138,29 @@ int ar_core_listen(ArCore* core, int port) {
   return 1;
 }
 
+
+/* P1.12: close idle clients past timeout_sec (0 = disabled). */
+static void close_idle_clients(ArCore* core) {
+  if (!core || core->timeout_sec <= 0)
+    return;
+  uint64_t now = ar_now_ms();
+  uint64_t limit = (uint64_t)core->timeout_sec * 1000ull;
+  for (int i = 0; i < AR_MAX_CONN; ++i) {
+    ArConn* c = &core->conns[i];
+    if (!c->in_use)
+      continue;
+    if (c->last_active_ms && now > c->last_active_ms &&
+        (now - c->last_active_ms) >= limit) {
+      conn_close(core, c);
+    }
+  }
+}
+
 static int serve_once(ArCore* core, int timeout_ms) {
   /* P0.3: active expire between epoll wakes (also on idle timeout). */
   if (core->keys_with_ttl)
     ar_core_active_expire(core, 16);
+  close_idle_clients(core);
   struct epoll_event events[AR_MAX_EVENTS];
   int n = epoll_wait(core->epfd, events, AR_MAX_EVENTS, timeout_ms);
   if (n < 0) {

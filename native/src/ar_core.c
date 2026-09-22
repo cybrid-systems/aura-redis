@@ -782,6 +782,9 @@ ArCore* ar_core_create(void) {
   snprintf(c->bind_addr, sizeof(c->bind_addr), "127.0.0.1");
   c->protected_mode = 1;
   c->requirepass = NULL;
+  c->maxclients = 128;
+  c->timeout_sec = 0;
+  c->tcp_backlog = 512;
   c->shutting_down = 0;
   return c;
 }
@@ -1410,6 +1413,41 @@ int ar_core_set_protected_mode(ArCore* core, int on) {
 int ar_core_protected_mode(ArCore* core) {
   return core ? core->protected_mode : 0;
 }
+
+/* P1.12 — client limits */
+int ar_core_set_maxclients(ArCore* core, int n) {
+  if (!core || n < 1 || n > AR_MAX_CONN)
+    return 0;
+  core->maxclients = n;
+  return 1;
+}
+
+int ar_core_maxclients(ArCore* core) {
+  return core ? core->maxclients : 0;
+}
+
+int ar_core_set_timeout(ArCore* core, int sec) {
+  if (!core || sec < 0)
+    return 0;
+  core->timeout_sec = sec;
+  return 1;
+}
+
+int ar_core_timeout(ArCore* core) {
+  return core ? core->timeout_sec : 0;
+}
+
+int ar_core_set_tcp_backlog(ArCore* core, int n) {
+  if (!core || n < 1)
+    return 0;
+  core->tcp_backlog = n;
+  return 1;
+}
+
+int ar_core_tcp_backlog(ArCore* core) {
+  return core ? core->tcp_backlog : 0;
+}
+
 
 void ar_core_request_shutdown(ArCore* core) {
   if (!core)

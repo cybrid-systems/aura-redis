@@ -13,6 +13,9 @@ int main(int argc, char** argv) {
   const char* requirepass = NULL;
   const char* bind_addr = NULL;
   int protected_mode = -1; /* -1 = default (on) */
+  int maxclients = -1;
+  int timeout_sec = -1;
+  int tcp_backlog = -1;
   uint64_t maxmem = 0;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
@@ -35,7 +38,12 @@ int main(int argc, char** argv) {
         protected_mode = 0;
       else
         protected_mode = 1;
-    }
+    } else if (strcmp(argv[i], "--maxclients") == 0 && i + 1 < argc)
+      maxclients = atoi(argv[++i]);
+    else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc)
+      timeout_sec = atoi(argv[++i]);
+    else if (strcmp(argv[i], "--tcp-backlog") == 0 && i + 1 < argc)
+      tcp_backlog = atoi(argv[++i]);
   }
   /* Env fallbacks (Iteration 8 layout + existing eviction) */
   if (!layout || !layout[0]) {
@@ -80,6 +88,18 @@ int main(int argc, char** argv) {
       protected_mode = 1;
     }
   }
+  if (maxclients < 0) {
+    const char* e = getenv("AURA_REDIS_MAXCLIENTS");
+    if (e && e[0]) maxclients = atoi(e);
+  }
+  if (timeout_sec < 0) {
+    const char* e = getenv("AURA_REDIS_TIMEOUT");
+    if (e && e[0]) timeout_sec = atoi(e);
+  }
+  if (tcp_backlog < 0) {
+    const char* e = getenv("AURA_REDIS_TCP_BACKLOG");
+    if (e && e[0]) tcp_backlog = atoi(e);
+  }
 
   ArCore* core = ar_core_create();
   if (!core) {
@@ -96,6 +116,12 @@ int main(int argc, char** argv) {
   ar_core_set_protected_mode(core, protected_mode);
   if (requirepass && requirepass[0])
     ar_core_set_requirepass(core, requirepass);
+  if (maxclients > 0)
+    ar_core_set_maxclients(core, maxclients);
+  if (timeout_sec >= 0)
+    ar_core_set_timeout(core, timeout_sec);
+  if (tcp_backlog > 0)
+    ar_core_set_tcp_backlog(core, tcp_backlog);
   if (layout && layout[0]) {
     if (!ar_core_set_layout(core, layout)) {
       fprintf(stderr, "ar_main: bad layout %s (want flat|hot_cold)\n", layout);

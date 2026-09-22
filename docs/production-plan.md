@@ -1,7 +1,7 @@
 # aura-redis production plan
 
 **Status:** authoritative production roadmap (v1).  
-**Reality check:** tip ~`c094e8f`+ is ~2.2k LOC C data plane + Aura `policy_agent` control plane — a **string KV / adaptive cache** with RESP2, maxmemory eviction, and Aura-mutated policy. It is **not** Redis Cluster, modules, or full command compatibility. Production here means *production for this product*, not “become Redis overnight.”
+**Reality check:** tip ~`b1f39ce`+ is ~2.2k LOC C data plane + Aura `policy_agent` control plane — a **string KV / adaptive cache** with RESP2, maxmemory eviction, and Aura-mutated policy. It is **not** Redis Cluster, modules, or full command compatibility. Production here means *production for this product*, not “become Redis overnight.”
 
 **Companions:** [`iteration-plan.md`](iteration-plan.md) · [`mvp-plan.md`](mvp-plan.md) · [`aura-native-control.md`](aura-native-control.md) · [`commands.md`](commands.md) · [`mutation-gains.md`](mutation-gains.md)
 
@@ -85,7 +85,9 @@
 | **Production P0** | **P0.1–P0.7 DONE** |
 | **P1.1 / P1.8 CONFIG** | **DONE** (runtime; no persist) |
 | **P1.9 policy_agent HA** | **DONE** — reconnect/backoff, re-apply last EVICT/LAYOUT, policy-pin log, heartbeat; fail-safe documented |
-| **Production P1–P3** | **ACTIVE** ← next P1.10 logging/slowlog (or P1.12 clients — see track order) |
+| **P1.12 client limits** | **DONE** — maxclients / timeout / tcp-backlog (CONFIG + CLI); `tests/test_prod_clients.py` |
+| **P1.11 cache-only restart** | **DONE** — README + `docs/persistence.md` (no RDB/AOF in v1) |
+| **Production P1–P3** | **ACTIVE** ← next P1.10 logging/slowlog |
 
 MVP/explore remains valuable demos; **ship bar moves to this document.**
 
@@ -139,3 +141,5 @@ Production does **not** mean “C-only Redis clone.”
 | 2026-09-22 | **P0.7** | `scripts/prod-soak.sh` + `tests/test_prod_soak.py`; `scripts/ci-prod.sh` P0.1–P0.7; CI workflow note |
 | 2026-09-22 | **P1.1** (start) | `CONFIG GET/SET` maxmemory/requirepass/protected-mode/evict-samples/bind; `tests/test_prod_config.py` |
 | 2026-09-22 | **P1.9** | policy_agent reconnect+backoff; re-apply last EVICT/LAYOUT; policy-pin + heartbeat; fail-safe docs; `tests/test_prod_policy_ha.py` |
+| 2026-09-23 | **P1.12** | maxclients / idle timeout / tcp-backlog; CONFIG GET/SET; `tests/test_prod_clients.py` |
+| 2026-09-23 | **P1.11** | Document cache-only restart (README + docs/persistence.md) |
