@@ -5,10 +5,11 @@
 ;     AURA_REDIS_PORT=6379 ./.deps/aura/build/aura src/redis/server.aura
 ;
 ; Port comes from AURA_REDIS_PORT (Aura CLI treats bare args as program files).
+; Set AURA_REDIS_SYNC=1 to force sequential accept→serve (no fiber:spawn).
 ;
 ; Limitations (v0):
 ;   - tcp-listen binds 127.0.0.1 only (Aura std/socket)
-;   - one client handled at a time (accept → serve → close → accept)
+;   - in-memory store is shared across clients (no mutex; fine for demo)
 ;   - no AUTH / persistence / pubsub / cluster
 
 (require "std/socket" all:)
@@ -21,34 +22,57 @@
       (string->number env)
       6379)))
 
+(define (sync-clients?)
+  (let ((env (getenv "AURA_REDIS_SYNC")))
+    (and (string? env)
+         (or (string=? env "1")
+             (string=? env "true")
+             (string=? env "yes")))))
+
 (define (buf-append a b)
   (string-append a b))
 
+; Join list of strings (iterative).
+(define (join-strs xs)
+  (let ((out "")
+        (cur xs))
+    (while (lambda () (pair? cur))
+      (lambda ()
+        (set! out (string-append out (car cur)))
+        (set! cur (cdr cur))))
+    out))
+
 ; Process as many complete RESP messages as possible from buffer.
+; Uses an index walk (no per-command substring of the remainder) and
+; accumulates replies for ONE tcp-send per recv burst.
 ; Returns (list remaining-buffer should-quit)
 (define (process-buffer sock buf)
   (let ((done #f)
         (quit #f)
-        (cur buf))
+        (pos 0)
+        (n (string-length buf))
+        (reply-parts (list)))
     (while (lambda () (not done))
       (lambda ()
-        (if (= (string-length cur) 0)
+        (if (>= pos n)
           (set! done #t)
-          (let ((r (resp-try-parse cur 0)))
+          (let ((r (resp-try-parse buf pos)))
             (if (not r)
               (set! done #t)
               (let ((next (car r))
                     (val (car (cdr r)))
-                    (args (resp-cmd-args (car (cdr r))))
+                    (args (list))
                     (reply ""))
                 (set! args (resp-cmd-args val))
                 (set! reply (cmd-dispatch args))
-                (tcp-send sock reply)
+                (set! reply-parts (cons reply reply-parts))
+                (set! pos next)
                 (if (and (pair? args)
                          (string=? (ascii-upcase (car args)) "QUIT"))
-                  (begin (set! quit #t) (set! done #t))
-                  (set! cur (substring cur next (string-length cur))))))))))
-    (list cur quit)))
+                  (begin (set! quit #t) (set! done #t)))))))))
+    (if (pair? reply-parts)
+      (tcp-send sock (join-strs (reverse reply-parts))))
+    (list (if (>= pos n) "" (substring buf pos n)) quit)))
 
 (define (serve-client sock)
   (let ((buf "")
@@ -70,8 +94,20 @@
     (tcp-close sock)
     #t))
 
+; Fire-and-forget client fiber; fall back to sync if spawn fails.
+(define (dispatch-client sock)
+  (if (sync-clients?)
+    (serve-client sock)
+    (let ((fid (fiber:spawn (lambda () (serve-client sock)))))
+      (if (and (integer? fid) (> fid 0))
+        #t
+        (begin
+          (display "aura-redis: fiber:spawn failed; serving sync (set AURA_REDIS_SYNC=1 to silence)\n")
+          (serve-client sock))))))
+
 (define (server-loop port)
-  (let ((L (tcp-listen port)))
+  (let ((L (tcp-listen port))
+        (mode (if (sync-clients?) "sequential" "fiber-per-client")))
     (if (not (integer? L))
       (begin
         (display "aura-redis: tcp-listen failed (need AURA_SANDBOX=off?)\n")
@@ -79,13 +115,15 @@
       (begin
         (display "aura-redis listening on 127.0.0.1:")
         (display (tcp-local-port L))
-        (display " (loopback only; sequential clients)\n")
+        (display " (loopback only; ")
+        (display mode)
+        (display ")\n")
         (let ((running #t))
           (while (lambda () running)
             (lambda ()
               (let ((c (tcp-accept L)))
                 (if (integer? c)
-                  (serve-client c)
+                  (dispatch-client c)
                   (begin
                     (display "aura-redis: accept failed\n")
                     (set! running #f))))))

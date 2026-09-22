@@ -3,25 +3,30 @@
 
 (export cmd-dispatch
         ascii-upcase
-        *redis-db*)
+        *redis-db*
+        *server-start-ms*
+        *redis-version*)
 
 (require "src/redis/resp" all:)
 (require "src/redis/store" all:)
 
 (define *redis-db* (store-new))
+(define *server-start-ms* (current-time-ms))
+(define *redis-version* "aura-redis-0.2")
 
+; O(n) via char list → list->string (avoids O(n²) string-append per char)
 (define (ascii-upcase s)
   (let ((n (string-length s))
         (i 0)
-        (out ""))
+        (chars (list)))
     (while (lambda () (< i n))
       (lambda ()
         (let ((c (string-ref s i)))
           (if (and (>= c 97) (<= c 122))
-            (set! out (string-append out (list->string (list (- c 32)))))
-            (set! out (string-append out (substring s i (+ i 1)))))
+            (set! chars (cons (- c 32) chars))
+            (set! chars (cons c chars)))
           (set! i (+ i 1)))))
-    out))
+    (list->string (reverse chars))))
 
 (define (arg-at args i)
   (if (>= i (length args))
@@ -40,6 +45,18 @@
 
 (define (wire-bulk-or-null s)
   (if s (list "bulk" s) (list "null")))
+
+; KEYS glob: "*" all; "foo*" prefix; otherwise exact
+(define (key-match? pattern key)
+  (let ((plen (string-length pattern)))
+    (cond
+      ((string=? pattern "*") #t)
+      ((and (> plen 0) (= (string-ref pattern (- plen 1)) 42))
+       (let ((pre (substring pattern 0 (- plen 1)))
+             (prelen (- plen 1)))
+         (and (>= (string-length key) prelen)
+              (string=? (substring key 0 prelen) pre))))
+      (else (string=? pattern key)))))
 
 (define (parse-set-opts args)
   ; Returns (list value expire-at-ms nx xx) — expire-at 0 means none; nx/xx are #t/#f
@@ -76,6 +93,19 @@
             nx xx)
       #f)))
 
+(define (info-bulk)
+  (let ((keys (store-dbsize *redis-db*))
+        (uptime (quotient (- (current-time-ms) *server-start-ms*) 1000)))
+    (string-append
+     "# Server\r\n"
+     "redis_version:" *redis-version* "\r\n"
+     "aura_redis_version:" *redis-version* "\r\n"
+     "tcp_port:loopback\r\n"
+     "# Keyspace\r\n"
+     "db0:keys=" keys "\r\n"
+     "# Stats\r\n"
+     "uptime_in_seconds:" uptime "\r\n")))
+
 (define (cmd-dispatch args)
   (if (or (not (pair? args)) (= (length args) 0))
     (resp-encode-error "ERR empty command")
@@ -104,16 +134,38 @@
                      (ex (list-ref opts 1))
                      (nx (list-ref opts 2))
                      (xx (list-ref opts 3))
-                     (key (arg-at args 0)))
-                 ; key is args[1]
-                 (set! key (arg-at args 1))
-                 (let ((exists (hash-has-key? *redis-db* key)))
+                     (key (arg-at args 1)))
+                 (let ((exists (if (store-touch! *redis-db* key) #t #f)))
                    (cond
                      ((and nx exists) (resp-encode-null))
                      ((and xx (not exists)) (resp-encode-null))
                      (else
                       (store-set-string! *redis-db* key val ex)
                       (resp-encode-ok)))))))))
+
+        ((string=? cmd "SETEX")
+         (if (< (length args) 4)
+           (resp-encode-error "ERR wrong number of arguments for 'setex'")
+           (let ((sec (string->number (arg-at args 2)))
+                 (val (arg-at args 3))
+                 (key (arg-at args 1)))
+             (if (not (number? sec))
+               (resp-encode-error "ERR value is not an integer or out of range")
+               (begin
+                 (store-set-string! *redis-db* key val (+ (current-time-ms) (* sec 1000)))
+                 (resp-encode-ok))))))
+
+        ((string=? cmd "PSETEX")
+         (if (< (length args) 4)
+           (resp-encode-error "ERR wrong number of arguments for 'psetex'")
+           (let ((ms (string->number (arg-at args 2)))
+                 (val (arg-at args 3))
+                 (key (arg-at args 1)))
+             (if (not (number? ms))
+               (resp-encode-error "ERR value is not an integer or out of range")
+               (begin
+                 (store-set-string! *redis-db* key val (+ (current-time-ms) ms))
+                 (resp-encode-ok))))))
 
         ((string=? cmd "GET")
          (if (< (length args) 2)
@@ -125,9 +177,56 @@
                  (resp-encode-bulk (hash-ref e "v" ""))
                  (resp-encode-error "WRONGTYPE Operation against a key holding the wrong kind of value"))))))
 
-        ((string=? cmd "DEL")
+        ((string=? cmd "MGET")
          (if (< (length args) 2)
-           (resp-encode-error "ERR wrong number of arguments for 'del'")
+           (resp-encode-error "ERR wrong number of arguments for 'mget'")
+           (let ((ks (args-from args 1))
+                 (items (list)))
+             (while (lambda () (pair? ks))
+               (lambda ()
+                 (let ((e (store-get *redis-db* (car ks))))
+                   (if (and e (string=? (hash-ref e "t" "") "string"))
+                     (set! items (append items (list (list "bulk" (hash-ref e "v" "")))))
+                     (set! items (append items (list (list "null"))))))
+                 (set! ks (cdr ks))))
+             (resp-encode-array items))))
+
+        ((string=? cmd "MSET")
+         (if (or (< (length args) 3) (= (modulo (- (length args) 1) 2) 1))
+           (resp-encode-error "ERR wrong number of arguments for 'mset'")
+           (let ((i 1)
+                 (n (length args)))
+             (while (lambda () (< i n))
+               (lambda ()
+                 (store-set-string! *redis-db* (list-ref args i) (list-ref args (+ i 1)) 0)
+                 (set! i (+ i 2))))
+             (resp-encode-ok))))
+
+        ((string=? cmd "APPEND")
+         (if (< (length args) 3)
+           (resp-encode-error "ERR wrong number of arguments for 'append'")
+           (let ((n (store-append! *redis-db* (arg-at args 1) (arg-at args 2))))
+             (if (number? n) (resp-encode-int n)
+               (resp-encode-error "WRONGTYPE Operation against a key holding the wrong kind of value")))))
+
+        ((string=? cmd "STRLEN")
+         (if (< (length args) 2)
+           (resp-encode-error "ERR wrong number of arguments for 'strlen'")
+           (let ((n (store-strlen *redis-db* (arg-at args 1))))
+             (if (number? n) (resp-encode-int n)
+               (resp-encode-error "WRONGTYPE Operation against a key holding the wrong kind of value")))))
+
+        ((string=? cmd "GETSET")
+         (if (< (length args) 3)
+           (resp-encode-error "ERR wrong number of arguments for 'getset'")
+           (let ((r (store-getset! *redis-db* (arg-at args 1) (arg-at args 2))))
+             (if (not (car r))
+               (resp-encode-error "WRONGTYPE Operation against a key holding the wrong kind of value")
+               (resp-encode (wire-bulk-or-null (car (cdr r))))))))
+
+        ((or (string=? cmd "DEL") (string=? cmd "UNLINK"))
+         (if (< (length args) 2)
+           (resp-encode-error (string-append "ERR wrong number of arguments for '" (car args) "'"))
            (resp-encode-int (store-del! *redis-db* (args-from args 1)))))
 
         ((string=? cmd "EXISTS")
@@ -155,15 +254,42 @@
          (let ((pat (if (>= (length args) 2) (arg-at args 1) "*"))
                (ks (store-keys *redis-db*))
                (items (list)))
-           ; v0: only "*" (match all) is supported; other patterns match all too
            (while (lambda () (pair? ks))
              (lambda ()
-               (set! items (append items (list (list "bulk" (car ks)))))
+               (if (key-match? pat (car ks))
+                 (set! items (append items (list (list "bulk" (car ks))))))
                (set! ks (cdr ks))))
            (resp-encode-array items)))
 
+        ((string=? cmd "DBSIZE")
+         (resp-encode-int (store-dbsize *redis-db*)))
+
+        ((string=? cmd "INFO")
+         (resp-encode-bulk (info-bulk)))
+
+        ((string=? cmd "RENAME")
+         (if (< (length args) 3)
+           (resp-encode-error "ERR wrong number of arguments for 'rename'")
+           (let ((r (store-rename! *redis-db* (arg-at args 1) (arg-at args 2) #f)))
+             (cond
+               ((string=? r "missing")
+                (resp-encode-error "ERR no such key"))
+               (else (resp-encode-ok))))))
+
+        ((string=? cmd "RENAMENX")
+         (if (< (length args) 3)
+           (resp-encode-error "ERR wrong number of arguments for 'renamenx'")
+           (let ((r (store-rename! *redis-db* (arg-at args 1) (arg-at args 2) #t)))
+             (cond
+               ((string=? r "missing")
+                (resp-encode-error "ERR no such key"))
+               ((string=? r "busy") (resp-encode-int 0))
+               ((string=? r "same") (resp-encode-int 1))
+               (else (resp-encode-int 1))))))
+
         ((string=? cmd "FLUSHDB")
-         (store-flush! *redis-db*)
+         ; O(1): drop the whole table instead of per-key remove (O(n) or worse)
+         (set! *redis-db* (store-new))
          (resp-encode-ok))
 
         ((string=? cmd "TYPE")

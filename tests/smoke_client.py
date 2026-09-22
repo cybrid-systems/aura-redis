@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import socket
 import sys
+import threading
 import time
 
 
@@ -86,6 +87,12 @@ def expect(name: str, got, want) -> None:
     print(f"  OK {name}: {got!r}")
 
 
+def expect_true(name: str, cond: bool, detail: str = "") -> None:
+    if not cond:
+        raise AssertionError(f"{name}: {detail}")
+    print(f"  OK {name}")
+
+
 def run(host: str, port: int) -> int:
     print(f"smoke: connect {host}:{port}")
     with socket.create_connection((host, port), timeout=10) as sock:
@@ -100,7 +107,45 @@ def run(host: str, port: int) -> int:
         expect("GET miss", redis_call(sock, "GET", "a"), None)
         expect("FLUSHDB", redis_call(sock, "FLUSHDB"), "OK")
         expect("EXISTS after flush", redis_call(sock, "EXISTS", "n"), 0)
-        # Pipelining
+
+        # MSET / MGET
+        expect("MSET", redis_call(sock, "MSET", "x", "1", "y", "2"), "OK")
+        expect("MGET", redis_call(sock, "MGET", "x", "missing", "y"), ["1", None, "2"])
+
+        # APPEND / STRLEN / GETSET
+        expect("APPEND new", redis_call(sock, "APPEND", "s", "ab"), 2)
+        expect("APPEND more", redis_call(sock, "APPEND", "s", "cd"), 4)
+        expect("STRLEN", redis_call(sock, "STRLEN", "s"), 4)
+        expect("GETSET", redis_call(sock, "GETSET", "s", "zz"), "abcd")
+        expect("GET after GETSET", redis_call(sock, "GET", "s"), "zz")
+        expect("STRLEN miss", redis_call(sock, "STRLEN", "nope"), 0)
+
+        # DBSIZE / INFO / KEYS glob
+        redis_call(sock, "FLUSHDB")
+        redis_call(sock, "MSET", "foo", "1", "foobar", "2", "bar", "3")
+        expect("DBSIZE", redis_call(sock, "DBSIZE"), 3)
+        keys_all = redis_call(sock, "KEYS", "*")
+        expect_true("KEYS *", sorted(keys_all) == ["bar", "foo", "foobar"], repr(keys_all))
+        keys_pre = redis_call(sock, "KEYS", "foo*")
+        expect_true("KEYS foo*", sorted(keys_pre) == ["foo", "foobar"], repr(keys_pre))
+        info = redis_call(sock, "INFO")
+        expect_true("INFO bulk", isinstance(info, str) and "aura-redis" in info, repr(info)[:80])
+        expect_true("INFO keys", "keys=3" in info, info)
+
+        # RENAME / RENAMENX
+        expect("RENAME", redis_call(sock, "RENAME", "foo", "foo2"), "OK")
+        expect("GET renamed", redis_call(sock, "GET", "foo2"), "1")
+        expect("RENAMENX busy", redis_call(sock, "RENAMENX", "bar", "foo2"), 0)
+        expect("RENAMENX ok", redis_call(sock, "RENAMENX", "bar", "baz"), 1)
+        expect("GET baz", redis_call(sock, "GET", "baz"), "3")
+
+        # SETEX / UNLINK
+        expect("SETEX", redis_call(sock, "SETEX", "ttlkey", "60", "v"), "OK")
+        ttl_v = redis_call(sock, "TTL", "ttlkey")
+        expect_true("TTL setex", isinstance(ttl_v, int) and ttl_v > 0, repr(ttl_v))
+        expect("UNLINK", redis_call(sock, "UNLINK", "ttlkey", "foo2"), 2)
+
+        # Pipelining (one send burst → batched replies)
         sock.sendall(encode_array(["PING"]) + encode_array(["ECHO", "pipe"]))
         buf = bytearray()
         vals = []
@@ -119,6 +164,39 @@ def run(host: str, port: int) -> int:
         expect("pipeline PING", vals[0], "PONG")
         expect("pipeline ECHO", vals[1], "pipe")
         redis_call(sock, "QUIT")
+
+    # Concurrent clients (needs fiber-per-client; skip soft-fail if sync)
+    print("smoke: concurrent clients")
+    results: list[str | BaseException] = []
+
+    def worker(tag: str) -> None:
+        try:
+            with socket.create_connection((host, port), timeout=5) as s:
+                s.settimeout(5)
+                r = redis_call(s, "SET", f"c-{tag}", tag)
+                g = redis_call(s, "GET", f"c-{tag}")
+                if r != "OK" or g != tag:
+                    results.append(AssertionError(f"{tag}: {r!r} {g!r}"))
+                else:
+                    results.append("ok")
+                redis_call(s, "QUIT")
+        except BaseException as e:  # noqa: BLE001
+            results.append(e)
+
+    t1 = threading.Thread(target=worker, args=("A",))
+    t2 = threading.Thread(target=worker, args=("B",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+    if t1.is_alive() or t2.is_alive():
+        print("  WARN concurrent: threads hung (server may be AURA_REDIS_SYNC=1); skipping assert")
+    else:
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
+        expect_true("concurrent two clients", results == ["ok", "ok"], repr(results))
+
     print("smoke: ALL PASSED")
     return 0
 

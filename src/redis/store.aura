@@ -5,20 +5,29 @@
 ;   "t"  → "string" | "list" | "hash"
 ;   "v"  → string | list-of-strings | nested hash
 ;   "ex" → expire deadline ms (0 = none)
+;
+; TTL is lazy per-key: hot-path ops call store-touch! (drop that key only
+; if expired). store-purge! remains for KEYS / DBSIZE / FLUSH-adjacent use.
 
 (export store-new
         store-alive?
+        store-touch!
         store-purge!
         store-get
         store-set-string!
         store-del!
         store-exists?
         store-keys
+        store-dbsize
         store-flush!
         store-type
         store-ttl
         store-expire!
         store-incr!
+        store-append!
+        store-strlen
+        store-getset!
+        store-rename!
         store-list-push!
         store-list-pop!
         store-list-len
@@ -34,6 +43,18 @@
   (let ((ex (hash-ref entry "ex" 0)))
     (or (= ex 0) (> ex now))))
 
+; Drop key if expired; return live entry or #f. O(1) hot path.
+(define (store-touch! db key)
+  (let ((e (hash-ref db key #f)))
+    (if (not e)
+      #f
+      (if (store-alive? e (current-time-ms))
+        e
+        (begin
+          (hash-remove! db key)
+          #f)))))
+
+; Full scan — use for KEYS / DBSIZE / periodic maintenance, not hot path.
 (define (store-purge! db)
   (let ((now (current-time-ms))
         (ks (hash-keys db)))
@@ -47,11 +68,9 @@
     db))
 
 (define (store-get db key)
-  (store-purge! db)
-  (hash-ref db key #f))
+  (store-touch! db key))
 
 (define (store-set-string! db key val ex-ms)
-  (store-purge! db)
   (let ((entry (hash)))
     (hash-set! entry "t" "string")
     (hash-set! entry "v" val)
@@ -60,12 +79,12 @@
     #t))
 
 (define (store-del! db keys)
-  (store-purge! db)
   (let ((n 0)
         (ks keys))
     (while (lambda () (pair? ks))
       (lambda ()
-        (if (hash-has-key? db (car ks))
+        ; Touch so expired keys count as absent (Redis: DEL on expired = 0)
+        (if (store-touch! db (car ks))
           (begin
             (hash-remove! db (car ks))
             (set! n (+ n 1))))
@@ -73,12 +92,11 @@
     n))
 
 (define (store-exists? db keys)
-  (store-purge! db)
   (let ((n 0)
         (ks keys))
     (while (lambda () (pair? ks))
       (lambda ()
-        (if (hash-has-key? db (car ks))
+        (if (store-touch! db (car ks))
           (set! n (+ n 1)))
         (set! ks (cdr ks))))
     n))
@@ -86,6 +104,10 @@
 (define (store-keys db)
   (store-purge! db)
   (hash-keys db))
+
+(define (store-dbsize db)
+  (store-purge! db)
+  (hash-length db))
 
 (define (store-flush! db)
   (let ((ks (hash-keys db)))
@@ -121,8 +143,7 @@
         1))))
 
 (define (store-incr! db key delta)
-  (store-purge! db)
-  (let ((e (hash-ref db key #f)))
+  (let ((e (store-touch! db key)))
     (if (not e)
       (begin
         (store-set-string! db key (number->string delta) 0)
@@ -136,6 +157,58 @@
               (hash-set! e "v" (number->string n))
               (hash-set! db key e)
               n)))))))
+
+(define (store-append! db key val)
+  (let ((e (store-touch! db key)))
+    (if (not e)
+      (begin
+        (store-set-string! db key val 0)
+        (string-length val))
+      (if (not (string=? (hash-ref e "t" "") "string"))
+        #f
+        (let ((nv (string-append (hash-ref e "v" "") val)))
+          (hash-set! e "v" nv)
+          (hash-set! db key e)
+          (string-length nv))))))
+
+(define (store-strlen db key)
+  (let ((e (store-touch! db key)))
+    (cond
+      ((not e) 0)
+      ((not (string=? (hash-ref e "t" "") "string")) #f)
+      (else (string-length (hash-ref e "v" ""))))))
+
+; Returns (list ok old-or-null) — ok=#f means WRONGTYPE; old is string or #f
+(define (store-getset! db key val)
+  (let ((e (store-touch! db key)))
+    (cond
+      ((not e)
+       (store-set-string! db key val 0)
+       (list #t #f))
+      ((not (string=? (hash-ref e "t" "") "string"))
+       (list #f #f))
+      (else
+       (let ((old (hash-ref e "v" "")))
+         (hash-set! e "v" val)
+         ; keep existing expire
+         (hash-set! db key e)
+         (list #t old))))))
+
+; Returns: "ok" | "missing" | "busy" (RENAMENX dst exists) | "same"
+(define (store-rename! db src dst nx?)
+  (if (string=? src dst)
+    "same"
+    (let ((e (store-touch! db src)))
+      (if (not e)
+        "missing"
+        (begin
+          (store-touch! db dst)
+          (if (and nx? (hash-has-key? db dst))
+            "busy"
+            (begin
+              (hash-set! db dst e)
+              (hash-remove! db src)
+              "ok")))))))
 
 (define (store-ensure-list! db key)
   (let ((e (hash-ref db key #f)))
@@ -151,7 +224,7 @@
       (else #f))))
 
 (define (store-list-push! db key val left?)
-  (store-purge! db)
+  (store-touch! db key)
   (let ((e (store-ensure-list! db key)))
     (if (not e)
       #f
@@ -163,8 +236,7 @@
         (length (hash-ref e "v" (list)))))))
 
 (define (store-list-pop! db key left?)
-  (store-purge! db)
-  (let ((e (hash-ref db key #f)))
+  (let ((e (store-touch! db key)))
     (if (or (not e) (not (string=? (hash-ref e "t" "") "list")))
       #f
       (let ((xs (hash-ref e "v" (list))))
@@ -202,7 +274,7 @@
       (else #f))))
 
 (define (store-hash-set! db key field val)
-  (store-purge! db)
+  (store-touch! db key)
   (let ((e (store-ensure-hash! db key)))
     (if (not e)
       #f
