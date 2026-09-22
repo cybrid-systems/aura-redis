@@ -1,7 +1,7 @@
 # aura-redis production plan
 
 **Status:** authoritative production roadmap (v1).  
-**Reality check:** tip ~`e54f025`++ is ~2.2k LOC C data plane + Aura `policy_agent` control plane — a **string KV / adaptive cache** with RESP2, maxmemory eviction, and Aura-mutated policy. It is **not** Redis Cluster, modules, or full command compatibility. Production here means *production for this product*, not “become Redis overnight.”
+**Reality check:** tip ~`d9f98e4`++ is ~2.2k LOC C data plane + Aura `policy_agent` control plane — a **string KV / adaptive cache** with RESP2, maxmemory eviction, and Aura-mutated policy. It is **not** Redis Cluster, modules, or full command compatibility. Production here means *production for this product*, not “become Redis overnight.”
 
 **Companions:** [`iteration-plan.md`](iteration-plan.md) · [`mvp-plan.md`](mvp-plan.md) · [`aura-native-control.md`](aura-native-control.md) · [`commands.md`](commands.md) · [`mutation-gains.md`](mutation-gains.md)
 
@@ -63,7 +63,7 @@
 |---|------|------|---------------|------|------|
 | **P2.13** | aura-rdb snapshot | Durable string+TTL warm-start (`SAVE`/`BGSAVE`) | Reload after kill restores GET/TTL | `tests/test_prod_rdb.py` | Perf / fsync policy |
 | **P2.14** | Replication `REPLICAOF` | Async single replica (string KV) | Replica converges under SET; READONLY writes | `tests/test_prod_replica.py` | Split brain without cluster story |
-| **P2.15** | TLS | Encrypted client path | stunnel or native TLS accept | TLS client smoke | Cert ops; Aura agent TLS |
+| **P2.15** | TLS | Encrypted client path | native OpenSSL `--tls-port` (stunnel example fallback) | `tests/test_prod_tls.py` | Cert ops; Aura agent TLS |
 
 ### P3 — compatibility expansion
 
@@ -90,7 +90,9 @@
 | **P1.10 latency/slowlog** | **DONE** — INFO cmd_* histogram + slowlog_count; CONFIG slowlog-log-slower-than |
 | **P2.13 aura-rdb** | **DONE** — SAVE/BGSAVE + startup load; `tests/test_prod_rdb.py` |
 | **P2.14 REPLICAOF** | **DONE** — async single replica, read-only GET; `tests/test_prod_replica.py` |
-| **Production P1–P3** | **ACTIVE** ← P2.15 TLS optional next |
+| **P2.15 TLS** | **DONE** — native OpenSSL `--tls-port` + cert/key; cleartext kept for policy_agent; `docs/tls.md`; `tests/test_prod_tls.py` |
+| **Production P2 band** | **COMPLETE** (P2.13–P2.15) |
+| **Production P3** | **NEXT** (compat expansion; not started) |
 
 MVP/explore remains valuable demos; **ship bar moves to this document.**
 
@@ -115,6 +117,9 @@ python3 tests/test_prod_shutdown.py   # P0.5
 python3 tests/test_prod_info.py       # P0.6
 AURA_REDIS_SOAK_SEC=30 python3 tests/test_prod_soak.py  # P0.7
 ./scripts/ci-prod.sh              # P0.1–P0.7 gate
+python3 tests/test_prod_rdb.py        # P2.13
+python3 tests/test_prod_replica.py    # P2.14
+python3 tests/test_prod_tls.py        # P2.15
 ```
 
 ---
@@ -149,3 +154,4 @@ Production does **not** mean “C-only Redis clone.”
 | 2026-09-23 | **P1.10** | INFO latency histogram + slowlog_count; CONFIG slowlog-log-slower-than; `tests/test_prod_slowlog.py` |
 | 2026-09-23 | **P2.13** | Optional `aura-rdb` SAVE/BGSAVE + `--dir`/`--dbfilename` load; `docs/persistence.md`; `tests/test_prod_rdb.py` |
 | 2026-09-23 | **P2.14** | `REPLICAOF`/`SYNC` best-effort async replica; read-only slave; `tests/test_prod_replica.py` |
+| 2026-09-23 | **P2.15** | Native OpenSSL `--tls-port`/`--tls-cert-file`/`--tls-key-file`; soft CMake; `docs/tls.md`; stunnel example; `tests/test_prod_tls.py` |

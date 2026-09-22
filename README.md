@@ -281,6 +281,10 @@ python3 scripts/bench.py --port 16379 -n 1000 --pipeline 50 || true
 
 Apache License 2.0 (same as Aura).
 
+## TLS (production P2.15)
+
+Optional native OpenSSL on `--tls-port` (cleartext `--port` kept for `policy_agent`). See [`docs/tls.md`](docs/tls.md). Soft build: works without OpenSSL (`AURA_REDIS_TLS=OFF`).
+
 ## Persistence / restart semantics (production v1)
 
 **aura-redis is a cache/KV data plane by default — not a durable store.**

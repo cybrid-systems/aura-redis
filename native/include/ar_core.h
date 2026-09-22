@@ -164,6 +164,18 @@ int ar_core_repl_readonly(ArCore* core);
 const char* ar_core_master_host(ArCore* core);
 int ar_core_master_port(ArCore* core);
 
+/* P2.15 — optional native TLS (OpenSSL when AURA_REDIS_HAS_TLS) */
+int ar_tls_available(void); /* 1 if built with OpenSSL */
+int ar_core_set_tls_cert_file(ArCore* core, const char* path);
+int ar_core_set_tls_key_file(ArCore* core, const char* path);
+int ar_core_set_tls_ca_file(ArCore* core, const char* path); /* optional */
+const char* ar_core_tls_cert_file(ArCore* core);
+const char* ar_core_tls_key_file(ArCore* core);
+const char* ar_core_tls_ca_file(ArCore* core);
+int ar_core_listen_tls(ArCore* core, int port); /* after ar_core_listen; needs cert/key */
+int ar_core_tls_port(ArCore* core);
+int ar_core_tls_enabled(ArCore* core);
+
 #ifdef __cplusplus
 }
 #endif

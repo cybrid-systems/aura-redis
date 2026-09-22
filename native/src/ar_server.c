@@ -19,6 +19,9 @@
 
 #define AR_MAX_ARGV 64
 #define AR_MAX_EVENTS 64
+/* epoll data.ptr sentinels for listen fds (client conns are real ptrs) */
+#define AR_EPOLL_LISTEN_PLAIN ((void*)0)
+#define AR_EPOLL_LISTEN_TLS ((void*)1)
 
 void ar_net_shutdown(ArCore* core);
 
@@ -43,6 +46,9 @@ static void conn_reset(ArConn* c) {
   c->authenticated = 0;
   c->is_replica = 0;
   c->is_master_link = 0;
+  c->ssl = NULL;
+  c->is_tls = 0;
+  c->ssl_hs_done = 0;
 }
 
 static ArConn* conn_alloc(ArCore* core, int fd) {
@@ -77,6 +83,8 @@ static ArConn* conn_alloc(ArCore* core, int fd) {
 static void conn_close(ArCore* core, ArConn* c) {
   if (!c->in_use)
     return;
+  if (c->ssl)
+    ar_tls_conn_free(c);
   if (c->fd >= 0) {
     epoll_ctl(core->epfd, EPOLL_CTL_DEL, c->fd, NULL);
     close(c->fd);
@@ -1019,6 +1027,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         "# Server\n"
         "aura_redis_version:0.1\n"
         "tcp_port:%d\n"
+        "tls_port:%d\n"
+        "tls_enabled:%s\n"
         "binding:%s\n"
         "protected_mode:%s\n"
         "requirepass:%s\n"
@@ -1074,6 +1084,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         "cold_keys:%llu\n"
         "policy_hints:%s\n",
         core->tcp_port,
+        core->tls_port,
+        core->tls_listen_fd >= 0 ? "yes" : "no",
         core->bind_addr[0] ? core->bind_addr : "127.0.0.1",
         core->protected_mode ? "yes" : "no",
         (core->requirepass && core->requirepass[0]) ? "yes" : "no",
@@ -1253,18 +1265,42 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
 
 static int flush_writes(ArCore* core, ArConn* c) {
   while (c->woff < c->wlen) {
-    ssize_t n =
-        write(c->fd, c->wbuf + c->woff, c->wlen - c->woff);
-    if (n < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        c->want_write = 1;
+    ssize_t n;
+    int want_read = 0;
+    if (c->is_tls) {
+      if (!c->ssl_hs_done) {
+        int hs = ar_tls_handshake(core, c);
+        if (hs < 0)
+          return -1;
+        if (hs == 0)
+          return 0;
+      }
+      n = ar_tls_write(c, c->wbuf + c->woff, c->wlen - c->woff, &want_read);
+      if (n < 0)
+        return -1;
+      if (n == 0) {
+        c->want_write = want_read ? 0 : 1;
         struct epoll_event ev;
-        ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+        ev.events = EPOLLIN | EPOLLET;
+        if (!want_read)
+          ev.events |= EPOLLOUT;
         ev.data.ptr = c;
         epoll_ctl(core->epfd, EPOLL_CTL_MOD, c->fd, &ev);
         return 0;
       }
-      return -1;
+    } else {
+      n = write(c->fd, c->wbuf + c->woff, c->wlen - c->woff);
+      if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          c->want_write = 1;
+          struct epoll_event ev;
+          ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+          ev.data.ptr = c;
+          epoll_ctl(core->epfd, EPOLL_CTL_MOD, c->fd, &ev);
+          return 0;
+        }
+        return -1;
+      }
     }
     c->woff += (size_t)n;
   }
@@ -1333,6 +1369,13 @@ static int process_reads(ArCore* core, ArConn* c) {
 }
 
 static int handle_read(ArCore* core, ArConn* c) {
+  if (c->is_tls && !c->ssl_hs_done) {
+    int hs = ar_tls_handshake(core, c);
+    if (hs < 0)
+      return -1;
+    if (hs == 0)
+      return 0;
+  }
   for (;;) {
     if (c->rlen == c->rcap) {
       size_t ncap = c->rcap * 2;
@@ -1348,7 +1391,30 @@ static int handle_read(ArCore* core, ArConn* c) {
       c->rbuf = p;
       c->rcap = ncap;
     }
-    ssize_t n = read(c->fd, c->rbuf + c->rlen, c->rcap - c->rlen);
+    ssize_t n;
+    if (c->is_tls) {
+      int want_write = 0;
+      n = ar_tls_read(c, c->rbuf + c->rlen, c->rcap - c->rlen, &want_write);
+      if (n == -2) {
+        conn_close(core, c);
+        return 0;
+      }
+      if (n < 0)
+        return -1;
+      if (n == 0) {
+        if (want_write) {
+          c->want_write = 1;
+          struct epoll_event ev;
+          ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+          ev.data.ptr = c;
+          epoll_ctl(core->epfd, EPOLL_CTL_MOD, c->fd, &ev);
+        }
+        break;
+      }
+      c->rlen += (size_t)n;
+      continue;
+    }
+    n = read(c->fd, c->rbuf + c->rlen, c->rcap - c->rlen);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK)
         break;
@@ -1360,6 +1426,8 @@ static int handle_read(ArCore* core, ArConn* c) {
     }
     c->rlen += (size_t)n;
   }
+  if (!c->in_use)
+    return 0;
   return process_reads(core, c);
 }
 
@@ -1368,13 +1436,13 @@ static int peer_is_loopback(const struct sockaddr_in* addr) {
   return (a >> 24) == 127;
 }
 
-static int accept_clients(ArCore* core) {
-  if (core->shutting_down || core->listen_fd < 0)
+static int accept_clients_on(ArCore* core, int listen_fd, int is_tls) {
+  if (core->shutting_down || listen_fd < 0)
     return 0;
   for (;;) {
     struct sockaddr_in addr;
     socklen_t alen = sizeof(addr);
-    int fd = accept(core->listen_fd, (struct sockaddr*)&addr, &alen);
+    int fd = accept(listen_fd, (struct sockaddr*)&addr, &alen);
     if (fd < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK)
         return 0;
@@ -1383,11 +1451,13 @@ static int accept_clients(ArCore* core) {
     /* P0.4 protected-mode: no password + non-loopback peer → refuse */
     int has_pass = core->requirepass && core->requirepass[0];
     if (core->protected_mode && !has_pass && !peer_is_loopback(&addr)) {
-      static const char denied[] =
-          "-DENIED aura-redis is running in protected mode because "
-          "protected-mode is enabled and no requirepass is set. Connect "
-          "from loopback, set --requirepass, or --protected-mode no.\r\n";
-      (void)!write(fd, denied, sizeof(denied) - 1);
+      if (!is_tls) {
+        static const char denied[] =
+            "-DENIED aura-redis is running in protected mode because "
+            "protected-mode is enabled and no requirepass is set. Connect "
+            "from loopback, set --requirepass, or --protected-mode no.\r\n";
+        (void)!write(fd, denied, sizeof(denied) - 1);
+      }
       close(fd);
       continue;
     }
@@ -1395,19 +1465,29 @@ static int accept_clients(ArCore* core) {
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     if (connected_clients(core) >= core->maxclients) {
-      static const char full[] =
-          "-ERR max number of clients reached\r\n";
-      (void)!write(fd, full, sizeof(full) - 1);
+      if (!is_tls) {
+        static const char full[] =
+            "-ERR max number of clients reached\r\n";
+        (void)!write(fd, full, sizeof(full) - 1);
+      }
       close(fd);
       continue;
     }
     ArConn* c = conn_alloc(core, fd);
     if (!c) {
-      static const char full[] =
-          "-ERR max number of clients reached\r\n";
-      (void)!write(fd, full, sizeof(full) - 1);
+      if (!is_tls) {
+        static const char full[] =
+            "-ERR max number of clients reached\r\n";
+        (void)!write(fd, full, sizeof(full) - 1);
+      }
       close(fd);
       continue;
+    }
+    if (is_tls) {
+      if (ar_tls_accept_setup(core, c) < 0) {
+        conn_close(core, c);
+        continue;
+      }
     }
     struct epoll_event ev;
     ev.events = EPOLLIN | EPOLLET;
@@ -1416,8 +1496,16 @@ static int accept_clients(ArCore* core) {
       conn_close(core, c);
       continue;
     }
+    if (is_tls) {
+      /* Kick off non-blocking handshake (may complete immediately). */
+      if (ar_tls_handshake(core, c) < 0) {
+        conn_close(core, c);
+        continue;
+      }
+    }
   }
 }
+
 
 void ar_net_shutdown(ArCore* core) {
   if (!core)
@@ -1434,6 +1522,13 @@ void ar_net_shutdown(ArCore* core) {
     close(core->listen_fd);
     core->listen_fd = -1;
   }
+  if (core->tls_listen_fd >= 0) {
+    if (core->epfd >= 0)
+      epoll_ctl(core->epfd, EPOLL_CTL_DEL, core->tls_listen_fd, NULL);
+    close(core->tls_listen_fd);
+    core->tls_listen_fd = -1;
+  }
+  ar_tls_free_ctx(core);
   if (core->epfd >= 0) {
     close(core->epfd);
     core->epfd = -1;
@@ -1482,7 +1577,7 @@ int ar_core_listen(ArCore* core, int port) {
   }
   struct epoll_event ev;
   ev.events = EPOLLIN | EPOLLET;
-  ev.data.ptr = NULL; /* listen marker */
+  ev.data.ptr = AR_EPOLL_LISTEN_PLAIN;
   if (epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev) < 0) {
     close(ep);
     close(fd);
@@ -1503,6 +1598,67 @@ int ar_core_listen(ArCore* core, int port) {
   return 1;
 }
 
+
+
+int ar_core_listen_tls(ArCore* core, int port) {
+  if (!core || port <= 0 || port > 65535)
+    return 0;
+  if (!ar_tls_available()) {
+    fprintf(stderr, "aura-redis: TLS requested but built without OpenSSL\n");
+    return 0;
+  }
+  if (core->epfd < 0) {
+    fprintf(stderr, "aura-redis: call ar_core_listen before ar_core_listen_tls\n");
+    return 0;
+  }
+  if (core->tls_listen_fd >= 0)
+    return 0;
+  if (!ar_tls_setup_ctx(core))
+    return 0;
+
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0)
+    return 0;
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  set_nonblock(fd);
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons((uint16_t)port);
+  if (!core->bind_addr[0])
+    snprintf(core->bind_addr, sizeof(core->bind_addr), "127.0.0.1");
+  if (inet_pton(AF_INET, core->bind_addr, &addr.sin_addr) != 1) {
+    fprintf(stderr, "aura-redis: bad --bind %s\n", core->bind_addr);
+    close(fd);
+    return 0;
+  }
+  if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    fprintf(stderr, "aura-redis: tls bind %s:%d failed\n", core->bind_addr, port);
+    close(fd);
+    return 0;
+  }
+  int backlog = core->tcp_backlog > 0 ? core->tcp_backlog : 512;
+  if (listen(fd, backlog) < 0) {
+    close(fd);
+    return 0;
+  }
+  struct epoll_event ev;
+  ev.events = EPOLLIN | EPOLLET;
+  ev.data.ptr = AR_EPOLL_LISTEN_TLS;
+  if (epoll_ctl(core->epfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+    close(fd);
+    return 0;
+  }
+  core->tls_listen_fd = fd;
+  core->tls_port = port;
+  fprintf(stderr,
+          "aura-redis-ffi TLS listening on %s:%d (cert=%s)\n",
+          core->bind_addr, port, core->tls_cert_file);
+  fflush(stderr);
+  return 1;
+}
 
 /* P1.12: close idle clients past timeout_sec (0 = disabled). */
 static void close_idle_clients(ArCore* core) {
@@ -1538,8 +1694,12 @@ static int serve_once(ArCore* core, int timeout_ms) {
   }
   for (int i = 0; i < n; ++i) {
     ArConn* c = (ArConn*)events[i].data.ptr;
-    if (!c) {
-      accept_clients(core);
+    if (c == AR_EPOLL_LISTEN_PLAIN) {
+      accept_clients_on(core, core->listen_fd, 0);
+      continue;
+    }
+    if (c == AR_EPOLL_LISTEN_TLS) {
+      accept_clients_on(core, core->tls_listen_fd, 1);
       continue;
     }
     if (!c->in_use)
@@ -1562,11 +1722,18 @@ static int serve_once(ArCore* core, int timeout_ms) {
 }
 
 static void stop_accepting(ArCore* core) {
-  if (!core || core->listen_fd < 0)
+  if (!core)
     return;
-  epoll_ctl(core->epfd, EPOLL_CTL_DEL, core->listen_fd, NULL);
-  close(core->listen_fd);
-  core->listen_fd = -1;
+  if (core->listen_fd >= 0) {
+    epoll_ctl(core->epfd, EPOLL_CTL_DEL, core->listen_fd, NULL);
+    close(core->listen_fd);
+    core->listen_fd = -1;
+  }
+  if (core->tls_listen_fd >= 0) {
+    epoll_ctl(core->epfd, EPOLL_CTL_DEL, core->tls_listen_fd, NULL);
+    close(core->tls_listen_fd);
+    core->tls_listen_fd = -1;
+  }
 }
 
 /* Flush pending replies then close clients; hard-timeout closes remainder. */
@@ -1600,7 +1767,8 @@ static void drain_clients(ArCore* core, int timeout_ms) {
 }
 
 int ar_core_serve_ms(ArCore* core, int ms) {
-  if (!core || (core->listen_fd < 0 && !core->shutting_down))
+  if (!core ||
+      (core->listen_fd < 0 && core->tls_listen_fd < 0 && !core->shutting_down))
     return -1;
   if (core->quit && !core->shutting_down)
     return 1;

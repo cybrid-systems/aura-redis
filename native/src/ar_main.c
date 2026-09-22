@@ -19,6 +19,11 @@ int main(int argc, char** argv) {
   uint64_t maxmem = 0;
   const char* rdb_dir = NULL;
   const char* rdb_filename = NULL;
+  int tls_port = 0;
+  int tls_yes = 0;
+  const char* tls_cert = NULL;
+  const char* tls_key = NULL;
+  const char* tls_ca = NULL;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
       port = atoi(argv[++i]);
@@ -50,6 +55,20 @@ int main(int argc, char** argv) {
       rdb_dir = argv[++i];
     else if (strcmp(argv[i], "--dbfilename") == 0 && i + 1 < argc)
       rdb_filename = argv[++i];
+    else if (strcmp(argv[i], "--tls-port") == 0 && i + 1 < argc)
+      tls_port = atoi(argv[++i]);
+    else if (strcmp(argv[i], "--tls") == 0 && i + 1 < argc) {
+      const char* v = argv[++i];
+      if (strcmp(v, "yes") == 0 || strcmp(v, "1") == 0 || strcmp(v, "on") == 0)
+        tls_yes = 1;
+      else
+        tls_yes = 0;
+    } else if (strcmp(argv[i], "--tls-cert-file") == 0 && i + 1 < argc)
+      tls_cert = argv[++i];
+    else if (strcmp(argv[i], "--tls-key-file") == 0 && i + 1 < argc)
+      tls_key = argv[++i];
+    else if (strcmp(argv[i], "--tls-ca-file") == 0 && i + 1 < argc)
+      tls_ca = argv[++i];
   }
   /* Env fallbacks (Iteration 8 layout + existing eviction) */
   if (!layout || !layout[0]) {
@@ -114,6 +133,29 @@ int main(int argc, char** argv) {
     const char* e = getenv("AURA_REDIS_DBFILENAME");
     if (e && e[0]) rdb_filename = e;
   }
+  if (tls_port <= 0) {
+    const char* e = getenv("AURA_REDIS_TLS_PORT");
+    if (e && e[0]) tls_port = atoi(e);
+  }
+  if (!tls_yes) {
+    const char* e = getenv("AURA_REDIS_TLS");
+    if (e && (strcmp(e, "yes") == 0 || strcmp(e, "1") == 0 || strcmp(e, "on") == 0))
+      tls_yes = 1;
+  }
+  if (!tls_cert || !tls_cert[0]) {
+    const char* e = getenv("AURA_REDIS_TLS_CERT_FILE");
+    if (e && e[0]) tls_cert = e;
+  }
+  if (!tls_key || !tls_key[0]) {
+    const char* e = getenv("AURA_REDIS_TLS_KEY_FILE");
+    if (e && e[0]) tls_key = e;
+  }
+  if (!tls_ca || !tls_ca[0]) {
+    const char* e = getenv("AURA_REDIS_TLS_CA_FILE");
+    if (e && e[0]) tls_ca = e;
+  }
+  if (tls_yes && tls_port <= 0)
+    tls_port = 6380; /* Redis-ish default when --tls yes without --tls-port */
 
   ArCore* core = ar_core_create();
   if (!core) {
@@ -171,10 +213,45 @@ int main(int argc, char** argv) {
     return 1;
   }
   ar_core_install_signal_handlers(core);
+  if (tls_cert && tls_cert[0]) {
+    if (!ar_core_set_tls_cert_file(core, tls_cert)) {
+      fprintf(stderr, "ar_main: bad --tls-cert-file\n");
+      ar_core_destroy(core);
+      return 1;
+    }
+  }
+  if (tls_key && tls_key[0]) {
+    if (!ar_core_set_tls_key_file(core, tls_key)) {
+      fprintf(stderr, "ar_main: bad --tls-key-file\n");
+      ar_core_destroy(core);
+      return 1;
+    }
+  }
+  if (tls_ca && tls_ca[0]) {
+    if (!ar_core_set_tls_ca_file(core, tls_ca)) {
+      fprintf(stderr, "ar_main: bad --tls-ca-file\n");
+      ar_core_destroy(core);
+      return 1;
+    }
+  }
   if (ar_core_listen(core, port) != 1) {
     fprintf(stderr, "ar_main: listen %d failed\n", port);
     ar_core_destroy(core);
     return 1;
+  }
+  if (tls_port > 0 || tls_yes) {
+    if (!tls_cert || !tls_cert[0] || !tls_key || !tls_key[0]) {
+      fprintf(stderr,
+              "ar_main: TLS requires --tls-cert-file and --tls-key-file "
+              "(and OpenSSL build)\n");
+      ar_core_destroy(core);
+      return 1;
+    }
+    if (ar_core_listen_tls(core, tls_port) != 1) {
+      fprintf(stderr, "ar_main: tls listen %d failed\n", tls_port);
+      ar_core_destroy(core);
+      return 1;
+    }
   }
   int rc = ar_core_serve_forever(core);
   ar_core_destroy(core);

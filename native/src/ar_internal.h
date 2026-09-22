@@ -5,6 +5,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 typedef struct ArEntry {
   char* key;
@@ -43,6 +44,10 @@ typedef struct ArConn {
   uint64_t last_active_ms; /* P1.12: idle timeout clock */
   int is_replica; /* P2.14: master→replica feed connection */
   int is_master_link; /* P2.14: replica's outbound link to master */
+  /* P2.15 TLS */
+  void* ssl; /* SSL* when AURA_REDIS_HAS_TLS */
+  int is_tls;
+  int ssl_hs_done;
 } ArConn;
 
 struct ArCore {
@@ -116,6 +121,14 @@ struct ArCore {
   char master_host[64];
   int master_port;
   int repl_applying; /* 1 while applying master stream (no re-entry) */
+
+  /* P2.15 — optional native TLS (second listen fd) */
+  int tls_listen_fd;
+  int tls_port;
+  char tls_cert_file[512];
+  char tls_key_file[512];
+  char tls_ca_file[512];
+  void* ssl_ctx; /* SSL_CTX* when built with OpenSSL */
 };
 
 /* P2.13 RDB (implemented in ar_rdb.c) */
@@ -147,5 +160,16 @@ void ar_entry_free_ex(ArCore* core, size_t bucket, int tier, ArEntry* e);
 void ar_rehash_if_needed(ArCore* core);
 /* Promote cold→hot on GET hit; may demote if hot soft-full. */
 void ar_touch_get(ArCore* core, ArEntry* e, size_t bucket, int tier);
+
+
+/* P2.15 TLS helpers (ar_tls.c; soft stubs without OpenSSL) */
+int ar_tls_available(void);
+void ar_tls_free_ctx(ArCore* core);
+int ar_tls_setup_ctx(ArCore* core);
+int ar_tls_accept_setup(ArCore* core, ArConn* c);
+void ar_tls_conn_free(ArConn* c);
+int ar_tls_handshake(ArCore* core, ArConn* c); /* 1 done, 0 want-io, -1 fail */
+ssize_t ar_tls_read(ArConn* c, void* buf, size_t n, int* want_write);
+ssize_t ar_tls_write(ArConn* c, const void* buf, size_t n, int* want_read);
 
 #endif

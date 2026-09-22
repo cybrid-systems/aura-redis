@@ -1,10 +1,25 @@
 cmake_minimum_required(VERSION 3.16)
 project(aura_redis_core C)
 set(CMAKE_C_STANDARD 11)
+
+# P2.15 — optional native OpenSSL TLS (soft: build works without it)
+option(AURA_REDIS_TLS "Enable native OpenSSL TLS (--tls-port)" ON)
+set(AURA_REDIS_HAS_TLS 0)
+if(AURA_REDIS_TLS)
+  find_package(OpenSSL)
+  if(OpenSSL_FOUND)
+    set(AURA_REDIS_HAS_TLS 1)
+    message(STATUS "aura-redis: OpenSSL TLS enabled (${OPENSSL_VERSION})")
+  else()
+    message(STATUS "aura-redis: OpenSSL not found — TLS disabled (cleartext only)")
+  endif()
+endif()
+
 add_library(aura_redis_core SHARED
   src/ar_core.c
   src/ar_server.c
-  src/ar_rdb.c)
+  src/ar_rdb.c
+  src/ar_tls.c)
 target_include_directories(aura_redis_core PUBLIC include)
 target_include_directories(aura_redis_core PRIVATE src)
 set_target_properties(aura_redis_core PROPERTIES
@@ -14,6 +29,10 @@ set_target_properties(aura_redis_core PROPERTIES
   C_VISIBILITY_PRESET default)
 target_compile_options(aura_redis_core PRIVATE -O2 -Wall -Wextra)
 target_link_libraries(aura_redis_core PRIVATE dl)
+if(AURA_REDIS_HAS_TLS)
+  target_compile_definitions(aura_redis_core PRIVATE AURA_REDIS_HAS_TLS=1)
+  target_link_libraries(aura_redis_core PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
 
 add_executable(aura_redis_server src/ar_main.c)
 target_link_libraries(aura_redis_server PRIVATE aura_redis_core)

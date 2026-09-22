@@ -797,6 +797,12 @@ ArCore* ar_core_create(void) {
   c->master_host[0] = '\0';
   c->master_port = 0;
   c->repl_applying = 0;
+  c->tls_listen_fd = -1;
+  c->tls_port = 0;
+  c->tls_cert_file[0] = '\0';
+  c->tls_key_file[0] = '\0';
+  c->tls_ca_file[0] = '\0';
+  c->ssl_ctx = NULL;
   return c;
 }
 
@@ -804,10 +810,11 @@ void ar_core_destroy(ArCore* core) {
   if (!core)
     return;
   ar_rdb_wait_bgsave(core);
-  if (core->listen_fd >= 0 || core->epfd >= 0) {
+  if (core->listen_fd >= 0 || core->tls_listen_fd >= 0 || core->epfd >= 0) {
     extern void ar_net_shutdown(ArCore* core);
     ar_net_shutdown(core);
   }
+  ar_tls_free_ctx(core);
   free(core->requirepass);
   core->requirepass = NULL;
   if (core->evict_plugin) {

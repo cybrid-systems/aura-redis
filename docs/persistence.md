@@ -67,3 +67,7 @@ Best-effort **single async replica** for string KV (not Redis Cluster / PSYNC):
 - `REPLICAOF NO ONE` restores master role on that node
 - Master `INFO`: `role:master`, `connected_slaves`
 - Test: `python3 tests/test_prod_replica.py`
+
+## TLS (P2.15)
+
+See [`tls.md`](tls.md) — native `--tls-port` (OpenSSL optional build).
