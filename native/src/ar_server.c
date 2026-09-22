@@ -171,19 +171,36 @@ static int parse_bulk(const char* buf, size_t len, size_t pos, Arg* out,
   long n = 0;
   int digits = 0;
   while (i < len && buf[i] >= '0' && buf[i] <= '9') {
+    /* Cap digit run + magnitude: rbuf hard-limit is 16MiB; reject protocol bombs. */
+    if (digits > 9 || n > (16L * 1024 * 1024))
+      return -1;
     n = n * 10 + (buf[i] - '0');
     i++;
     digits++;
   }
-  if (!digits || i + 1 >= len || buf[i] != '\r' || buf[i + 1] != '\n')
-    return 0; /* incomplete or bad */
+  if (!digits) {
+    if (i >= len)
+      return 0; /* incomplete: "$" only */
+    return -1; /* non-digit in length */
+  }
+  if (i >= len)
+    return 0;
+  if (buf[i] != '\r')
+    return -1;
+  if (i + 1 >= len)
+    return 0;
+  if (buf[i + 1] != '\n')
+    return -1;
   i += 2;
   if (neg) {
+    /* Null bulk ($-1) is valid RESP but not a command argv element. */
     out->p = NULL;
     out->len = (size_t)-1;
     *next = i;
     return (int)(i - pos);
   }
+  if (n > 16L * 1024 * 1024)
+    return -1;
   if (i + (size_t)n + 2 > len)
     return 0;
   out->p = buf + i;
@@ -212,10 +229,19 @@ static int parse_command(const char* buf, size_t len, size_t pos, Arg* argv,
     i++;
     digits++;
   }
-  if (!digits)
+  if (!digits) {
+    if (i >= len)
+      return 0;
+    return -1;
+  }
+  if (i >= len)
     return 0;
-  if (i + 1 >= len || buf[i] != '\r' || buf[i + 1] != '\n')
+  if (buf[i] != '\r')
+    return -1;
+  if (i + 1 >= len)
     return 0;
+  if (buf[i + 1] != '\n')
+    return -1;
   i += 2;
   if (n < 0 || n > AR_MAX_ARGV)
     return -1;
@@ -226,6 +252,9 @@ static int parse_command(const char* buf, size_t len, size_t pos, Arg* argv,
     if (r == 0)
       return 0;
     if (r < 0)
+      return -1;
+    /* Command arrays must be bulk strings, not null bulks ($-1). */
+    if (argv[a].p == NULL)
       return -1;
     i = next;
   }
