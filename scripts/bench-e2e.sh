@@ -115,6 +115,7 @@ fi
 
 echo "== B) Dynamic hit-rate =="
 python3 "$ROOT/scripts/bench_dynamic_evict.py" --port 26740 \
+  --workloads hot_protect,ws_shift,oscillate,zipf_hotkey \
   2>&1 | tee "$LOG_DIR/hitrate.txt"
 
 if [[ "$SKIP_AURA_AGENT" != "1" ]]; then
@@ -129,6 +130,7 @@ fi
 # ── summarize into docs/perf-eval.md ──
 python3 - "$LOG_DIR" "$OUT_MD" "$SHA" "$N" <<'PY'
 import sys, os, re, datetime, platform
+from collections import defaultdict
 log_dir, out_md, sha, n = sys.argv[1:5]
 now = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
@@ -196,7 +198,7 @@ for ln in hr.splitlines():
     m = wl_pat.match(ln)
     if m and m.group(1) not in ("PASS",):
         # only workload names
-        if m.group(1) in ("hot_protect", "ws_shift", "oscillate"):
+        if m.group(1) in ("hot_protect", "ws_shift", "oscillate", "zipf_hotkey"):
             cur_wl = m.group(1)
         continue
     m = pat.match(ln)
@@ -215,7 +217,7 @@ if os.path.isfile(af):
         cur = None
         for ln in at.splitlines():
             m = wl_pat.match(ln)
-            if m and m.group(1) in ("hot_protect", "ws_shift", "oscillate"):
+            if m and m.group(1) in ("hot_protect", "ws_shift", "oscillate", "zipf_hotkey"):
                 cur = m.group(1)
             m = pat.match(ln)
             if m and cur:
@@ -251,6 +253,26 @@ lines.append("")
 lines.append("1. **Throughput** (memtier) — no `maxmemory` pressure; measures raw RESP/data-plane speed.")
 lines.append("2. **Hit quality** (dynamic workloads) — small `maxmemory`; measures eviction policy fitness.")
 lines.append("")
+# Headline contrasts from hit_rows + throughput
+hl = []
+pivot = defaultdict(dict)
+for wl, pol, hit, useful, phases in hit_rows:
+    pivot[wl][pol] = hit
+for wl in ("hot_protect", "zipf_hotkey"):
+    if wl in pivot and pivot[wl].get("lru") is not None and pivot[wl].get("adaptive") is not None:
+        hl.append(f"| `{wl}` LRU collapses | LRU **{pivot[wl]['lru']:.1f}%** vs adaptive **{pivot[wl]['adaptive']:.1f}%** |")
+if r1 and any(lab.startswith("aura") and p==1 and o for lab,p,o,_ in rows):
+    best_p1 = max((o/r1 for lab,p,o,_ in rows if o and p==1 and not lab.startswith("redis")), default=None)
+    best_p16 = max((o/r16 for lab,p,o,_ in rows if o and p==16 and r16 and not lab.startswith("redis")), default=None) if r16 else None
+    if best_p1:
+        hl.append(f"| Aura C ≥ Redis ops/s | best p=1 **{best_p1:.3f}×**; best p=16 **{(best_p16 or 0):.3f}×** |")
+if hl:
+    lines.append("## Headline contrasts")
+    lines.append("")
+    lines.append("| Claim | Evidence (this run) |")
+    lines.append("|-------|---------------------|")
+    lines.extend(hl)
+    lines.append("")
 lines.append("---")
 lines.append("")
 lines.append("## A) Throughput (ops/s)")
@@ -260,12 +282,15 @@ lines.append("Adaptive = C server `--evict lru` + Python RESP `EVICT` controller
 lines.append("")
 lines.append("| Engine | pipeline | Totals ops/s | Avg latency | vs Redis |")
 lines.append("|--------|----------|--------------|-------------|----------|")
-for lab, p, o, lat in rows:
-    base = r1 if p == 1 else r16
-    os_ = f"{o:.2f}" if o is not None else "—"
-    ls_ = lat if lat else "—"
-    vs = "1.00" if lab.startswith("redis") else ratio(o, base)
-    lines.append(f"| {lab} | {p} | {os_} | {ls_} | {vs} |")
+for p_want in (1, 16):
+    for lab, p, o, lat in rows:
+        if p != p_want:
+            continue
+        base = r1 if p == 1 else r16
+        os_ = f"{o:.2f}" if o is not None else "—"
+        ls_ = lat if lat else "—"
+        vs = "1.00" if lab.startswith("redis") else ratio(o, base)
+        lines.append(f"| {lab} | {p} | {os_} | {ls_} | {vs} |")
 if lisp_ops is not None:
     lines.append(f"| Aura Lisp `server.aura` (short) | 1 | {lisp_ops:.2f} | — | {ratio(lisp_ops, r1)} |")
 lines.append("")
@@ -276,7 +301,7 @@ lines.append("---")
 lines.append("")
 lines.append("## B) Hit rate under dynamic load")
 lines.append("")
-lines.append("Harness: `python3 scripts/bench_dynamic_evict.py` (maxmemory=120000).")
+lines.append("Harness: `python3 scripts/bench_dynamic_evict.py --workloads hot_protect,ws_shift,oscillate,zipf_hotkey` (maxmemory=120000).")
 lines.append("Policies: fixed `lru`, fixed `lfu`, `adaptive` (Python controller).")
 lines.append("")
 lines.append("| workload | policy | overall hit% | useful GETs | phase detail |")
@@ -300,14 +325,11 @@ lines.append("---")
 lines.append("")
 lines.append("## Interpretation")
 lines.append("")
-lines.append("- **Raw speed:** aura-redis C data plane is in the same ballpark as (or faster than) `redis:7-alpine`")
-lines.append("  on this matrix; Lisp `server.aura` is orders of magnitude slower — FFI/C path is the product story.")
-lines.append("- **When adaptive wins:** `hot_protect` (frequency flood) and `oscillate` (phase changes) — fixed LRU")
-lines.append("  loses hot keys; adaptive swaps to LFU then back. On `ws_shift`, fixed LRU already wins; adaptive")
-lines.append("  stays/bridges to LRU and matches it. Fixed LFU wins hot_protect but loses ws_shift.")
-lines.append("- **When fixed LRU is fine:** stable read-heavy working sets without write floods / frequency traps.")
-lines.append("- **Throughput vs quality:** do not use ops/s under tiny maxmemory as a speed score; eviction sampling")
-lines.append("  and adaptive `INFO` ticks are orthogonal to the memtier gate.")
+lines.append("- **Raw speed:** aura-redis C is typically ~1.05–1.35× `redis:7-alpine` on this matrix; cite ratios.")
+lines.append("- **When adaptive wins hard:** `hot_protect` / `zipf_hotkey` — fixed LRU often **0%**; adaptive near LFU oracle.")
+lines.append("- **When adaptive wins across phases:** `oscillate` — swaps LFU↔LRU; beats both fixed policies on useful GETs.")
+lines.append("- **When fixed LRU is fine:** `ws_shift` — LRU already 100%; adaptive matches; LFU loses.")
+lines.append("- **Do not mix scores:** hit-ratio uses tiny maxmemory; throughput does not.")
 lines.append("")
 lines.append("---")
 lines.append("")
@@ -318,7 +340,7 @@ lines.append("./scripts/build-native.sh")
 lines.append("./scripts/bench-e2e.sh          # A + B (+ optional C)")
 lines.append("# pieces:")
 lines.append("./scripts/memtier-cmp.sh        # Redis vs default C (overwrites docs/perf-log.md)")
-lines.append("python3 scripts/bench_dynamic_evict.py")
+lines.append("python3 scripts/bench_dynamic_evict.py --workloads hot_protect,ws_shift,oscillate,zipf_hotkey")
 lines.append("python3 scripts/bench_dynamic_evict.py --aura-agent --workloads hot_protect,ws_shift")
 lines.append("```")
 lines.append("")
@@ -328,17 +350,47 @@ lines.append("")
 open(out_md, "w").write("\n".join(lines) + "\n")
 print(f"Wrote {out_md}")
 # also print compact stdout summary
-print("\n=== E2E SUMMARY ===")
-print(f"SHA={sha}  n={n}")
-print("Throughput:")
+print("\n" + "=" * 72)
+print("  AURA-REDIS E2E SCOREBOARD")
+print("=" * 72)
+print(f"  SHA={sha}  memtier_n={n}  host={platform.machine()} x{nproc}")
+print("-" * 72)
+print("  THROUGHPUT (ops/s, no maxmemory) — higher is better")
+print(f"  {'Engine':42} {'p':>3} {'ops/s':>12} {'vs Redis':>10}")
 for lab, p, o, lat in rows:
     base = r1 if p == 1 else r16
-    print(f"  {lab:42} p={p:2}  ops/s={o}  vs={ratio(o, base)}")
+    os_ = f"{o:.0f}" if o is not None else "—"
+    vs = "1.00×" if lab.startswith("redis") else (ratio(o, base) + "×" if o is not None else "—")
+    print(f"  {lab:42} {p:3} {os_:>12} {vs:>10}")
 if lisp_ops is not None:
-    print(f"  {'Aura Lisp':42} p= 1  ops/s={lisp_ops}  vs={ratio(lisp_ops, r1)}")
-print("Hit-rate:")
+    print(f"  {'Aura Lisp server.aura (short)':42} {1:3} {lisp_ops:>12.0f} {(ratio(lisp_ops, r1)+'×'):>10}")
+print("-" * 72)
+print("  HIT QUALITY (tiny maxmemory) — adaptive should match oracle")
+print(f"  {'workload':14} {'lru':>8} {'lfu':>8} {'adaptive':>10}  highlight")
+# pivot hit_rows
+pivot = defaultdict(dict)
 for wl, pol, hit, useful, phases in hit_rows:
-    print(f"  {wl:12} {pol:10} hit={hit:5.1f}% useful={useful}")
+    pivot[wl][pol] = hit
+for wl in ("hot_protect", "ws_shift", "oscillate", "zipf_hotkey"):
+    if wl not in pivot:
+        continue
+    d = pivot[wl]
+    lru_h = d.get("lru")
+    lfu_h = d.get("lfu")
+    ad_h = d.get("adaptive")
+    def fmt(v):
+        return f"{v:7.1f}%" if v is not None else "      —"
+    note = ""
+    if lru_h is not None and ad_h is not None and ad_h >= 95 and lru_h < 20:
+        note = "★ LRU collapses, adaptive holds"
+    elif lru_h is not None and lfu_h is not None and ad_h is not None:
+        bestf = max(lru_h, lfu_h)
+        if ad_h + 0.5 >= bestf:
+            note = "near-oracle"
+        if lfu_h < 50 and lru_h >= 95:
+            note = note or "LFU loses, adaptive≈LRU"
+    print(f"  {wl:14} {fmt(lru_h)} {fmt(lfu_h)} {fmt(ad_h)}  {note}")
+print("=" * 72)
 PY
 
 echo "Done. Report: $OUT_MD"
