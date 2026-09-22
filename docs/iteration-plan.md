@@ -116,23 +116,31 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 **Iterations 0–9 done.** Aura-native path is the product story; PLUGIN remains escape hatch (DENY_PLUGIN under sandbox profile).
 
+**Active track: MVP M0–M5** (collapses explore iters 10–14 into a shippable demo).
+
+→ [`mvp-plan.md`](mvp-plan.md) — goal, phases, choose-fn contract, demo script.
+
+| Phase | Theme |
+|-------|--------|
+| M0 | Plan freeze |
+| M1 | Multi-signal INFO + choose-fn API |
+| M2 | Joint EVICT+LAYOUT |
+| M3 | Industry harness (`zipf_hotkey`, oscillate) |
+| M4 | Hot-key PIN + `EVICT samples N` |
+| M5 | Distinctive demo MVP (`scripts/demo-mvp.sh`) |
+
 ---
 
-## Future iterations (10+) — adaptive load mutation
+## Post-MVP / explore (15+) — adaptive load mutation
 
-Design exploration (archetypes, P0–P3 axes, harness names, numbered backlog with exit criteria):
+Design exploration (archetypes, P0–P3 axes, harness names, numbered backlog):
 
 → [`runtime-mutation-explore.md`](runtime-mutation-explore.md)
 
-Summary of planned next steps:
+Iters **10–14** are delivered via the MVP track above. Remaining:
 
 | Iter | Theme |
 |------|--------|
-| 10 | Multi-signal INFO + choose-fn API |
-| 11 | Joint EVICT+LAYOUT policy |
-| 12 | Industry harness pack (`zipf_hotkey`, `diurnal_shift`, …) |
-| 13 | RESP eviction tunables (`samples N`, soft watermark) |
-| 14 | Hot-key pin set |
 | 15 | New kernel: SLRU or TTL-aware |
 | 16 | Soft-goal choose (hit% vs evict CPU) |
 | 17 | hot_cold threshold mutation via Aura |
