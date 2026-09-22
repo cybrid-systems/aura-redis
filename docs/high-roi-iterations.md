@@ -10,10 +10,75 @@ DEFAULT. Do not grow aura-grok for Redis-shaped prims.
 | **M8** | `diurnal_shift` harness (quiet→peak→flash→cool) | **DONE** (with M6) | used as mutation_gain workload; regret vs fixed |
 | **M9** | TTL-aware kernel + SET EX / EXPIRE / TTL | **DONE** | `ttl_aware` beats LRU on `ttl_wave`; Aura `EVICT … → ttl_aware` |
 | **M10** | Soft-goal choose (hit% s.t. evict CPU) | **DONE** | refuse `lfu`/+pin when `erate≥20`; `flash_churn` soft vs LFU/nosoft |
-| **M11** | `std/evolve` offline/slow online on body text | pending | evolve thresholds; heal on fitness drop |
-| **M12** | Per-prefix policy namespace sketch | pending | two prefixes, two choose policies |
+| **M11** | Slow online evolve loop (thresholds × gens) | **DONE** | multi-gen keep/revert; evolve vs frozen on `evolve_gain` |
+| **M12** | Per-prefix policy namespace | **DONE** | POLICY a:/b:; prefix vs global +73.2pp on `prefix_mix` |
+
+## How to run M12
+
+```bash
+./scripts/build-native.sh
+python3 scripts/bench_regret.py prefix_mix
+# or:
+python3 scripts/bench_dynamic_evict.py --workloads prefix_mix \
+  --policies lru,lfu,adaptive,adaptive_prefix
+```
+
+RESP `POLICY <prefix> <profile>` stores hints; INFO `policy_hints` (e.g.
+`a:=session;b:=zipf`). Aura `policy_agent` pins those prefixes and overrides
+choose toward `lfu|flat|pin` / `ttl_aware|flat|pin` (DENY_PLUGIN).
+
+Measured (2026-09-22 CST, Aura `policy_agent`, `prefix_mix`, maxmemory=120k):
+
+| policy | hit% | useful | a: hit% | b: hit% | notes |
+|--------|------|--------|---------|---------|-------|
+| lru | 0.0% | 0 | 0% | 0% | |
+| lfu | 100% | 56 | 100% | 100% | fixed oracle |
+| **adaptive** (global) | **26.8%** | **15** | 14% | 39% | pins hot/z only |
+| **adaptive_prefix** | **100%** | **56** | **100%** | **100%** | PIN a: + b: |
+
+**Prefix-attributable Δ = +73.2pp** useful hit% vs global adaptive. Log:
+`policy_agent: prefix-policy hints=a:=session;b:=zipf → lfu|flat|pin` +
+`PIN prefix-policy a:/b:`.
+
+## How to run M11
+
+
+```bash
+./scripts/build-native.sh
+python3 scripts/bench_regret.py evolve_gain
+# or:
+python3 scripts/bench_dynamic_evict.py --workloads evolve_gain \
+  --policies lru,lfu,adaptive_evolve_frozen,adaptive_evolve
+```
+
+`std/evolve` in pinned Aura is intend-analytics strategy evolution (not Redis
+fitness) — M11 implements a **slow online evolve loop** in `policy_agent`:
+
+1. Seed **bad** thresholds (`min-ops=900`, `miss-pin=75`) → choose rarely fires
+2. Each generation: window fitness (hit% EWMA) → mutate thresholds down →
+   `hot-strategy:swap!` trial body → **keep** if fitness ≥ champion else **revert**
+3. Log proof: `policy_agent: evolve gen=N fitness=F action=keep|revert|baseline|propose`
+
+Distinct from M7 one-shot `fitness-threshold-mutate` (single step, no loop).
+
+Env: `AURA_REDIS_EVOLVE=1`, `AURA_REDIS_THRESH_MIN_OPS`, `AURA_REDIS_THRESH_MISS_PIN`,
+`AURA_REDIS_EVOLVE_MAX_GENS`, `AURA_REDIS_EVOLVE_WINDOW`.
+
+Measured (2026-09-22 CST, Aura `policy_agent`, `evolve_gain`, maxmemory=120k):
+
+| policy | hit% | useful GETs | notes |
+|--------|------|-------------|-------|
+| lru | 11.4% | 16 | static |
+| lfu | 100.0% | 140 | oracle |
+| **adaptive_evolve_frozen** | **10.0%** | **14** | bad min-ops=900 frozen |
+| **adaptive_evolve** | **42.9%** | **60** | multi-gen keep; r3–r4 = 100% |
+
+**Evolve-attributable Δ = +32.9pp** (evolve − frozen). Log proof: `evolve gen=N
+fitness=F action=baseline|propose|keep` (≥2 gens). Late rounds match LFU after
+thresholds drop (900→760→620→…).
 
 ## How to run M10
+
 
 ```bash
 ./scripts/build-native.sh

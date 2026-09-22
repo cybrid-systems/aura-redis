@@ -1246,3 +1246,45 @@ size_t ar_core_list_pinned(ArCore* core, char** out_keys, size_t max_out) {
                              max_out, n);
   return n;
 }
+
+/* M12 — per-prefix policy namespace */
+int ar_core_policy_set(ArCore* core, const char* prefix, const char* profile) {
+  if (!core || !prefix || !profile || !prefix[0] || !profile[0])
+    return 0;
+  /* Update existing slot if prefix matches */
+  for (int i = 0; i < core->policy_n; ++i) {
+    if (strncmp(core->policy_pfx[i], prefix, sizeof(core->policy_pfx[i])) == 0) {
+      strncpy(core->policy_prof[i], profile, sizeof(core->policy_prof[i]) - 1);
+      core->policy_prof[i][sizeof(core->policy_prof[i]) - 1] = '\0';
+      return 1;
+    }
+  }
+  if (core->policy_n >= 4)
+    return 0;
+  int i = core->policy_n++;
+  strncpy(core->policy_pfx[i], prefix, sizeof(core->policy_pfx[i]) - 1);
+  core->policy_pfx[i][sizeof(core->policy_pfx[i]) - 1] = '\0';
+  strncpy(core->policy_prof[i], profile, sizeof(core->policy_prof[i]) - 1);
+  core->policy_prof[i][sizeof(core->policy_prof[i]) - 1] = '\0';
+  return 1;
+}
+
+int ar_core_policy_hints(ArCore* core, char* buf, size_t buflen) {
+  if (!core || !buf || buflen == 0)
+    return 0;
+  buf[0] = '\0';
+  size_t used = 0;
+  for (int i = 0; i < core->policy_n; ++i) {
+    char piece[64];
+    int n = snprintf(piece, sizeof(piece), "%s%s=%s",
+                     (used ? ";" : ""), core->policy_pfx[i], core->policy_prof[i]);
+    if (n < 0)
+      break;
+    if (used + (size_t)n + 1 > buflen)
+      break;
+    memcpy(buf + used, piece, (size_t)n);
+    used += (size_t)n;
+    buf[used] = '\0';
+  }
+  return (int)used;
+}

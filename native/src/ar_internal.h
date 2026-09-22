@@ -79,6 +79,11 @@ struct ArCore {
   int quit;
   void* evict_plugin; /* dlopen handle; NULL if built-in */
   uint64_t plugin_reloads; /* successful ar_core_load_evict_plugin */
+
+  /* M12 — per-prefix policy hints (RESP POLICY → INFO policy_hints) */
+  char policy_pfx[4][16];
+  char policy_prof[4][32];
+  int policy_n;
 };
 
 /* dict helpers used by server */

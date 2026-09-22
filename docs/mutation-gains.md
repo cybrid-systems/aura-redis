@@ -83,3 +83,11 @@ Tried before profile swap when seed is normal/conservative/thresholded.
 Separate from mutation_gain: C `ttl_aware` ArEvictOps + Aura choose picks it on
 `ttl_wave` / `session_churn` when INFO shows short-TTL churn (`keys_with_ttl`,
 `avg_ttl_ms`, `expired`). See `docs/high-roi-iterations.md` M9.
+
+
+## M11 — slow online evolve loop
+
+Multi-generation threshold mutate with window fitness + keep/revert (not M7
+one-shot). See [`high-roi-iterations.md`](high-roi-iterations.md) M11.
+`std/evolve` in pinned Aura is intend-analytics only — Redis fitness loop lives
+in `policy_agent.aura`.

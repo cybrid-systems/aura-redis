@@ -20,6 +20,13 @@
 ;                                   (default 1). Set 0 or AURA_REDIS_FROZEN=1 to freeze
 ;                                   choose-fn after seed (adaptive_frozen bench).
 ;   AURA_REDIS_SEED_PROFILE         initial body after register (default normal)
+;   AURA_REDIS_EVOLVE=0|1           M11 slow online evolve loop (multi-gen threshold
+;                                   mutate + fitness window + keep/revert). Distinct
+;                                   from M7 one-shot fitness-threshold-mutate.
+;   AURA_REDIS_THRESH_MIN_OPS       seed min-ops literal (default 40; evolve uses 180)
+;   AURA_REDIS_THRESH_MISS_PIN      seed miss-pin literal (default 30; evolve uses 75)
+;   AURA_REDIS_EVOLVE_MAX_GENS      max generations (default 6)
+;   AURA_REDIS_EVOLVE_WINDOW        ticks per fitness window (default 8)
 
 (require "std/mutate" all:)
 (require "std/hot-strategy" all:)
@@ -59,6 +66,31 @@
 (define *phase-hint* "unknown")
 (define *ttl-pressure* #f) ; M9: short-TTL churn this tick
 (define *soft-fires* 0) ; M10: soft-goal choose overrode expensive kernel
+; M11 — slow online evolve loop (multi-generation threshold fitness)
+(define *evolve-on* #f)
+(define *evolve-max-gens* 6)
+(define *evolve-window* 8)
+(define *evolve-gen* 0)
+(define *evolve-ticks* 0)
+(define *evolve-mode* "baseline") ; baseline | trial | done
+(define *evolve-fit-sum* 0)
+(define *evolve-fit-n* 0)
+(define *champ-min* 40)
+(define *champ-miss* 30)
+(define *champ-fit* 0)
+(define *trial-min* 40)
+(define *trial-miss* 30)
+(define *evolve-keeps* 0)
+(define *evolve-reverts* 0)
+(define *evolve-logs* 0)
+; M12 — per-prefix policy hints from INFO policy_hints
+(define *policy-hints* "")
+(define *prefix-policy-on* #f)
+(define *pfx0* "")
+(define *pfx1* "")
+(define *prof0* "")
+(define *prof1* "")
+(define *prefix-applies* 0)
 
 (define *prev-gets* 0)
 (define *prev-sets* 0)
@@ -108,6 +140,32 @@
       (not (or (string=? e "0") (string=? e "false") (string=? e "no")
                (string=? e "off"))))
     #t))
+(let ((e (getenv "AURA_REDIS_EVOLVE")))
+  (if (and (string? e)
+           (or (string=? e "1") (string=? e "true") (string=? e "yes")
+               (string=? e "on")))
+    (set! *evolve-on* #t)
+    #t))
+(let ((e (getenv "AURA_REDIS_THRESH_MIN_OPS")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *thresh-min-ops* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_THRESH_MISS_PIN")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *thresh-miss-pin* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_EVOLVE_MAX_GENS")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *evolve-max-gens* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_EVOLVE_WINDOW")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *evolve-window* (string->number e))
+    #t))
+; Evolve owns threshold mutation — disable M6/M7 fitness profile swap path
+(if *evolve-on*
+  (set! *fitness-on* #f)
+  #t)
 
 ; ── tiny string helpers ──
 (define (find-substr s pat start)
@@ -142,6 +200,57 @@
   (let ((t0 (monotonic-ms)))
     (while (< (- (monotonic-ms) t0) ms) 0)
     #t))
+
+;; M12: parse "a:=session;b:=zipf" (prefix=profile) from INFO
+(define (parse-policy-hints! hints)
+  (set! *policy-hints* (if (string? hints) hints ""))
+  (set! *pfx0* "")
+  (set! *pfx1* "")
+  (set! *prof0* "")
+  (set! *prof1* "")
+  (set! *prefix-policy-on* #f)
+  (if (or (not (string? hints)) (= (string-length hints) 0))
+    #f
+    (let ((slot 0)
+          (start 0)
+          (n (string-length hints))
+          (i 0))
+      (while (<= i n)
+        (if (or (= i n)
+                (and (< i n) (string=? (substring hints i (+ i 1)) ";")))
+          (begin
+            (if (> i start)
+              (let ((piece (substring hints start i)))
+                (let ((peq (find-substr piece "=" 0)))
+                  (if (>= peq 0)
+                    (let ((px (substring piece 0 peq))
+                          (pr (substring piece (+ peq 1) (string-length piece))))
+                      (if (= slot 0)
+                        (begin (set! *pfx0* px) (set! *prof0* pr))
+                        (if (= slot 1)
+                          (begin (set! *pfx1* px) (set! *prof1* pr))
+                          #t))
+                      (set! slot (+ slot 1))
+                      (set! *prefix-policy-on* #t))
+                    #t)))
+              #t)
+            (set! start (+ i 1))
+            (set! i (+ i 1)))
+          (set! i (+ i 1))))
+      *prefix-policy-on*)))
+
+(define (prefix-has-session?)
+  (or (>= (find-substr *prof0* "session" 0) 0)
+      (>= (find-substr *prof0* "ttl" 0) 0)
+      (>= (find-substr *prof1* "session" 0) 0)
+      (>= (find-substr *prof1* "ttl" 0) 0)))
+
+(define (prefix-has-zipf?)
+  (or (>= (find-substr *prof0* "zipf" 0) 0)
+      (>= (find-substr *prof0* "hot" 0) 0)
+      (>= (find-substr *prof1* "zipf" 0) 0)
+      (>= (find-substr *prof1* "hot" 0) 0)))
+
 
 ; ── RESP client (encode array of bulk strings; parse simple/bulk/err) ──
 (define (resp-encode-bulk s)
@@ -325,6 +434,139 @@
             (set! *ticks-since-fitness* 0)
             (set! *profile-name* "thresholded")
             #t))))))
+
+;; M11 — evolve body: threshold literals only (no soft-goal; flood erate must
+;; not refuse LFU+pin while protecting hot set). Distinct from M7 one-shot.
+(define (build-evolve-body min-ops miss-pin)
+  ; No read-heavy→lru rule: once LFU+pin lands, stay pinned across GET measure.
+  (string-append
+    "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) "
+    "(let ((ops (+ dgets dsets))) "
+    "(if (< ops " (number->string min-ops) ") \"\" "
+    "(let ((miss-pct (if (> (+ dhits dmisses) 0) "
+    "(quotient (* 100 dmisses) (+ dhits dmisses)) 0))) "
+    "(cond "
+    "((and (>= dsets dgets) (> miss-pct " (number->string miss-pin) ") (> nkeys 0)) "
+    "\"lfu|flat|pin\") "
+    "((> dsets (* dgets 2)) \"lfu|flat\") "
+    "((and (> devicted 0) (> miss-pct " (number->string (+ miss-pin 10)) ")) "
+    "\"lfu|flat|pin\") "
+    "(else \"\"))))))"))
+
+(define (evolve-apply-body! min-ops miss-pin tag)
+  (if (not (mutate:boundary-safe?))
+    (begin
+      (display "policy_agent: skip evolve-apply (boundary not safe)\n")
+      #f)
+    (begin
+      (mutate:safety-snapshot)
+      (let ((body (build-evolve-body min-ops miss-pin))
+            (r #f))
+        (set! r (hot-strategy:swap! "choose-fn" body tag))
+        (set! *thresh-min-ops* min-ops)
+        (set! *thresh-miss-pin* miss-pin)
+        (set! *profile-name* "evolved")
+        (set! *swaps* (+ *swaps* 1))
+        r))))
+
+(define (evolve-propose-next)
+  ; Step down thresholds so bad seed (high) becomes useful over generations
+  (let ((nm (if (> *champ-min* 40) (- *champ-min* 140) *champ-min*))
+        (ns (if (> *champ-miss* 14) (- *champ-miss* 12) *champ-miss*)))
+    (if (and (= nm *champ-min*) (= ns *champ-miss*))
+      #f
+      (begin
+        (set! *trial-min* nm)
+        (set! *trial-miss* ns)
+        #t))))
+
+(define (evolve-log! action fit)
+  (display "policy_agent: evolve gen=")
+  (display *evolve-gen*)
+  (display " fitness=")
+  (display fit)
+  (display " champ_fit=")
+  (display *champ-fit*)
+  (display " action=")
+  (display action)
+  (display " min-ops=")
+  (display *thresh-min-ops*)
+  (display " miss-pin=")
+  (display *thresh-miss-pin*)
+  (display " trial=")
+  (display *trial-min*)
+  (display "/")
+  (display *trial-miss*)
+  (display " champ=")
+  (display *champ-min*)
+  (display "/")
+  (display *champ-miss*)
+  (newline)
+  (set! *evolve-logs* (+ *evolve-logs* 1))
+  #t)
+
+;; Slow online evolve: window fitness → keep if better else revert (heal path).
+(define (maybe-evolve!)
+  (if (or (not *evolve-on*) (string=? *evolve-mode* "done"))
+    #f
+    (begin
+      (set! *evolve-ticks* (+ *evolve-ticks* 1))
+      (set! *evolve-fit-sum* (+ *evolve-fit-sum* *hit-ewma*))
+      (set! *evolve-fit-n* (+ *evolve-fit-n* 1))
+      (if (< *evolve-ticks* *evolve-window*)
+        #f
+        (let ((fit (if (> *evolve-fit-n* 0)
+                     (quotient *evolve-fit-sum* *evolve-fit-n*)
+                     0)))
+          (set! *evolve-ticks* 0)
+          (set! *evolve-fit-sum* 0)
+          (set! *evolve-fit-n* 0)
+          (cond
+            ((string=? *evolve-mode* "baseline")
+             (begin
+               (set! *champ-fit* fit)
+               (set! *champ-min* *thresh-min-ops*)
+               (set! *champ-miss* *thresh-miss-pin*)
+               (evolve-log! "baseline" fit)
+               (if (evolve-propose-next)
+                 (begin
+                   (evolve-apply-body! *trial-min* *trial-miss* "evolve-trial")
+                   (set! *evolve-mode* "trial")
+                   (evolve-log! "propose" fit))
+                 (begin
+                   (set! *evolve-mode* "done")
+                   (evolve-log! "done-no-move" fit)))
+               #t))
+            ((string=? *evolve-mode* "trial")
+             (begin
+               (if (>= fit *champ-fit*)
+                 (begin
+                   (set! *champ-fit* fit)
+                   (set! *champ-min* *trial-min*)
+                   (set! *champ-miss* *trial-miss*)
+                   (set! *evolve-keeps* (+ *evolve-keeps* 1))
+                   (evolve-log! "keep" fit))
+                 (begin
+                   ; revert / heal to champion thresholds
+                   (evolve-apply-body! *champ-min* *champ-miss* "evolve-revert")
+                   (set! *heals* (+ *heals* 1))
+                   (set! *evolve-reverts* (+ *evolve-reverts* 1))
+                   (evolve-log! "revert" fit)))
+               (set! *evolve-gen* (+ *evolve-gen* 1))
+               (if (>= *evolve-gen* *evolve-max-gens*)
+                 (begin
+                   (set! *evolve-mode* "done")
+                   (evolve-log! "done" fit))
+                 (if (evolve-propose-next)
+                   (begin
+                     (evolve-apply-body! *trial-min* *trial-miss* "evolve-trial")
+                     (set! *evolve-mode* "trial")
+                     (evolve-log! "propose" fit))
+                   (begin
+                     (set! *evolve-mode* "done")
+                     (evolve-log! "done-floor" fit))))
+               #t))
+            (else #f)))))))
 
 (define (phase-hint-of dgets dsets dhits dmisses)
   (cond
@@ -552,6 +794,40 @@
         (set! *last-good-profile* *seed-profile*))))
   #t)
 
+; M11: seed thresholded evolve body (bad high thresholds lose until evolved)
+(set! *champ-min* *thresh-min-ops*)
+(set! *champ-miss* *thresh-miss-pin*)
+(if (or *evolve-on*
+        (not (and (= *thresh-min-ops* 40) (= *thresh-miss-pin* 30))))
+  (begin
+    (display "policy_agent: evolve=")
+    (display (if *evolve-on* "on" "off"))
+    (display " seed-thresholds min-ops=")
+    (display *thresh-min-ops*)
+    (display " miss-pin=")
+    (display *thresh-miss-pin*)
+    (display " max-gens=")
+    (display *evolve-max-gens*)
+    (display " window=")
+    (display *evolve-window*)
+    (newline)
+    (mutate:safety-snapshot)
+    ; Prefer evolve-body (no soft-goal) whenever custom thresholds set —
+    ; M11 frozen vs evolve A/B must share the same body family.
+    (let ((body (build-evolve-body *thresh-min-ops* *thresh-miss-pin*))
+          (tag (if *evolve-on* "evolve-seed" "thresh-seed-frozen")))
+      (let ((r (hot-strategy:swap! "choose-fn" body tag)))
+        (display "policy_agent: threshold-seed → ")
+        (display tag)
+        (display " result=")
+        (display r)
+        (newline)
+        (set! *profile-name* (if *evolve-on* "evolved" "thresholded"))
+        (set! *swaps* (+ *swaps* 1))
+        (set! *evolve-mode* (if *evolve-on* "baseline" "done"))
+        #t)))
+  #t)
+
 ; ── connect to C data plane ──
 (display "policy_agent: connect ")
 (display *host*)
@@ -600,6 +876,7 @@
                   (at (info-num info "avg_ttl_ms"))
                   (cur (info-get info "evict"))
                   (cur-layout (info-get info "layout")))
+                (parse-policy-hints! (info-get info "policy_hints"))
               (let ((dgets (if *have-prev* (- g *prev-gets*) 0))
                     (dsets (if *have-prev* (- s *prev-sets*) 0))
                     (dhits (if *have-prev* (- h *prev-hits*) 0))
@@ -630,6 +907,28 @@
                                 (choose-fn dgets dsets dhits dmisses devicted nk
                                            dexpired at kt)
                                 (catch (e) ""))))
+                  ; M12: prefix-scoped override from POLICY hints
+                  (if *prefix-policy-on*
+                    (begin
+                      (cond
+                        ((and (prefix-has-session?) *ttl-pressure*)
+                         (set! choice "ttl_aware|flat|pin"))
+                        ((prefix-has-zipf?)
+                         (set! choice "lfu|flat|pin"))
+                        ((prefix-has-session?)
+                         (set! choice "ttl_aware|flat|pin"))
+                        (else #t))
+                      (if (and (string? choice) (> (string-length choice) 0)
+                               (= *prefix-applies* 0))
+                        (begin
+                          (display "policy_agent: prefix-policy hints=")
+                          (display *policy-hints*)
+                          (display " → ")
+                          (display choice)
+                          (newline)
+                          (set! *prefix-applies* 1))
+                        #t))
+                    #t)
                   (if (and (string? choice) (> (string-length choice) 0))
                     (begin
                       ; parse "evict|layout|pin" (backward compat: bare "lfu")
@@ -718,7 +1017,8 @@
                             #t)
                           ; On LRU swap-in: drop stale pins so WS shift is not glued to set A
                           (if (and (string=? ev-name "lru")
-                                   (not (string=? cur "lru")))
+                                   (not (string=? cur "lru"))
+                                   (not *prefix-policy-on*))
                             (begin
                               (display "policy_agent: UNPIN stale hot/z prefixes\n")
                               (unpin-prefix-set! *sock* "hot" 40)
@@ -727,19 +1027,33 @@
                             #t)
                           (if want-pin
                             (begin
-                              (display "policy_agent: PIN hot set + samples=64\n")
                               (redis-call! *sock* "EVICT" "samples" "64")
-                              ; Prefer flat during pin-protect (avoid migrate hurt)
                               (if (not (string=? cur-layout "flat"))
                                 (redis-call! *sock* "LAYOUT" "flat")
                                 #t)
-                              (pin-prefix-set! *sock* "hot" 40)
-                              (pin-prefix-set! *sock* "z" 24)
+                              (if *prefix-policy-on*
+                                (begin
+                                  (display "policy_agent: PIN prefix-policy ")
+                                  (display *pfx0*)
+                                  (display "/")
+                                  (display *pfx1*)
+                                  (newline)
+                                  (if (> (string-length *pfx0*) 0)
+                                    (pin-prefix-set! *sock* *pfx0* 32)
+                                    #t)
+                                  (if (> (string-length *pfx1*) 0)
+                                    (pin-prefix-set! *sock* *pfx1* 32)
+                                    #t))
+                                (begin
+                                  (display "policy_agent: PIN hot set + samples=64\n")
+                                  (pin-prefix-set! *sock* "hot" 40)
+                                  (pin-prefix-set! *sock* "z" 24)))
                               (set! *applies* (+ *applies* 1))
                               #t)
                             #t))))
                     #t))
                 (maybe-fitness-mutate! dgets dsets dhits dmisses devicted)
+                (maybe-evolve!)
                 #t)))))
       ; demo phase machine
       (if *demo*
@@ -821,6 +1135,16 @@
 (display *threshold-mutates*)
 (display " soft-fires=")
 (display *soft-fires*)
+(display " evolve-gens=")
+(display *evolve-gen*)
+(display " evolve-keeps=")
+(display *evolve-keeps*)
+(display " evolve-reverts=")
+(display *evolve-reverts*)
+(display " evolve-logs=")
+(display *evolve-logs*)
+(display " prefix-applies=")
+(display *prefix-applies*)
 (display " profile=")
 (display *profile-name*)
 (newline)

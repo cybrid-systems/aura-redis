@@ -447,7 +447,9 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   }
   /* INFO — multi-signal metrics for Aura policy agent (MVP M1). */
   if (cmd_eq(cmd, clen, "info")) {
-    char buf[1024];
+    char hints[160];
+    ar_core_policy_hints(core, hints, sizeof(hints));
+    char buf[1280];
     int n = snprintf(buf, sizeof(buf),
                      "# aura-redis\n"
                      "evict:%s\n"
@@ -469,7 +471,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
                      "plugin_reloads:%llu\n"
                      "layout_gen:%llu\n"
                      "hot_keys:%llu\n"
-                     "cold_keys:%llu\n",
+                     "cold_keys:%llu\n"
+                     "policy_hints:%s\n",
                      ar_core_evict_name(core),
                      ar_core_layout_name(core),
                      (unsigned long long)ar_metric_gets(core),
@@ -489,10 +492,32 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
                      (unsigned long long)ar_metric_plugin_reloads(core),
                      (unsigned long long)ar_core_layout_gen(core),
                      (unsigned long long)ar_core_hot_keys(core),
-                     (unsigned long long)ar_core_cold_keys(core));
+                     (unsigned long long)ar_core_cold_keys(core),
+                     hints);
     if (n < 0)
       return reply_err(c, "ERR info");
     return reply_bulk(c, buf, (size_t)n);
+  }
+  /* M12: POLICY prefix profile | POLICY (list hints) */
+  if (cmd_eq(cmd, clen, "policy")) {
+    if (argc == 1) {
+      char hints[160];
+      int hn = ar_core_policy_hints(core, hints, sizeof(hints));
+      return reply_bulk(c, hints, (size_t)(hn < 0 ? 0 : hn));
+    }
+    if (argc == 3) {
+      char pfx[16], prof[32];
+      size_t pl = argv[1].len < sizeof(pfx) - 1 ? argv[1].len : sizeof(pfx) - 1;
+      size_t rl = argv[2].len < sizeof(prof) - 1 ? argv[2].len : sizeof(prof) - 1;
+      memcpy(pfx, argv[1].p, pl);
+      pfx[pl] = '\0';
+      memcpy(prof, argv[2].p, rl);
+      prof[rl] = '\0';
+      if (!ar_core_policy_set(core, pfx, prof))
+        return reply_err(c, "ERR policy");
+      return reply_ok(c);
+    }
+    return reply_err(c, "ERR wrong number of arguments for 'policy'");
   }
   /* MVP M4: PIN key | UNPIN key | PIN (list) */
   if (cmd_eq(cmd, clen, "pin")) {

@@ -43,9 +43,17 @@ Workloads
    Soft-goal adaptive refuses lfu|+pin when erate≥20 → lru/ttl_aware/noop;
    keeps useful hit% higher and/or eviction under budget vs fixed LFU / nosoft.
 
+10. evolve_gain (M11) — bad initial thresholds (high min-ops/miss-pin) stuck on
+    LRU lose hot set; multi-gen evolve loop mutates thresholds, logs fitness,
+    keep-if-better / revert; adaptive_evolve beats adaptive_evolve_frozen.
+
+11. prefix_mix (M12) — noisy-neighbor: a: session/TTL-ish durable + b: zipf hot.
+    RESP POLICY a: session / b: zipf → Aura pins both prefixes; global one-policy
+    (no POLICY) loses at least one set's useful GETs.
+
 Policies: lru | lfu | ttl_aware | adaptive (=adaptive_soft) | adaptive_soft |
           adaptive_nosoft | adaptive_frozen | adaptive_mutate |
-          poison_frozen | poison_mutate
+          poison_frozen | poison_mutate | adaptive_evolve | adaptive_evolve_frozen
 
 Adaptive path (DEFAULT): Aura policy_agent.aura in Docker writes EVICT /
 LAYOUT / PIN decisions (choose_normal.aura: min-ops=40, miss-spike→lfu|flat|pin,
@@ -89,6 +97,9 @@ ADAPTIVE_POLICIES = {
     "adaptive_mutate",
     "poison_frozen",
     "poison_mutate",
+    "adaptive_evolve",
+    "adaptive_evolve_frozen",
+    "adaptive_prefix",
 }
 
 
@@ -433,11 +444,21 @@ class AuraAgentController:
         tick_ms: int = 100,
         fitness_mutate: bool = True,
         seed_profile: str = "normal",
+        evolve: bool = False,
+        thresh_min_ops: Optional[int] = None,
+        thresh_miss_pin: Optional[int] = None,
+        evolve_max_gens: int = 6,
+        evolve_window: int = 8,
     ):
         self.port = port
         self.tick_ms = tick_ms
         self.fitness_mutate = fitness_mutate
         self.seed_profile = seed_profile
+        self.evolve = evolve
+        self.thresh_min_ops = thresh_min_ops
+        self.thresh_miss_pin = thresh_miss_pin
+        self.evolve_max_gens = evolve_max_gens
+        self.evolve_window = evolve_window
         self.cid: Optional[str] = None
         self.swaps: List[str] = []
         self.fitness_events: List[str] = []
@@ -460,8 +481,18 @@ class AuraAgentController:
             "-e", f"AURA_REDIS_SEED_PROFILE={self.seed_profile}",
             # no AURA_REDIS_POLICY_DEMO → run forever
         ]
-        if not self.fitness_mutate:
+        if not self.fitness_mutate and not self.evolve:
             cmd.extend(["-e", "AURA_REDIS_FROZEN=1"])
+        if self.evolve:
+            cmd.extend([
+                "-e", "AURA_REDIS_EVOLVE=1",
+                "-e", f"AURA_REDIS_EVOLVE_MAX_GENS={self.evolve_max_gens}",
+                "-e", f"AURA_REDIS_EVOLVE_WINDOW={self.evolve_window}",
+            ])
+        if self.thresh_min_ops is not None:
+            cmd.extend(["-e", f"AURA_REDIS_THRESH_MIN_OPS={self.thresh_min_ops}"])
+        if self.thresh_miss_pin is not None:
+            cmd.extend(["-e", f"AURA_REDIS_THRESH_MISS_PIN={self.thresh_miss_pin}"])
         if profile:
             cmd.extend(["-e", f"AURA_REDIS_POLICY_PROFILE_FILE={profile}"])
         cmd.extend([
@@ -501,7 +532,10 @@ class AuraAgentController:
                     or ln.strip().startswith("policy_agent: UNPIN")):
                 self.swaps.append(ln.strip())
             if ("fitness-swap" in ln or "fitness-heal" in ln or "fitness-threshold-mutate" in ln
-                    or "hot-strategy:heal!" in ln):
+                    or "hot-strategy:heal!" in ln
+                    or "evolve gen=" in ln or "evolve-seed" in ln
+                    or "threshold-seed" in ln
+                    or "prefix-policy" in ln):
                 self.fitness_events.append(ln.strip())
                 self.swaps.append(ln.strip())
 
@@ -536,6 +570,9 @@ def start_server(
     adaptive: str = "off",  # off | python | aura
     fitness_mutate: bool = True,
     seed_profile: str = "normal",
+    evolve: bool = False,
+    thresh_min_ops: Optional[int] = None,
+    thresh_miss_pin: Optional[int] = None,
 ) -> ServerHandle:
     kill_port(port)
     bin_path = ROOT / "native/build/aura_redis_server"
@@ -574,6 +611,8 @@ def start_server(
     elif adaptive == "aura":
         ctl = AuraAgentController(
             port, fitness_mutate=fitness_mutate, seed_profile=seed_profile,
+            evolve=evolve, thresh_min_ops=thresh_min_ops,
+            thresh_miss_pin=thresh_miss_pin,
         )
         ctl.start()
         h.controller = ctl
@@ -1206,13 +1245,151 @@ def workload_flash_churn(s: socket.socket, mode: str) -> PhaseResult:
 
 
 
+def workload_evolve_gain(s: socket.socket, mode: str) -> List[PhaseResult]:
+    """M11: bad thresholds lose; multi-gen evolve improves cumulative hit%.
+
+    Several challenge rounds with missy traffic between so the agent can run
+    evolve windows (baseline → trial → keep/revert). No bench-side wait_evict
+    or PIN — choose-fn / evolve must emit lfu|flat|pin.
+    """
+    phases: List[PhaseResult] = []
+    nhot = 28
+    ncold = 550
+    vlen = 170
+    val = "E" * vlen
+    rounds = 5
+
+    for rnd in range(rounds):
+        # Missy write window — drive low hit-EWMA + give evolve ticks time
+        for k in range(36):
+            redis_call(s, "SET", f"__em{rnd}_{k}", "m" * 48)
+            redis_call(s, "GET", f"__egone{rnd}_{k}")
+            if k % 6 == 0:
+                time.sleep(0.05)
+        time.sleep(0.55)  # ~5–6 agent ticks @100ms
+
+        for i in range(nhot):
+            redis_call(s, "SET", f"hot{i:04d}", val)
+        for _ in range(12):
+            for i in range(nhot):
+                redis_call(s, "GET", f"hot{i:04d}")
+
+        # More miss/write so evolved (low min-ops) choose fires LFU+pin
+        if is_adaptive(mode):
+            for k in range(40):
+                redis_call(s, "SET", f"__ew{rnd}_{k}", "w" * 40)
+                redis_call(s, "GET", f"__emiss{rnd}_{k}")
+            time.sleep(0.45)
+            # re-SET hot so PIN (if emitted) can land on live keys
+            for i in range(nhot):
+                redis_call(s, "SET", f"hot{i:04d}", val)
+
+        for i in range(ncold):
+            redis_call(s, "SET", f"cold{rnd}_{i:05d}", val)
+
+        hits = misses = 0
+        for i in range(nhot):
+            if redis_call(s, "GET", f"hot{i:04d}") is None:
+                misses += 1
+            else:
+                hits += 1
+        info = parse_info(redis_call(s, "INFO"))
+        phases.append(
+            PhaseResult(
+                f"evolve_r{rnd}",
+                hits,
+                misses,
+                info_int(info, "evicted"),
+                hits,
+            )
+        )
+        time.sleep(0.35)  # inter-round evolve windows
+    return phases
+
+def workload_prefix_mix(s: socket.socket, mode: str) -> List[PhaseResult]:
+    """M12: a: low-freq durable + b: zipf hot vs high-freq session noise.
+
+    LFU clings to boosted sess* and may keep b:, but loses low-freq a: without
+    PIN. adaptive_prefix: RESP POLICY → Aura pins a: and b: → both survive.
+    Global adaptive pins hot/z only → loses a:/b:.
+    """
+    na, nb = 28, 28
+    nsess = 80
+    ncold = 500
+    val = "P" * 170
+
+    use_policy = is_adaptive(mode) and "prefix" in mode
+    if use_policy:
+        try:
+            redis_call(s, "POLICY", "a:", "session")
+            redis_call(s, "POLICY", "b:", "zipf")
+            time.sleep(0.25)  # agent tick sees policy_hints
+        except Exception as e:
+            print(f"  note: POLICY failed: {e}")
+
+    # Low-freq durable a: (few GETs — LFU will drop without PIN)
+    for i in range(na):
+        redis_call(s, "SET", f"a:{i:04d}", val)
+    for i in range(na):
+        redis_call(s, "GET", f"a:{i:04d}")
+
+    # Zipf-ish b: moderate boost
+    for i in range(nb):
+        redis_call(s, "SET", f"b:{i:04d}", val)
+    for _ in range(8):
+        for i in range(nb):
+            redis_call(s, "GET", f"b:{i:04d}")
+
+    # High-freq session noise (LFU cling) + short TTL
+    for i in range(nsess):
+        redis_call(s, "SET", f"sess{i:04d}", val, "EX", "8")
+    for _ in range(25):
+        for i in range(nsess):
+            redis_call(s, "GET", f"sess{i:04d}")
+
+    if is_adaptive(mode):
+        for k in range(40):
+            redis_call(s, "SET", f"__pw{k}", "w" * 40)
+            redis_call(s, "GET", f"__pm{k}")
+        time.sleep(0.65)  # prefix override + PIN
+        for i in range(na):
+            redis_call(s, "SET", f"a:{i:04d}", val)
+        for i in range(nb):
+            redis_call(s, "SET", f"b:{i:04d}", val)
+        time.sleep(0.35)
+
+    for i in range(ncold):
+        redis_call(s, "SET", f"cold{i:05d}", val)
+
+    hits_a = miss_a = hits_b = miss_b = 0
+    for i in range(na):
+        if redis_call(s, "GET", f"a:{i:04d}") is None:
+            miss_a += 1
+        else:
+            hits_a += 1
+    for i in range(nb):
+        if redis_call(s, "GET", f"b:{i:04d}") is None:
+            miss_b += 1
+        else:
+            hits_b += 1
+    info = parse_info(redis_call(s, "INFO"))
+    return [
+        PhaseResult("prefix_a", hits_a, miss_a, info_int(info, "evicted"), hits_a),
+        PhaseResult("prefix_b", hits_b, miss_b, info_int(info, "evicted"), hits_b),
+    ]
+
+
 # ── orchestration ─────────────────────────────────────────────────────
 
 
-def _policy_agent_opts(policy: str) -> tuple[bool, str]:
-    """Return (fitness_mutate, seed_profile) for Aura agent policies."""
+def _policy_agent_opts(policy: str) -> tuple:
+    """Return (fitness_mutate, seed_profile, evolve, thresh_min, thresh_miss)."""
+    evolve = False
+    thresh_min = None
+    thresh_miss = None
     if policy in ("adaptive_frozen", "poison_frozen", "adaptive_nosoft",
-                  "adaptive_soft"):
+                  "adaptive_soft", "adaptive_evolve_frozen", "adaptive_evolve",
+                  "adaptive_prefix"):
         fitness = False
     else:
         fitness = True  # adaptive, adaptive_mutate, poison_mutate
@@ -1228,12 +1405,19 @@ def _policy_agent_opts(policy: str) -> tuple[bool, str]:
         # Same seed as frozen; only fitness swap/heal differs.
         # Use conservative so frozen lags; mutate upgrades → measurable pp.
         seed = os.environ.get("AURA_BENCH_MUTATE_SEED", "conservative")
+    elif policy in ("adaptive_evolve", "adaptive_evolve_frozen"):
+        seed = "normal"
+        # Bad thresholds: choose never fires until evolve lowers them
+        thresh_min = int(os.environ.get("AURA_BENCH_EVOLVE_MIN_OPS", "900"))
+        thresh_miss = int(os.environ.get("AURA_BENCH_EVOLVE_MISS_PIN", "75"))
+        evolve = policy == "adaptive_evolve"
+        fitness = False
     else:
         seed = "normal"
     # When comparing frozen vs mutate on mutation_gain, both use same seed.
     if policy == "adaptive_frozen":
         seed = os.environ.get("AURA_BENCH_MUTATE_SEED", "conservative")
-    return fitness, seed
+    return fitness, seed, evolve, thresh_min, thresh_miss
 
 
 def run_one(
@@ -1248,25 +1432,48 @@ def run_one(
     start_evict = policy if policy in ("lru", "lfu", "noop", "ttl_aware") else "lru"
     fitness_mutate = True
     seed_profile = "normal"
+    evolve = False
+    thresh_min_ops = None
+    thresh_miss_pin = None
     if workload == "flash_churn" and is_adaptive(policy):
         # Start on LFU so soft-goal must refuse it (no read-heavy bridge crutch)
         start_evict = "lfu"
     if is_adaptive(policy):
         adaptive = adaptive_backend  # python | aura
-        fitness_mutate, seed_profile = _policy_agent_opts(policy)
+        fitness_mutate, seed_profile, evolve, thresh_min_ops, thresh_miss_pin = (
+            _policy_agent_opts(policy)
+        )
         # M9: ttl_wave needs stable choose_normal (has ttl_aware). Mid-loop
         # hot-strategy:swap! → eval-current re-enters policy_agent and breaks
         # the live tick loop (invalid closure). Freeze fitness for these.
         if workload in ("ttl_wave", "session_churn"):
             fitness_mutate = False
             seed_profile = "normal"
+            evolve = False
         if workload == "flash_churn":
             # A/B soft vs nosoft: freeze fitness; seed from policy
             fitness_mutate = False
+            evolve = False
             if policy == "adaptive_nosoft":
                 seed_profile = "nosoft"
             elif policy in ("adaptive", "adaptive_soft"):
                 seed_profile = "normal"
+        if workload == "prefix_mix":
+            fitness_mutate = False
+            evolve = False
+            seed_profile = "normal"
+        if workload == "evolve_gain":
+            # Force bad-threshold seed + evolve A/B regardless of policy alias
+            if policy in ("adaptive", "adaptive_mutate", "adaptive_evolve"):
+                evolve = True
+                fitness_mutate = False
+                thresh_min_ops = int(os.environ.get("AURA_BENCH_EVOLVE_MIN_OPS", "900"))
+                thresh_miss_pin = int(os.environ.get("AURA_BENCH_EVOLVE_MISS_PIN", "75"))
+            elif policy in ("adaptive_frozen", "adaptive_evolve_frozen"):
+                evolve = False
+                fitness_mutate = False
+                thresh_min_ops = int(os.environ.get("AURA_BENCH_EVOLVE_MIN_OPS", "900"))
+                thresh_miss_pin = int(os.environ.get("AURA_BENCH_EVOLVE_MISS_PIN", "75"))
 
     mm = maxmemory
     if workload == "flash_churn" and maxmemory >= 120_000:
@@ -1275,6 +1482,8 @@ def run_one(
     h = start_server(
         port, start_evict, mm, adaptive=adaptive,
         fitness_mutate=fitness_mutate, seed_profile=seed_profile,
+        evolve=evolve, thresh_min_ops=thresh_min_ops,
+        thresh_miss_pin=thresh_miss_pin,
     )
     if is_adaptive(policy) and isinstance(h.controller, PythonAdaptiveController):
         # Python mirror: simulate frozen by locking profile; poison by inverted
@@ -1315,6 +1524,10 @@ def run_one(
                 phases = [workload_session_churn(s, mode)]
             elif workload == "flash_churn":
                 phases = [workload_flash_churn(s, mode)]
+            elif workload == "evolve_gain":
+                phases = workload_evolve_gain(s, mode)
+            elif workload == "prefix_mix":
+                phases = workload_prefix_mix(s, mode)
             elif workload in ("mutation_gain", "poison_heal"):
                 # mutation_gain = diurnal under mutate-vs-frozen attribution
                 # poison_heal = hot_protect-shaped under inverted seed
@@ -1350,7 +1563,11 @@ def run_one(
         policy=policy,
         phases=phases,
         swaps=swaps,
-        notes=(f"backend={adaptive_backend} fitness={fitness_mutate} seed={seed_profile}" if is_adaptive(policy) else ""),
+        notes=(
+            f"backend={adaptive_backend} fitness={fitness_mutate} seed={seed_profile}"
+            f" evolve={evolve} thresh={thresh_min_ops}/{thresh_miss_pin}"
+            if is_adaptive(policy) else ""
+        ),
     )
 
 
@@ -1586,6 +1803,90 @@ def print_soft_goal_table(results: List[RunResult]) -> None:
     print("=" * 78)
 
 
+def print_prefix_table(results: List[RunResult]) -> None:
+    """M12: per-prefix POLICY vs global on prefix_mix."""
+    print()
+    print("=" * 78)
+    print("PREFIX POLICY (M12) — a: session + b: zipf noisy neighbor")
+    print("=" * 78)
+    by_wl: Dict[str, Dict[str, RunResult]] = {}
+    for r in results:
+        by_wl.setdefault(r.workload, {})[r.policy] = r
+    m = by_wl.get("prefix_mix")
+    if not m:
+        print("  (no prefix_mix runs)")
+        print("=" * 78)
+        return
+    print(f"  {'policy':<18} {'hit%':>7} {'useful':>7}  a_hit  b_hit  notes")
+    print("  " + "-" * 66)
+    for pol in ("lru", "lfu", "ttl_aware", "adaptive", "adaptive_prefix"):
+        r = m.get(pol)
+        if not r:
+            continue
+        pa = next((p for p in r.phases if p.name == "prefix_a"), None)
+        pb = next((p for p in r.phases if p.name == "prefix_b"), None)
+        pref = [s for s in r.swaps if "prefix-policy" in s or "PIN prefix" in s]
+        print(
+            f"  {pol:<18} {100*r.overall_hit_rate:6.1f}% {r.total_useful:>7}  "
+            f"{100*(pa.hit_rate if pa else 0):5.1f}% "
+            f"{100*(pb.hit_rate if pb else 0):5.1f}%  "
+            f"pref_logs={len(pref)}"
+        )
+        for ln in pref[:3]:
+            print(f"      · {ln}")
+    glo = m.get("adaptive")
+    pref = m.get("adaptive_prefix")
+    if glo and pref:
+        print(
+            f"  → prefix vs global: Δ="
+            f"{100*(pref.overall_hit_rate-glo.overall_hit_rate):+.1f}pp "
+            f"useful {pref.total_useful} vs {glo.total_useful}"
+        )
+    print("=" * 78)
+
+
+def print_evolve_table(results: List[RunResult]) -> None:
+    """M11: adaptive_evolve vs frozen bad-thresholds on evolve_gain."""
+    print()
+    print("=" * 78)
+    print("EVOLVE (M11) — multi-gen threshold fitness keep/revert (evolve_gain)")
+    print("=" * 78)
+    by_wl: Dict[str, Dict[str, RunResult]] = {}
+    for r in results:
+        by_wl.setdefault(r.workload, {})[r.policy] = r
+    m = by_wl.get("evolve_gain")
+    if not m:
+        print("  (no evolve_gain runs)")
+        print("=" * 78)
+        return
+    print(f"  {'policy':<24} {'hit%':>7} {'useful':>7}  notes")
+    print("  " + "-" * 60)
+    for pol in ("lru", "lfu", "adaptive_evolve_frozen", "adaptive_evolve",
+                "adaptive_frozen", "adaptive"):
+        r = m.get(pol)
+        if not r:
+            continue
+        evo = [s for s in r.swaps if "evolve gen=" in s or "evolve-seed" in s
+               or "threshold-seed" in s]
+        print(
+            f"  {pol:<24} {100*r.overall_hit_rate:6.1f}% {r.total_useful:>7}  "
+            f"evolve_logs={len(evo)} swaps={len(r.swaps)}"
+        )
+        for ln in evo[:6]:
+            print(f"      · {ln}")
+    frozen = m.get("adaptive_evolve_frozen") or m.get("adaptive_frozen")
+    evo = m.get("adaptive_evolve") or m.get("adaptive")
+    if frozen and evo:
+        delta = 100 * (evo.overall_hit_rate - frozen.overall_hit_rate)
+        print(
+            f"  → evolve vs frozen: Δ={delta:+.1f}pp "
+            f"(evolve {100*evo.overall_hit_rate:.1f}% − "
+            f"frozen {100*frozen.overall_hit_rate:.1f}%); "
+            f"useful {evo.total_useful} vs {frozen.total_useful}"
+        )
+    print("=" * 78)
+
+
 def assert_success(results: List[RunResult]) -> None:
     """Require adaptive to clearly beat both fixed on marathon when present;
     otherwise require ≥1 workload where LRU loses to LFU/adaptive.
@@ -1624,6 +1925,59 @@ def assert_success(results: List[RunResult]) -> None:
                 f"poison_heal: mutate={100*pm.overall_hit_rate:.1f}% vs "
                 f"frozen={100*pf.overall_hit_rate:.1f}% "
                 f"(Δ={100*(pm.overall_hit_rate-pf.overall_hit_rate):+.1f}pp)"
+            )
+
+    if "prefix_mix" in by_wl_mut:
+        mm = by_wl_mut["prefix_mix"]
+        pref = mm.get("adaptive_prefix")
+        glo = mm.get("adaptive")
+        if pref and glo:
+            if pref.total_useful < glo.total_useful + 8:
+                raise SystemExit(
+                    f"FAIL: prefix_mix adaptive_prefix useful must beat global; "
+                    f"prefix={pref.total_useful} global={glo.total_useful}"
+                )
+            pa = next((p for p in pref.phases if p.name == "prefix_a"), None)
+            pb = next((p for p in pref.phases if p.name == "prefix_b"), None)
+            if not pa or not pb or pa.useful_gets < 10 or pb.useful_gets < 10:
+                raise SystemExit(
+                    f"FAIL: prefix_mix must win useful GETs on BOTH a: and b:; "
+                    f"a={pa.useful_gets if pa else None} "
+                    f"b={pb.useful_gets if pb else None}"
+                )
+            plogs = [s for s in pref.swaps if "prefix-policy" in s]
+            if not plogs:
+                raise SystemExit(
+                    f"FAIL: prefix_mix expected prefix-policy log; swaps={pref.swaps[:4]}"
+                )
+            print(
+                f"prefix_mix: prefix useful={pref.total_useful} "
+                f"(a={pa.useful_gets},b={pb.useful_gets}) vs "
+                f"global={glo.total_useful}; logs={len(plogs)}"
+            )
+
+    if "evolve_gain" in by_wl_mut:
+        mm = by_wl_mut["evolve_gain"]
+        frozen = mm.get("adaptive_evolve_frozen") or mm.get("adaptive_frozen")
+        evo = mm.get("adaptive_evolve") or mm.get("adaptive")
+        if frozen and evo:
+            if evo.overall_hit_rate + 1e-9 < frozen.overall_hit_rate + 0.08:
+                raise SystemExit(
+                    f"FAIL: evolve_gain adaptive_evolve must beat frozen by ≥8pp; "
+                    f"evolve={100*evo.overall_hit_rate:.1f}% "
+                    f"frozen={100*frozen.overall_hit_rate:.1f}%"
+                )
+            evo_logs = [s for s in evo.swaps if "evolve gen=" in s]
+            if len(evo_logs) < 2:
+                raise SystemExit(
+                    f"FAIL: evolve_gain expected multi-gen evolve logs (≥2); "
+                    f"got {len(evo_logs)}: {evo_logs[:4]}"
+                )
+            print(
+                f"evolve_gain: evolve={100*evo.overall_hit_rate:.1f}% vs "
+                f"frozen={100*frozen.overall_hit_rate:.1f}% "
+                f"(Δ={100*(evo.overall_hit_rate-frozen.overall_hit_rate):+.1f}pp) "
+                f"evolve_logs={len(evo_logs)}"
             )
 
     by_wl: Dict[str, Dict[str, RunResult]] = {}
@@ -1824,6 +2178,10 @@ def main() -> int:
     print_mutation_attribution(results)
     if any(r.workload == 'flash_churn' for r in results):
         print_soft_goal_table(results)
+    if any(r.workload == 'evolve_gain' for r in results):
+        print_evolve_table(results)
+    if any(r.workload == 'prefix_mix' for r in results):
+        print_prefix_table(results)
     if not args.skip_assert:
         assert_success(results)
     return 0
