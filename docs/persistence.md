@@ -4,6 +4,8 @@
 
 **Optional warm-start:** custom **`aura-rdb`** snapshot for **string keys + TTL** (not Redis RDB byte-compatible).
 
+**P3.16 note:** `SAVE`/`BGSAVE` persist **string keys only**. HASH/LIST/ZSET keys are skipped until a later encoding; document honestly — restart after SAVE loses non-string keys.
+
 ## Knobs
 
 | Knob | CLI | Env | CONFIG | Default |

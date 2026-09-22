@@ -70,6 +70,7 @@
 | # | Item | Goal | Exit criteria | Test | Risk |
 |---|------|------|---------------|------|------|
 | **P3.16** | More types (HASH/LIST/ZSET) | Only as product demand | Per-type smoke + memory accounting | type tests | used_memory complexity |
+| ↑ P3.16a | HASH | DONE | `tests/test_prod_hash.py` | | |
 | **P3.17** | MULTI/EXEC, Pub/Sub | Only if demanded | Spec’d subset green | dedicated tests | Pipeline interaction |
 
 ---
@@ -92,7 +93,8 @@
 | **P2.14 REPLICAOF** | **DONE** — async single replica, read-only GET; `tests/test_prod_replica.py` |
 | **P2.15 TLS** | **DONE** — native OpenSSL `--tls-port` + cert/key; cleartext kept for policy_agent; `docs/tls.md`; `tests/test_prod_tls.py` |
 | **Production P2 band** | **COMPLETE** (P2.13–P2.15) |
-| **Production P3** | **NEXT** (compat expansion; not started) |
+| **P3.16a HASH** | **DONE** — HSET/HGET/HMGET/HGETALL/HDEL/HEXISTS/HLEN/HINCRBY + TYPE; RDB string-only |
+| **Production P3** | **IN PROGRESS** (HASH done; LIST/ZSET/MULTI/PubSub next) |
 
 MVP/explore remains valuable demos; **ship bar moves to this document.**
 
@@ -155,3 +157,4 @@ Production does **not** mean “C-only Redis clone.”
 | 2026-09-23 | **P2.13** | Optional `aura-rdb` SAVE/BGSAVE + `--dir`/`--dbfilename` load; `docs/persistence.md`; `tests/test_prod_rdb.py` |
 | 2026-09-23 | **P2.14** | `REPLICAOF`/`SYNC` best-effort async replica; read-only slave; `tests/test_prod_replica.py` |
 | 2026-09-23 | **P2.15** | Native OpenSSL `--tls-port`/`--tls-cert-file`/`--tls-key-file`; soft CMake; `docs/tls.md`; stunnel example; `tests/test_prod_tls.py` |
+| 2026-09-23 | **P3.16a** | HASH + TYPE; `ar_types.c`; RDB skips non-string; `tests/test_prod_hash.py` |

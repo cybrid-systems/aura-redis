@@ -241,6 +241,8 @@ static int repl_fullsync(ArCore* core, ArConn* c) {
       continue;
     for (size_t i = 0; i < nb; ++i) {
       for (ArEntry* e = table[i]; e; e = e->next) {
+        if (e->type != AR_TYPE_STRING)
+          continue;
         if (e->expire_at && now >= e->expire_at)
           continue;
         int64_t ttl_sec = -1;
@@ -347,7 +349,12 @@ static int cmd_is_write(const char* cmd, size_t clen) {
          cmd_eq(cmd, clen, "unpin") || cmd_eq(cmd, clen, "policy") ||
          cmd_eq(cmd, clen, "evict") || cmd_eq(cmd, clen, "layout") ||
          cmd_eq(cmd, clen, "plugin") || cmd_eq(cmd, clen, "save") ||
-         cmd_eq(cmd, clen, "bgsave");
+         cmd_eq(cmd, clen, "bgsave") || cmd_eq(cmd, clen, "hset") ||
+         cmd_eq(cmd, clen, "hdel") || cmd_eq(cmd, clen, "hincrby") ||
+         cmd_eq(cmd, clen, "lpush") || cmd_eq(cmd, clen, "rpush") ||
+         cmd_eq(cmd, clen, "lpop") || cmd_eq(cmd, clen, "rpop") ||
+         cmd_eq(cmd, clen, "zadd") || cmd_eq(cmd, clen, "zrem") ||
+         cmd_eq(cmd, clen, "publish");
 }
 
 
@@ -460,6 +467,7 @@ static int parse_command(const char* buf, size_t len, size_t pos, Arg* argv,
 
 /* Pointer-stable get without malloc: returns entry val pointer.
  * Promotes cold→hot under hot_cold layout. */
+/* Returns: 1 hit, 0 miss, -1 WRONGTYPE */
 static int get_ptr(ArCore* core, const char* key, size_t klen,
                    const char** val, size_t* vlen) {
   core->ops++;
@@ -472,6 +480,11 @@ static int get_ptr(ArCore* core, const char* key, size_t klen,
     *val = NULL;
     *vlen = 0;
     return 0;
+  }
+  if (e->type != AR_TYPE_STRING) {
+    *val = NULL;
+    *vlen = 0;
+    return -1;
   }
   core->hits++;
   ar_touch_get(core, e, b, tier);
@@ -676,9 +689,13 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (cmd_eq(cmd, clen, "get")) {
     if (argc != 2)
       return reply_err(c, "ERR wrong number of arguments for 'get'");
-    const char* v;
-    size_t vl;
-    if (!get_ptr(core, argv[1].p, argv[1].len, &v, &vl))
+    const char* v = NULL;
+    size_t vl = 0;
+    int gr = get_ptr(core, argv[1].p, argv[1].len, &v, &vl);
+    if (gr < 0)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (!gr)
       return reply_null_bulk(c);
     return reply_bulk(c, v, vl);
   }
@@ -762,15 +779,24 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (cmd_eq(cmd, clen, "mget")) {
     if (argc < 2)
       return reply_err(c, "ERR wrong number of arguments for 'mget'");
-    /* *N\r\n then bulks */
+    for (int i = 1; i < argc; ++i) {
+      size_t b0 = 0;
+      int tier0 = 0;
+      ArEntry* e0 = ar_find_entry_ex(core, argv[i].p, argv[i].len, &b0, &tier0);
+      if (e0 && e0->type != AR_TYPE_STRING)
+        return reply_err(
+            c,
+            "WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
     char hdr[32];
     int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", argc - 1);
     if (wbuf_append(c, hdr, (size_t)hn) < 0)
       return -1;
     for (int i = 1; i < argc; ++i) {
-      const char* v;
-      size_t vl;
-      if (!get_ptr(core, argv[i].p, argv[i].len, &v, &vl)) {
+      const char* v = NULL;
+      size_t vl = 0;
+      int gr = get_ptr(core, argv[i].p, argv[i].len, &v, &vl);
+      if (gr <= 0) {
         if (reply_null_bulk(c) < 0)
           return -1;
       } else {
@@ -1259,6 +1285,183 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     }
     return reply_err(c, "ERR wrong number of arguments for 'plugin'");
   }
+
+  /* ---- P3.16a HASH ---- */
+  if (cmd_eq(cmd, clen, "type")) {
+    if (argc != 2)
+      return reply_err(c, "ERR wrong number of arguments for 'type'");
+    size_t b = 0;
+    int tier = 0;
+    ArEntry* e = ar_find_entry_ex(core, argv[1].p, argv[1].len, &b, &tier);
+    if (!e)
+      return reply_bulk(c, "none", 4);
+    const char* tn = ar_type_name(e->type);
+    return reply_bulk(c, tn, strlen(tn));
+  }
+  if (cmd_eq(cmd, clen, "hset")) {
+    if (argc < 4 || ((argc - 2) % 2) != 0)
+      return reply_err(c, "ERR wrong number of arguments for 'hset'");
+    int npairs = (argc - 2) / 2;
+    const char* fields[64];
+    size_t flens[64];
+    const char* vals[64];
+    size_t vlens[64];
+    if (npairs > 64)
+      return reply_err(c, "ERR too many fields");
+    for (int i = 0; i < npairs; ++i) {
+      fields[i] = argv[2 + 2 * i].p;
+      flens[i] = argv[2 + 2 * i].len;
+      vals[i] = argv[3 + 2 * i].p;
+      vlens[i] = argv[3 + 2 * i].len;
+    }
+    int wt = 0;
+    int added = ar_hash_hset(core, argv[1].p, argv[1].len, npairs, fields, flens,
+                             vals, vlens, &wt);
+    if (wt)
+      return reply_err(c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (added < 0)
+      return reply_err(c, "ERR hset failed");
+    return reply_int(c, added);
+  }
+  if (cmd_eq(cmd, clen, "hget")) {
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'hget'");
+    int wt = 0;
+    size_t ol = 0;
+    char* v = ar_hash_hget(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len,
+                           &ol, &wt);
+    if (wt)
+      return reply_err(c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (!v)
+      return reply_null_bulk(c);
+    int rc = reply_bulk(c, v, ol);
+    free(v);
+    return rc;
+  }
+  if (cmd_eq(cmd, clen, "hmget")) {
+    if (argc < 3)
+      return reply_err(c, "ERR wrong number of arguments for 'hmget'");
+    int wt = 0;
+    ArEntry* e =
+        ar_entry_get_typed(core, argv[1].p, argv[1].len, AR_TYPE_HASH, NULL, NULL,
+                           &wt);
+    if (wt)
+      return reply_err(c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    char hdr[32];
+    int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", argc - 2);
+    if (wbuf_append(c, hdr, (size_t)hn) < 0)
+      return -1;
+    if (!e) {
+      for (int i = 2; i < argc; ++i)
+        if (reply_null_bulk(c) < 0)
+          return -1;
+      return 0;
+    }
+    for (int i = 2; i < argc; ++i) {
+      size_t ol = 0;
+      int wt2 = 0;
+      char* v = ar_hash_hget(core, argv[1].p, argv[1].len, argv[i].p, argv[i].len,
+                             &ol, &wt2);
+      if (!v) {
+        if (reply_null_bulk(c) < 0)
+          return -1;
+      } else {
+        if (reply_bulk(c, v, ol) < 0) {
+          free(v);
+          return -1;
+        }
+        free(v);
+      }
+    }
+    return 0;
+  }
+  if (cmd_eq(cmd, clen, "hgetall")) {
+    if (argc != 2)
+      return reply_err(c, "ERR wrong number of arguments for 'hgetall'");
+    int wt = 0;
+    ArEntry* e =
+        ar_entry_get_typed(core, argv[1].p, argv[1].len, AR_TYPE_HASH, NULL, NULL,
+                           &wt);
+    if (wt)
+      return reply_err(c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (!e) {
+      return wbuf_append(c, "*0\r\n", 4);
+    }
+    ArHash* h = (ArHash*)e->obj;
+    int n = (int)(h->nfields * 2);
+    char hdr[32];
+    int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", n);
+    if (wbuf_append(c, hdr, (size_t)hn) < 0)
+      return -1;
+    for (size_t bi = 0; bi < h->nbuckets; ++bi) {
+      for (ArHashField* f = h->buckets[bi]; f; f = f->next) {
+        if (reply_bulk(c, f->field, f->flen) < 0)
+          return -1;
+        if (reply_bulk(c, f->val, f->vlen) < 0)
+          return -1;
+      }
+    }
+    return 0;
+  }
+  if (cmd_eq(cmd, clen, "hdel")) {
+    if (argc < 3)
+      return reply_err(c, "ERR wrong number of arguments for 'hdel'");
+    int nf = argc - 2;
+    const char* fields[64];
+    size_t flens[64];
+    if (nf > 64)
+      return reply_err(c, "ERR too many fields");
+    for (int i = 0; i < nf; ++i) {
+      fields[i] = argv[2 + i].p;
+      flens[i] = argv[2 + i].len;
+    }
+    int wt = 0;
+    int rem = ar_hash_hdel(core, argv[1].p, argv[1].len, nf, fields, flens, &wt);
+    if (wt || rem < 0)
+      return reply_err(c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    return reply_int(c, rem);
+  }
+  if (cmd_eq(cmd, clen, "hexists")) {
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'hexists'");
+    int wt = 0;
+    int ex = ar_hash_hexists(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len,
+                             &wt);
+    if (wt || ex < 0)
+      return reply_err(c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    return reply_int(c, ex);
+  }
+  if (cmd_eq(cmd, clen, "hlen")) {
+    if (argc != 2)
+      return reply_err(c, "ERR wrong number of arguments for 'hlen'");
+    int wt = 0;
+    int64_t n = ar_hash_hlen(core, argv[1].p, argv[1].len, &wt);
+    if (wt || n < 0)
+      return reply_err(c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    return reply_int(c, n);
+  }
+  if (cmd_eq(cmd, clen, "hincrby")) {
+    if (argc != 4)
+      return reply_err(c, "ERR wrong number of arguments for 'hincrby'");
+    char nbuf[32];
+    if (argv[3].len == 0 || argv[3].len >= sizeof(nbuf))
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[3].p, argv[3].len);
+    nbuf[argv[3].len] = '\0';
+    char* end = NULL;
+    long long incr = strtoll(nbuf, &end, 10);
+    if (end == nbuf || *end != '\0')
+      return reply_err(c, "ERR value is not an integer or out of range");
+    int wt = 0, ni = 0;
+    int64_t v = ar_hash_hincrby(core, argv[1].p, argv[1].len, argv[2].p,
+                                argv[2].len, (int64_t)incr, &wt, &ni);
+    if (wt)
+      return reply_err(c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (ni)
+      return reply_err(c, "ERR hash value is not an integer");
+    return reply_int(c, v);
+  }
+
   return reply_err(c, "ERR unknown command");
 }
 

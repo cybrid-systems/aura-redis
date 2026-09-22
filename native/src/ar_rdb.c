@@ -1,4 +1,5 @@
-/* P2.13 — optional aura-rdb snapshot (string keys + TTL warm-start). */
+/* P2.13 — optional aura-rdb snapshot (string keys + TTL warm-start).
+ * P3.16: non-string types (HASH/LIST/ZSET) are skipped on SAVE — see docs/persistence.md. */
 #include "ar_internal.h"
 
 #include <errno.h>
@@ -63,6 +64,8 @@ static uint64_t count_live_entries(ArCore* core, uint64_t now) {
   uint64_t n = 0;
   for (size_t i = 0; i < core->nbuckets; ++i) {
     for (ArEntry* e = core->buckets[i]; e; e = e->next) {
+      if (e->type != AR_TYPE_STRING)
+        continue; /* P3.16: RDB string-only until later */
       if (e->expire_at && now >= e->expire_at)
         continue;
       n++;
@@ -71,6 +74,8 @@ static uint64_t count_live_entries(ArCore* core, uint64_t now) {
   if (core->cold_buckets) {
     for (size_t i = 0; i < core->cold_nbuckets; ++i) {
       for (ArEntry* e = core->cold_buckets[i]; e; e = e->next) {
+        if (e->type != AR_TYPE_STRING)
+          continue;
         if (e->expire_at && now >= e->expire_at)
           continue;
         n++;
@@ -101,6 +106,8 @@ static int write_table(FILE* f, ArEntry** table, size_t nb, uint64_t now) {
     return 1;
   for (size_t i = 0; i < nb; ++i) {
     for (ArEntry* e = table[i]; e; e = e->next) {
+      if (e->type != AR_TYPE_STRING)
+        continue;
       if (e->expire_at && now >= e->expire_at)
         continue;
       if (!write_entry(f, e))

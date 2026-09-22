@@ -436,7 +436,12 @@ void ar_entry_free_ex(ArCore* core, size_t bucket, int tier, ArEntry* e) {
   ArEntry** table =
       (tier == 1 && core->cold_buckets) ? core->cold_buckets : core->buckets;
   unlink_entry(table, bucket, e);
-  core->used_memory -= e->klen + e->vlen + sizeof(ArEntry);
+  size_t pay = ar_entry_payload_bytes(e);
+  size_t total = e->klen + pay + sizeof(ArEntry);
+  if (core->used_memory >= total)
+    core->used_memory -= total;
+  else
+    core->used_memory = 0;
   if (e->pinned && core->pinned_keys)
     core->pinned_keys--;
   if (core->layout == AR_LAYOUT_HOT_COLD) {
@@ -448,6 +453,7 @@ void ar_entry_free_ex(ArCore* core, size_t bucket, int tier, ArEntry* e) {
         core->hot_nkeys--;
     }
   }
+  ar_entry_free_obj(e);
   free(e->key);
   free(e->val);
   free(e);
@@ -569,10 +575,21 @@ int ar_entry_set_ex(ArCore* core, const char* key, size_t klen, const char* val,
     char* nv = xmemdup(val, vlen);
     if (!nv)
       return 0;
+    /* SET replaces any type with string (Redis). */
+    if (e->type != AR_TYPE_STRING) {
+      size_t old_pay = ar_entry_payload_bytes(e);
+      ar_entry_free_obj(e);
+      ar_mem_sub(core, old_pay);
+      e->type = AR_TYPE_STRING;
+      e->val = NULL;
+      e->vlen = 0;
+    }
     core->used_memory -= e->vlen;
     free(e->val);
     e->val = nv;
     e->vlen = vlen;
+    e->type = AR_TYPE_STRING;
+    e->obj = NULL;
     core->used_memory += vlen;
     e->last_access = ++core->clock;
     entry_set_expire_at(core, e, expire_at);
@@ -598,6 +615,8 @@ int ar_entry_set_ex(ArCore* core, const char* key, size_t klen, const char* val,
   }
   ne->klen = klen;
   ne->vlen = vlen;
+  ne->type = AR_TYPE_STRING;
+  ne->obj = NULL;
   ne->last_access = ++core->clock;
   ne->lfu_freq = 5;
   ne->expire_at = 0;
@@ -806,6 +825,14 @@ ArCore* ar_core_create(void) {
   return c;
 }
 
+
+static void entry_raw_free(ArEntry* e) {
+  ar_entry_free_obj(e);
+  free(e->key);
+  free(e->val);
+  free(e);
+}
+
 void ar_core_destroy(ArCore* core) {
   if (!core)
     return;
@@ -826,9 +853,7 @@ void ar_core_destroy(ArCore* core) {
     ArEntry* e = core->buckets[i];
     while (e) {
       ArEntry* n = e->next;
-      free(e->key);
-      free(e->val);
-      free(e);
+      entry_raw_free(e);
       e = n;
     }
   }
@@ -838,9 +863,7 @@ void ar_core_destroy(ArCore* core) {
       ArEntry* e = core->cold_buckets[i];
       while (e) {
         ArEntry* n = e->next;
-        free(e->key);
-        free(e->val);
-        free(e);
+        entry_raw_free(e);
         e = n;
       }
     }
@@ -956,6 +979,12 @@ char* ar_get_bin(ArCore* core, const char* key, size_t klen, size_t* out_len) {
       *out_len = 0;
     return NULL;
   }
+  if (e->type != AR_TYPE_STRING) {
+    core->misses++;
+    if (out_len)
+      *out_len = 0;
+    return NULL;
+  }
   core->hits++;
   ar_touch_get(core, e, b, tier);
   if (core->evict && core->evict->on_get)
@@ -1012,6 +1041,8 @@ int ar_get_eq(ArCore* core, const char* key, const char* expect) {
   ArEntry* e = ar_find_entry_ex(core, key, strlen(key), &b, &tier);
   if (!e)
     return 0;
+  if (e->type != AR_TYPE_STRING)
+    return 0;
   core->ops++;
   core->gets++;
   core->hits++;
@@ -1033,6 +1064,11 @@ int64_t ar_incr(ArCore* core, const char* key, size_t klen, int64_t delta,
   ArEntry* e = ar_find_entry(core, key, klen, NULL);
   int64_t v = 0;
   if (e) {
+    if (e->type != AR_TYPE_STRING) {
+      if (ok)
+        *ok = 0;
+      return 0;
+    }
     char* end = NULL;
     char tmp[64];
     if (e->vlen >= sizeof(tmp)) {
@@ -1069,9 +1105,7 @@ void ar_flushdb(ArCore* core) {
     ArEntry* e = core->buckets[i];
     while (e) {
       ArEntry* n = e->next;
-      free(e->key);
-      free(e->val);
-      free(e);
+      entry_raw_free(e);
       e = n;
     }
     core->buckets[i] = NULL;
@@ -1081,9 +1115,7 @@ void ar_flushdb(ArCore* core) {
       ArEntry* e = core->cold_buckets[i];
       while (e) {
         ArEntry* n = e->next;
-        free(e->key);
-        free(e->val);
-        free(e);
+        entry_raw_free(e);
         e = n;
       }
       core->cold_buckets[i] = NULL;

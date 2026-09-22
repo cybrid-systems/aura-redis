@@ -7,11 +7,60 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+/* P3.16 — value type tag (string remains default / 0). */
+typedef enum {
+  AR_TYPE_STRING = 0,
+  AR_TYPE_HASH = 1,
+  AR_TYPE_LIST = 2,
+  AR_TYPE_ZSET = 3,
+} ArType;
+
+typedef struct ArHashField {
+  char* field;
+  size_t flen;
+  char* val;
+  size_t vlen;
+  struct ArHashField* next;
+} ArHashField;
+
+typedef struct ArHash {
+  ArHashField** buckets;
+  size_t nbuckets;
+  size_t nfields;
+} ArHash;
+
+typedef struct ArListNode {
+  char* val;
+  size_t vlen;
+  struct ArListNode* prev;
+  struct ArListNode* next;
+} ArListNode;
+
+typedef struct ArList {
+  ArListNode* head;
+  ArListNode* tail;
+  size_t len;
+} ArList;
+
+typedef struct ArZNode {
+  char* member;
+  size_t mlen;
+  double score;
+} ArZNode;
+
+typedef struct ArZSet {
+  ArZNode* arr; /* sorted by score asc, then member lex — O(n) insert */
+  size_t len;
+  size_t cap;
+} ArZSet;
+
 typedef struct ArEntry {
   char* key;
   size_t klen;
-  char* val;
+  uint8_t type; /* ArType */
+  char* val;    /* string payload; NULL for non-string */
   size_t vlen;
+  void* obj;    /* ArHash* / ArList* / ArZSet* when type != STRING */
   uint64_t last_access;
   uint8_t lfu_freq; /* approximate LFU counter (Iteration 5) */
   uint8_t pinned;   /* MVP M4: skip in eviction when set */
@@ -27,6 +76,16 @@ typedef enum {
 #define AR_MAX_CONN 1024
 #define AR_RBUF_INIT (64 * 1024)
 #define AR_WBUF_INIT (64 * 1024)
+
+#define AR_MULTI_MAX 128
+#define AR_MULTI_ARGV 32
+#define AR_PUBSUB_MAX 64
+
+typedef struct ArQueuedCmd {
+  int argc;
+  char* args[AR_MULTI_ARGV];
+  size_t alens[AR_MULTI_ARGV];
+} ArQueuedCmd;
 
 typedef struct ArConn {
   int fd;
@@ -48,6 +107,15 @@ typedef struct ArConn {
   void* ssl; /* SSL* when AURA_REDIS_HAS_TLS */
   int is_tls;
   int ssl_hs_done;
+  /* P3.17a MULTI/EXEC */
+  int in_multi;
+  int multi_n;
+  ArQueuedCmd multi_q[AR_MULTI_MAX];
+  /* P3.17b Pub/Sub */
+  int pubsub_mode;
+  int nsubs;
+  char* sub_channels[AR_PUBSUB_MAX];
+  size_t sub_clens[AR_PUBSUB_MAX];
 } ArConn;
 
 struct ArCore {
@@ -171,5 +239,66 @@ void ar_tls_conn_free(ArConn* c);
 int ar_tls_handshake(ArCore* core, ArConn* c); /* 1 done, 0 want-io, -1 fail */
 ssize_t ar_tls_read(ArConn* c, void* buf, size_t n, int* want_write);
 ssize_t ar_tls_write(ArConn* c, const void* buf, size_t n, int* want_read);
+
+
+/* P3.16 — typed value helpers (ar_types.c) */
+const char* ar_type_name(uint8_t t);
+size_t ar_entry_payload_bytes(const ArEntry* e);
+void ar_entry_free_obj(ArEntry* e); /* free typed obj; clears type→string empty */
+int ar_entry_ensure_type(ArCore* core, ArEntry* e, uint8_t want); /* 0=ok, -1=WRONGTYPE */
+
+/* HASH */
+int ar_hash_hset(ArCore* core, const char* key, size_t klen,
+                 int nfields, const char** fields, const size_t* flens,
+                 const char** vals, const size_t* vlens, int* wrongtype);
+char* ar_hash_hget(ArCore* core, const char* key, size_t klen,
+                   const char* field, size_t flen, size_t* out_len, int* wrongtype);
+int ar_hash_hdel(ArCore* core, const char* key, size_t klen,
+                 int nfields, const char** fields, const size_t* flens, int* wrongtype);
+int ar_hash_hexists(ArCore* core, const char* key, size_t klen,
+                    const char* field, size_t flen, int* wrongtype);
+int64_t ar_hash_hlen(ArCore* core, const char* key, size_t klen, int* wrongtype);
+int64_t ar_hash_hincrby(ArCore* core, const char* key, size_t klen,
+                        const char* field, size_t flen, int64_t incr,
+                        int* wrongtype, int* notint);
+/* HGETALL / HMGET helpers: callback or fill arrays — see ar_types.c + server */
+
+ArEntry* ar_entry_get_typed(ArCore* core, const char* key, size_t klen,
+                            uint8_t want, size_t* bucket_out, int* tier_out,
+                            int* wrongtype);
+ArEntry* ar_entry_get_or_create(ArCore* core, const char* key, size_t klen,
+                                uint8_t type, size_t* bucket_out, int* tier_out,
+                                int* wrongtype);
+
+/* LIST */
+int64_t ar_list_push(ArCore* core, const char* key, size_t klen, int left,
+                     int nvals, const char** vals, const size_t* vlens,
+                     int* wrongtype);
+char* ar_list_pop(ArCore* core, const char* key, size_t klen, int left,
+                  size_t* out_len, int* wrongtype);
+int64_t ar_list_llen(ArCore* core, const char* key, size_t klen, int* wrongtype);
+char* ar_list_lindex(ArCore* core, const char* key, size_t klen, int64_t index,
+                     size_t* out_len, int* wrongtype);
+/* LRANGE fills via iterating; exposed struct accessors */
+ArList* ar_list_get(ArCore* core, const char* key, size_t klen, int* wrongtype);
+
+/* ZSET */
+int ar_zset_zadd(ArCore* core, const char* key, size_t klen,
+                 int n, const double* scores, const char** members,
+                 const size_t* mlens, int* wrongtype);
+char* ar_zset_zscore(ArCore* core, const char* key, size_t klen,
+                     const char* member, size_t mlen, size_t* out_len,
+                     int* wrongtype);
+int ar_zset_zrem(ArCore* core, const char* key, size_t klen,
+                 int n, const char** members, const size_t* mlens, int* wrongtype);
+int64_t ar_zset_zcard(ArCore* core, const char* key, size_t klen, int* wrongtype);
+ArZSet* ar_zset_get(ArCore* core, const char* key, size_t klen, int* wrongtype);
+
+/* shared */
+size_t ar_fnv_hash(const char* s, size_t n);
+char* ar_xmemdup(const char* s, size_t n);
+void ar_mem_add(ArCore* core, size_t n);
+void ar_mem_sub(ArCore* core, size_t n);
+void ar_maybe_evict_pub(ArCore* core);
 
 #endif

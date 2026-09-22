@@ -4,7 +4,7 @@
 **Not covered here:** pure-Lisp `AURA_REDIS_ENGINE=aura` (broader demo subset in README).  
 **Production product:** string KV cache + Aura control commands — see [`production-plan.md`](production-plan.md).
 
-Last audited: 2026-09-22 (CST) for P0.4 AUTH / protected-mode.
+Last audited: 2026-09-23 (CST) for P3.16 HASH (+TYPE).
 
 ---
 
@@ -39,6 +39,16 @@ Last audited: 2026-09-22 (CST) for P0.4 AUTH / protected-mode.
 | `UNPIN` | 2 | integer | |
 | `POLICY` | 3 | `+OK` | `POLICY <prefix> <profile>` (M12 hints) |
 | `PLUGIN` | 1 / 2 | bulk / `+OK` | **Denied** when `AURA_REDIS_DENY_PLUGIN=1` |
+| `TYPE` | 2 | bulk | `string`/`hash`/`list`/`zset`/`none` (P3.16) |
+| `HSET` | ≥4 even | integer | new fields count; multi field/value (P3.16a) |
+| `HGET` | 3 | bulk/null | |
+| `HMGET` | ≥3 | array | |
+| `HGETALL` | 2 | flat array | field value pairs |
+| `HDEL` | ≥3 | integer | |
+| `HEXISTS` | 3 | 0/1 | |
+| `HLEN` | 2 | integer | |
+| `HINCRBY` | 4 | integer | integer field values |
+
 
 Wrong arity → `-ERR wrong number of arguments for '<cmd>'`.  
 Unknown → `-ERR unknown command`.  
@@ -62,8 +72,8 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 | Auth / admin | `SHUTDOWN`, `CLIENT`, `SLOWLOG`, `MONITOR` (AUTH/HELLO done in P0.4) |
 | Persistence / repl | `BGREWRITEAOF`, `PSYNC` (SAVE/BGSAVE/REPLICAOF/SYNC done P2.13–14) |
 | Strings extras | `APPEND`, `STRLEN`, `GETSET`, `SETEX`, `PSETEX`, `SET` NX/XX/PX |
-| Keys extras | `KEYS`, `DBSIZE`, `RENAME`, `TYPE`, `UNLINK` (≠ DEL alias) |
-| Lists / hashes | `LPUSH`, `HSET`, … |
+| Keys extras | `KEYS`, `DBSIZE`, `RENAME`, `UNLINK` (≠ DEL alias) |
+| Lists / zsets | `LPUSH`, `ZADD`, … (HASH done P3.16a) |
 | Pub/Sub, transactions | `SUBSCRIBE`, `MULTI`/`EXEC` |
 | Cluster / modules | all |
 

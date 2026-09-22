@@ -17,6 +17,7 @@ endif()
 
 add_library(aura_redis_core SHARED
   src/ar_core.c
+  src/ar_types.c
   src/ar_server.c
   src/ar_rdb.c
   src/ar_tls.c)
