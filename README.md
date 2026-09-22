@@ -41,6 +41,8 @@ AURA_REDIS_ENGINE=ffi ./scripts/smoke-test.sh
 python3 tests/test_eviction.py --evict lru
 python3 tests/test_adaptive.py --spawn
 python3 tests/test_evict_plugin.py          # dlopen random eviction plugin
+python3 tests/test_plugin_reload.py         # live PLUGIN swap mid-traffic (no reconnect storm)
+./scripts/demo-plugin-reload.sh            # same as above
 python3 tests/test_layout.py                # flat↔hot_cold migrate under load
 ```
 

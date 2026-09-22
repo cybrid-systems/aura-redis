@@ -78,7 +78,9 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 **Exit:** Reload new eviction impl while server runs; one memtier soak.
 
-**Result (v1):** `ar_core_load_evict_plugin` + sample `native/plugins/evict_random.c` → `libar_evict_random.so`; env `AURA_REDIS_EVICT_SO` / `--plugin`; `tests/test_evict_plugin.py`. Full `std/hot-update` / AOT path deferred.
+**Result (v1):** `ar_core_load_evict_plugin` + sample `native/plugins/evict_random.c` → `libar_evict_random.so`; env `AURA_REDIS_EVICT_SO` / `--plugin`; `tests/test_evict_plugin.py`.
+
+**Result (stretch — live reload):** RESP `PLUGIN` / `PLUGIN <so>` swaps eviction `.so` mid-`serve_*` without dropping the listen socket; second sample `libar_evict_rr.so`; `ar_metric_plugin_reloads`; `tests/test_plugin_reload.py` + `scripts/demo-plugin-reload.sh`. **`std/hot-update` / `aot:reload` deferred** — Aura AOT reload targets func_table modules, not `ArEvictOps` C plugins (see `docs/architecture.md` §4.4).
 
 ---
 
@@ -102,4 +104,4 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 ## Current position
 
-**Iterations 0–8 done.** Optional deepen: full `std/hot-update` / AOT strategy reload (iter 7 stretch).
+**Iterations 0–8 done.** Iter 7 stretch (live dlopen plugin reload under traffic) **done**; AOT/`aot:reload` path intentionally deferred (documented).

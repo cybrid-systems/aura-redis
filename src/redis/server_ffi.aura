@@ -4,6 +4,7 @@
 ;   AURA_REDIS_PORT / AURA_REDIS_CORE_SO / AURA_REDIS_MAXMEMORY / AURA_REDIS_EVICT
 ;   AURA_REDIS_ADAPTIVE=1 → serve_ms pump + inlined adaptive supervisor (Iteration 6)
 ;   AURA_REDIS_EVICT_SO   path to eviction plugin .so (Iteration 7; overrides EVICT)
+;   Live reload while serving: RESP PLUGIN / PLUGIN <so> or (ar-load-plugin core path)
 ;   AURA_REDIS_LAYOUT     flat | hot_cold (Iteration 8; initial dict layout)
 ;   AURA_REDIS_LAYOUT_ADAPTIVE=1 → call ar_core_adapt_layout from adaptive tick
 ;

@@ -30,3 +30,13 @@ set_target_properties(ar_evict_random PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
   POSITION_INDEPENDENT_CODE ON)
 target_compile_options(ar_evict_random PRIVATE -O2 -Wall -Wextra)
+
+# Iteration 7 stretch — second sample plugin (live-reload swap target)
+add_library(ar_evict_rr SHARED plugins/evict_rr.c)
+target_include_directories(ar_evict_rr PRIVATE include)
+target_link_libraries(ar_evict_rr PRIVATE aura_redis_core)
+set_target_properties(ar_evict_rr PROPERTIES
+  OUTPUT_NAME ar_evict_rr
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
+  POSITION_INDEPENDENT_CODE ON)
+target_compile_options(ar_evict_rr PRIVATE -O2 -Wall -Wextra)

@@ -30,3 +30,7 @@ Next if needed: `writev` multi-reply, arena/slab values, dict load-factor tuning
 ### Iteration 8 — layout (2026-09-22 Asia/Shanghai)
 
 Added `flat` / `hot_cold` layouts with quiescent `ar_core_set_layout` migrate. Not a memtier gate change; correctness demo: `tests/test_layout.py` (migrate under concurrent SET/GET; promote/demote counters). Soft hot cap ≈ nkeys/4.
+
+### Iteration 7 stretch — plugin live-reload (2026-09-22 Asia/Shanghai)
+
+`PLUGIN` / `ar_core_load_evict_plugin` swaps eviction `.so` under concurrent SET/GET without closing the listen fd. Evidence: `tests/test_plugin_reload.py` (control socket survives; new clients connect; worker errors=0; `reloads>=4`). Not a memtier gate change.

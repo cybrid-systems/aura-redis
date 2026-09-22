@@ -402,8 +402,36 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     }
     return reply_err(c, "ERR wrong number of arguments for 'layout'");
   }
+  /* Iteration 7 stretch: PLUGIN [path] — query or live-reload eviction .so
+   * without dropping the listen socket (swap between commands). */
+  if (cmd_eq(cmd, clen, "plugin")) {
+    if (argc == 1) {
+      const char* name = ar_core_evict_name(core);
+      char buf[192];
+      int n = snprintf(buf, sizeof(buf),
+                       "%s plugin=%d reloads=%llu",
+                       name,
+                       ar_core_has_evict_plugin(core),
+                       (unsigned long long)ar_metric_plugin_reloads(core));
+      if (n < 0)
+        return reply_err(c, "ERR plugin status");
+      return reply_bulk(c, buf, (size_t)n);
+    }
+    if (argc == 2) {
+      char pathbuf[1024];
+      if (argv[1].len == 0 || argv[1].len >= sizeof(pathbuf))
+        return reply_err(c, "ERR bad plugin path");
+      memcpy(pathbuf, argv[1].p, argv[1].len);
+      pathbuf[argv[1].len] = '\0';
+      if (!ar_core_load_evict_plugin(core, pathbuf))
+        return reply_err(c, "ERR plugin load failed");
+      return reply_ok(c);
+    }
+    return reply_err(c, "ERR wrong number of arguments for 'plugin'");
+  }
   return reply_err(c, "ERR unknown command");
 }
+
 
 static int flush_writes(ArCore* core, ArConn* c) {
   while (c->woff < c->wlen) {

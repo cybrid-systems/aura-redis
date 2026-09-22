@@ -72,6 +72,7 @@ struct ArCore {
   int nconns;
   int quit;
   void* evict_plugin; /* dlopen handle; NULL if built-in */
+  uint64_t plugin_reloads; /* successful ar_core_load_evict_plugin */
 };
 
 /* dict helpers used by server */

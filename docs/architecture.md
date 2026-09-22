@@ -43,7 +43,7 @@ That combination is the product story—not “another C Redis with an Aura logo
 ## 2. Design principles
 
 1. **Aura owns the process and policy.** The server entry remains an Aura program (or Aura-launched). C is a library, not a fork that abandons Aura.
-2. **Use existing C interop** — `std/ffi`: `c-load`, `c-func`, `c-alloc` / `c-free`, `c-opaque*`, `c-struct-*`, `ffi:pin-buffer`. Optional later: `std/hot-update` (`aot:reload`) for swapping `.so` strategy plugins.
+2. **Use existing C interop** — `std/ffi`: `c-load`, `c-func`, `c-alloc` / `c-free`, `c-opaque*`, `c-struct-*`, `ffi:pin-buffer`. Eviction strategy `.so`s reload via **`ar_core_load_evict_plugin` (dlopen)** — not Aura `aot:reload` (see §4.4).
 3. **No Redis-shaped prims in Aura core.** Generic Aura work (if ever) = better strings/buffers/hash/GC/AOT for everyone. RESP, commands, LRU, memtier gates = **aura-redis only**.
 4. **Pluggable strategies in C, chosen/rewritten from Aura.** Eviction and layout are vtables (or reloadable `.so`s). Aura decides *which* and *when* to swap.
 5. **Two engines for honesty:**
@@ -158,14 +158,32 @@ int ar_core_set_evict_by_name(void* core, const char* name); /* built-ins */
 - Decides strategy name or generates parameters (sample size, thresholds).
 - Calls `ar_core_set_evict_by_name` **or** `hot-strategy:swap!` on an Aura function that chooses the next name **or** (later) `hot-update:reload` a strategy `.so`.
 
-Self-modification paths (use what Aura already has):
+Self-modification paths:
 
 | Mechanism | Use |
 |-----------|-----|
 | `std/hot-strategy` + `mutate:rebind` | Swap Aura policy lambdas (thresholds, choose-fn) |
 | `std/evolve` | Evolve policy bodies from analytics |
-| `std/hot-update` / `aot:reload` | Swap compiled strategy `.so` without restarting the core listen loop (iteration N) |
-| Direct `ar_core_set_evict_by_name` | Fast path for built-in C strategies |
+| Direct `ar_core_set_evict_by_name` | Fast path for built-in C strategies (`noop`/`lru`/`lfu`) |
+| **`ar_core_load_evict_plugin` / RESP `PLUGIN`** | Live-reload eviction policy `.so` (dlopen) **without dropping the listen socket** |
+
+#### Live plugin reload (Iteration 7 stretch)
+
+```c
+int ar_core_load_evict_plugin(ArCore* core, const char* so_path);
+/* Plugin exports: const ArEvictOps* ar_plugin_evict_ops(void); */
+```
+
+- Call is **safe while `serve_forever` / `serve_ms` runs**: dispatch runs between commands on the single-threaded loop; vtable swap then `dlclose(old)`.
+- RESP: `PLUGIN` → status (`name plugin=0|1 reloads=N`); `PLUGIN /path/to.so` → load/reload (`+OK` / `-ERR`).
+- Env / CLI: `AURA_REDIS_EVICT_SO` / `--plugin` (startup); Aura FFI: already bound as `ar-load-plugin` in `server_ffi.aura`.
+- Sample plugins: `libar_evict_random.so` (`name=random`), `libar_evict_rr.so` (`name=rr`).
+- Demo/test: `tests/test_plugin_reload.py` / `scripts/demo-plugin-reload.sh` — mid-traffic swap, persistent + new clients, no reconnect storm.
+
+#### Why not `std/hot-update` / `aot:reload` (deferred)
+
+Aura's `std/hot-update` → `(aot:reload path)` reloads **Aura AOT modules** into the runtime `func_table` (version/region checks, staged constructor registration, epoch bump). Eviction policy packs here are **plain C `ArEvictOps` vtables**, not AOT-emitted Aura modules — wiring them through `aot:reload` would either (a) require packaging policy as Aura AOT with a bridge into the C core, or (b) misuse the AOT loader for unrelated `.so`s. **dlopen + `ar_plugin_evict_ops` is the correct thin path** for this repo; AOT policy packs stay deferred unless/until Aura exports a generic “host vtable plugin” convention.
+
 
 ### 4.5 Layout evolution (Iteration 8)
 

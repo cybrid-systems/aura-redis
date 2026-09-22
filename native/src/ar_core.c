@@ -584,6 +584,7 @@ ArCore* ar_core_create(void) {
   c->layout = AR_LAYOUT_FLAT;
   c->evict = &kEvictNoop;
   c->evict_plugin = NULL;
+  c->plugin_reloads = 0;
   c->listen_fd = -1;
   c->epfd = -1;
   return c;
@@ -927,10 +928,20 @@ int ar_core_load_evict_plugin(ArCore* core, const char* so_path) {
   void* old = core->evict_plugin;
   core->evict = ops;
   core->evict_plugin = h;
+  core->plugin_reloads++;
   if (old)
     dlclose(old);
-  fprintf(stderr, "ar_core: loaded eviction plugin %s name=%s\n", so_path,
-          ops->name ? ops->name : "?");
+  fprintf(stderr, "ar_core: loaded eviction plugin %s name=%s reloads=%llu\n", so_path,
+          ops->name ? ops->name : "?",
+          (unsigned long long)core->plugin_reloads);
   maybe_evict(core);
   return 1;
+}
+
+uint64_t ar_metric_plugin_reloads(ArCore* core) {
+  return core ? core->plugin_reloads : 0;
+}
+
+int ar_core_has_evict_plugin(ArCore* core) {
+  return (core && core->evict_plugin) ? 1 : 0;
 }
