@@ -53,6 +53,9 @@ def main() -> int:
     assert c_wr.startswith("lfu") and "flat" in c_wr, c_wr
     assert choose_policy("normal", 100, 5, 90, 10, 0, 50).startswith("lru")
     assert choose_policy("inverted", 10, 100, 5, 5, 0, 50).startswith("lru")
+    # M9 TTL pressure → ttl_aware
+    c_ttl = choose_policy("normal", 10, 80, 5, 5, 5, 100, dexpired=2, avg_ttl=3000, keys_ttl=60)
+    assert c_ttl.startswith("ttl_aware"), c_ttl
     print("choose_policy unit OK")
 
     proc = start()

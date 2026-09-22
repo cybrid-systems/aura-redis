@@ -2,9 +2,9 @@
 (export *policy-choose-inverted*)
 
 (define *policy-choose-inverted*
-  "(lambda (dgets dsets dhits dmisses devicted nkeys)
+  "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl)
      (let ((ops (+ dgets dsets)))
-       (if (< ops 80)
+       (if (< ops 40)
          \"\"
          (let ((hit-pct (if (> (+ dhits dmisses) 0)
                           (quotient (* 100 dhits) (+ dhits dmisses))

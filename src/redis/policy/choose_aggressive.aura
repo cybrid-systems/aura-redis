@@ -1,8 +1,8 @@
-; choose_aggressive — faster flips, pin sooner on miss spikes (MVP M1)
+; choose_aggressive — faster flips, pin sooner on miss spikes (MVP M1); M9 TTL
 (export *policy-choose-aggressive*)
 
 (define *policy-choose-aggressive*
-  "(lambda (dgets dsets dhits dmisses devicted nkeys)
+  "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl)
      (let ((ops (+ dgets dsets)))
        (if (< ops 25)
          \"\"
@@ -11,8 +11,14 @@
                           0))
                (miss-pct (if (> (+ dhits dmisses) 0)
                            (quotient (* 100 dmisses) (+ dhits dmisses))
-                           0)))
+                           0))
+               (ttl-share (if (> nkeys 0)
+                            (quotient (* 100 keys_ttl) nkeys)
+                            0)))
            (cond
+             ((and (> keys_ttl 0) (< avg_ttl 12000)
+                   (or (>= ttl-share 15) (> keys_ttl 10)))
+              \"ttl_aware|flat\")
              ((or (and (>= dsets dgets) (> miss-pct 20))
                   (and (> miss-pct 25) (> nkeys 0)))
               (if (or (> miss-pct 28) (> devicted 2))

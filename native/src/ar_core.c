@@ -6,6 +6,38 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
+#include <time.h>
+
+
+uint64_t ar_now_ms(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+    return 0;
+  return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)(ts.tv_nsec / 1000000ull);
+}
+
+static void entry_clear_expire(ArCore* core, ArEntry* e) {
+  if (!e || !e->expire_at)
+    return;
+  if (core->keys_with_ttl)
+    core->keys_with_ttl--;
+  if (core->expire_at_sum >= e->expire_at)
+    core->expire_at_sum -= e->expire_at;
+  else
+    core->expire_at_sum = 0;
+  e->expire_at = 0;
+}
+
+static void entry_set_expire_at(ArCore* core, ArEntry* e, uint64_t expire_at) {
+  if (!e)
+    return;
+  entry_clear_expire(core, e);
+  if (expire_at) {
+    e->expire_at = expire_at;
+    core->keys_with_ttl++;
+    core->expire_at_sum += expire_at;
+  }
+}
 
 static void evict_noop_on_get(ArCore* db, void* entry) {
   (void)db;
@@ -166,6 +198,91 @@ static const ArEvictOps kEvictLfu = {
     .name = "lfu",
 };
 
+
+/* --- TTL-aware (M9): prefer soonest expire_at under maxmemory --- */
+static void sample_pick_ttl_aware(ArCore* db, ArEntry** best, size_t* best_b,
+                                  int* best_tier, uint64_t* best_exp,
+                                  uint64_t* best_t, int* samples,
+                                  int* found_ttl) {
+  int max_samples = db->evict_samples > 0 ? db->evict_samples : 16;
+  for (int attempt = 0; attempt < 128 && *samples < max_samples; ++attempt) {
+    int use_cold = (db->layout == AR_LAYOUT_HOT_COLD && db->cold_buckets &&
+                    db->cold_nkeys > 0 && (attempt & 1));
+    ArEntry** table = use_cold ? db->cold_buckets : db->buckets;
+    size_t nb = use_cold ? db->cold_nbuckets : db->nbuckets;
+    if (!table || nb == 0)
+      continue;
+    size_t i = (size_t)(rand() % (int)nb);
+    for (ArEntry* e = table[i]; e && *samples < max_samples; e = e->next) {
+      if (e->pinned)
+        continue;
+      (*samples)++;
+      if (e->expire_at) {
+        if (!*found_ttl || e->expire_at < *best_exp ||
+            (e->expire_at == *best_exp && e->last_access < *best_t)) {
+          *found_ttl = 1;
+          *best_exp = e->expire_at;
+          *best_t = e->last_access;
+          *best = e;
+          *best_b = i;
+          *best_tier = use_cold ? 1 : 0;
+        }
+      } else if (!*found_ttl) {
+        /* Fallback: LRU among no-TTL only until a TTL key is sampled */
+        if (e->last_access < *best_t) {
+          *best_t = e->last_access;
+          *best_exp = UINT64_MAX;
+          *best = e;
+          *best_b = i;
+          *best_tier = use_cold ? 1 : 0;
+        }
+      }
+    }
+  }
+}
+
+static void evict_ttl_on_get(ArCore* db, void* entry) {
+  ArEntry* e = (ArEntry*)entry;
+  e->last_access = ++db->clock;
+}
+
+static void evict_ttl_on_set(ArCore* db, void* entry) {
+  ArEntry* e = (ArEntry*)entry;
+  e->last_access = ++db->clock;
+}
+
+static int evict_ttl_should(ArCore* db) {
+  return db->maxmemory > 0 && db->used_memory > db->maxmemory;
+}
+
+static int evict_ttl_one(ArCore* db) {
+  ArEntry* best = NULL;
+  size_t best_b = 0;
+  int best_tier = 0;
+  uint64_t best_exp = UINT64_MAX;
+  uint64_t best_t = UINT64_MAX;
+  int samples = 0;
+  int found_ttl = 0;
+  if (db->nkeys == 0)
+    return 0;
+  sample_pick_ttl_aware(db, &best, &best_b, &best_tier, &best_exp, &best_t,
+                        &samples, &found_ttl);
+  if (!best)
+    return 0;
+  ar_entry_free_ex(db, best_b, best_tier, best);
+  db->evicted++;
+  return 1;
+}
+
+static const ArEvictOps kEvictTtlAware = {
+    .on_get = evict_ttl_on_get,
+    .on_set = evict_ttl_on_set,
+    .should_evict = evict_ttl_should,
+    .evict_one = evict_ttl_one,
+    .name = "ttl_aware",
+};
+
+
 static size_t hash_bin(const char* s, size_t n) {
   size_t h = 1469598103934665603ull;
   for (size_t i = 0; i < n; ++i) {
@@ -213,25 +330,43 @@ static ArEntry* find_in_table(ArEntry** table, size_t nbuckets, const char* key,
   return NULL;
 }
 
+static int entry_expired_now(ArCore* core, ArEntry* e, size_t b, int tier) {
+  if (!e || !e->expire_at)
+    return 0;
+  if (ar_now_ms() < e->expire_at)
+    return 0;
+  ar_entry_free_ex(core, b, tier, e);
+  core->expired++;
+  return 1;
+}
+
 ArEntry* ar_find_entry_ex(ArCore* core, const char* key, size_t klen,
                           size_t* bucket_out, int* tier_out) {
   size_t b = 0;
   ArEntry* e = find_in_table(core->buckets, core->nbuckets, key, klen, &b);
   if (e) {
-    if (bucket_out)
-      *bucket_out = b;
-    if (tier_out)
-      *tier_out = 0;
-    return e;
+    if (entry_expired_now(core, e, b, 0)) {
+      e = NULL;
+    } else {
+      if (bucket_out)
+        *bucket_out = b;
+      if (tier_out)
+        *tier_out = 0;
+      return e;
+    }
   }
   if (core->layout == AR_LAYOUT_HOT_COLD && core->cold_buckets) {
     e = find_in_table(core->cold_buckets, core->cold_nbuckets, key, klen, &b);
     if (e) {
-      if (bucket_out)
-        *bucket_out = b;
-      if (tier_out)
-        *tier_out = 1;
-      return e;
+      if (entry_expired_now(core, e, b, 1)) {
+        e = NULL;
+      } else {
+        if (bucket_out)
+          *bucket_out = b;
+        if (tier_out)
+          *tier_out = 1;
+        return e;
+      }
     }
   }
   if (bucket_out)
@@ -259,6 +394,7 @@ static void unlink_entry(ArEntry** table, size_t bucket, ArEntry* e) {
 }
 
 void ar_entry_free_ex(ArCore* core, size_t bucket, int tier, ArEntry* e) {
+  entry_clear_expire(core, e);
   ArEntry** table =
       (tier == 1 && core->cold_buckets) ? core->cold_buckets : core->buckets;
   unlink_entry(table, bucket, e);
@@ -386,8 +522,8 @@ void ar_rehash_if_needed(ArCore* core) {
     rehash_table(&core->cold_buckets, &core->cold_nbuckets);
 }
 
-int ar_entry_set(ArCore* core, const char* key, size_t klen, const char* val,
-                 size_t vlen) {
+int ar_entry_set_ex(ArCore* core, const char* key, size_t klen, const char* val,
+                    size_t vlen, uint64_t expire_at) {
   size_t b = 0;
   int tier = 0;
   ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
@@ -401,6 +537,7 @@ int ar_entry_set(ArCore* core, const char* key, size_t klen, const char* val,
     e->vlen = vlen;
     core->used_memory += vlen;
     e->last_access = ++core->clock;
+    entry_set_expire_at(core, e, expire_at);
     /* Updates land in hot: promote if currently cold */
     if (core->layout == AR_LAYOUT_HOT_COLD && tier == 1) {
       ar_touch_get(core, e, b, tier);
@@ -425,6 +562,7 @@ int ar_entry_set(ArCore* core, const char* key, size_t klen, const char* val,
   ne->vlen = vlen;
   ne->last_access = ++core->clock;
   ne->lfu_freq = 5;
+  ne->expire_at = 0;
   /* New keys always enter hot/flat */
   b = hash_bin(key, klen) & (core->nbuckets - 1);
   ne->next = core->buckets[b];
@@ -433,12 +571,19 @@ int ar_entry_set(ArCore* core, const char* key, size_t klen, const char* val,
   if (core->layout == AR_LAYOUT_HOT_COLD)
     core->hot_nkeys++;
   core->used_memory += klen + vlen + sizeof(ArEntry);
+  entry_set_expire_at(core, ne, expire_at);
   if (core->evict && core->evict->on_set)
     core->evict->on_set(core, ne);
   maybe_demote_hot(core);
   ar_rehash_if_needed(core);
   maybe_evict(core);
   return 1;
+}
+
+int ar_entry_set(ArCore* core, const char* key, size_t klen, const char* val,
+                 size_t vlen) {
+  /* Plain SET clears TTL (Redis default without KEEPTTL). */
+  return ar_entry_set_ex(core, key, klen, val, vlen, 0);
 }
 
 static int migrate_to_hot_cold(ArCore* core) {
@@ -646,10 +791,55 @@ int ar_set_bin(ArCore* core, const char* key, size_t klen, const char* val,
   return ar_entry_set(core, key, klen, val, vlen);
 }
 
+int ar_set_bin_ex(ArCore* core, const char* key, size_t klen, const char* val,
+                  size_t vlen, int64_t expire_sec) {
+  if (!core || !key || !val)
+    return 0;
+  core->ops++;
+  core->sets++;
+  uint64_t exp = 0;
+  if (expire_sec > 0) {
+    exp = ar_now_ms() + (uint64_t)expire_sec * 1000ull;
+  }
+  return ar_entry_set_ex(core, key, klen, val, vlen, exp);
+}
+
 int ar_set(ArCore* core, const char* key, const char* val) {
   if (!key || !val)
     return 0;
   return ar_set_bin(core, key, strlen(key), val, strlen(val));
+}
+
+int ar_expire(ArCore* core, const char* key, size_t klen, int64_t seconds) {
+  if (!core || !key)
+    return 0;
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
+  if (!e)
+    return 0;
+  if (seconds <= 0) {
+    entry_clear_expire(core, e);
+    return 1;
+  }
+  entry_set_expire_at(core, e, ar_now_ms() + (uint64_t)seconds * 1000ull);
+  return 1;
+}
+
+int64_t ar_ttl(ArCore* core, const char* key, size_t klen) {
+  if (!core || !key)
+    return -2;
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
+  if (!e)
+    return -2;
+  if (!e->expire_at)
+    return -1;
+  uint64_t now = ar_now_ms();
+  if (now >= e->expire_at)
+    return -2; /* should have been lazy-deleted */
+  return (int64_t)((e->expire_at - now + 999) / 1000);
 }
 
 char* ar_get_bin(ArCore* core, const char* key, size_t klen, size_t* out_len) {
@@ -803,6 +993,8 @@ void ar_flushdb(ArCore* core) {
   core->nkeys = 0;
   core->hot_nkeys = 0;
   core->used_memory = 0;
+  core->keys_with_ttl = 0;
+  core->expire_at_sum = 0;
   core->ops++;
 }
 
@@ -834,6 +1026,8 @@ int ar_core_set_evict_by_name(ArCore* core, const char* name) {
     ops = &kEvictLru;
   else if (strcmp(name, "lfu") == 0)
     ops = &kEvictLfu;
+  else if (strcmp(name, "ttl_aware") == 0 || strcmp(name, "ttl") == 0)
+    ops = &kEvictTtlAware;
   else
     return 0;
   if (core->evict_plugin) {
@@ -873,6 +1067,20 @@ uint64_t ar_metric_hits(ArCore* core) { return core ? core->hits : 0; }
 uint64_t ar_metric_misses(ArCore* core) { return core ? core->misses : 0; }
 uint64_t ar_metric_evicted(ArCore* core) { return core ? core->evicted : 0; }
 uint64_t ar_metric_expired(ArCore* core) { return core ? core->expired : 0; }
+
+uint64_t ar_core_keys_with_ttl(ArCore* core) {
+  return core ? core->keys_with_ttl : 0;
+}
+
+uint64_t ar_core_avg_ttl_ms(ArCore* core) {
+  if (!core || core->keys_with_ttl == 0)
+    return 0;
+  uint64_t avg_at = core->expire_at_sum / core->keys_with_ttl;
+  uint64_t now = ar_now_ms();
+  if (avg_at <= now)
+    return 0;
+  return avg_at - now;
+}
 
 int ar_core_over_maxmemory(ArCore* core) {
   return core && core->maxmemory > 0 && core->used_memory > core->maxmemory;

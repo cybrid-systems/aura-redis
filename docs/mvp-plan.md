@@ -105,3 +105,7 @@ python3 scripts/bench_dynamic_evict.py --workloads zipf_hotkey,oscillate   # Aur
 - Across zipf/hot → ws_shift → hot again, fixed LRU and fixed LFU each collapse on a different phase; adaptive stays near the oracle and **beats both** on cumulative hit% / useful GETs.
 
 See `docs/workloads.md`, `docs/perf-eval.md`, `python3 scripts/bench_regret.py`.
+
+## Post-MVP high-ROI (M6+)
+
+See [`high-roi-iterations.md`](high-roi-iterations.md). **M9** adds `ttl_aware` eviction + SET EX/EXPIRE/TTL; Aura `policy_agent` selects it on `ttl_wave`.

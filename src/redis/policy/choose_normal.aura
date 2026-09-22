@@ -1,12 +1,15 @@
-; choose_normal — multi-signal joint EVICT+LAYOUT choose-fn body (MVP M1/M2)
-; Contract: (lambda (dgets dsets dhits dmisses devicted nkeys) …)
-;   → "" | "lfu" | "lru" | "lfu|flat" | "lru|flat" | "lfu|flat|pin" | …
-; Faster phase detect (min-ops 40). Cold-flood/miss spike → lfu+pin on flat
-; (avoid layout migrate during pin-protect). WS shift → lru|flat (controller UNPINs).
+; choose_normal — multi-signal joint EVICT+LAYOUT choose-fn body (MVP M1/M2 + M9)
+; Contract: (lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) …)
+;   → "" | "lfu" | "lru" | "ttl_aware" | "lfu|flat|pin" | "ttl_aware|flat" | …
+; Signals (M9 TTL):
+;   dexpired  — delta INFO expired (lazy expire activity)
+;   avg_ttl   — INFO avg_ttl_ms (remaining TTL proxy among keys with expire)
+;   keys_ttl  — INFO keys_with_ttl
+; Prefer ttl_aware when short-TTL share is material (do not wait for eviction).
 (export *policy-choose-normal*)
 
 (define *policy-choose-normal*
-  "(lambda (dgets dsets dhits dmisses devicted nkeys)
+  "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl)
      (let ((ops (+ dgets dsets)))
        (if (< ops 40)
          \"\"
@@ -15,18 +18,20 @@
                           0))
                (miss-pct (if (> (+ dhits dmisses) 0)
                            (quotient (* 100 dmisses) (+ dhits dmisses))
-                           0)))
+                           0))
+               (ttl-share (if (> nkeys 0)
+                            (quotient (* 100 keys_ttl) nkeys)
+                            0)))
            (cond
-             ; cold-flood / miss spike while write-ish → lfu + pin (flat: no migrate hurt)
+             ((and (> keys_ttl 0)
+                   (< avg_ttl 12000)
+                   (or (>= ttl-share 20) (> keys_ttl 15)))
+              \"ttl_aware|flat\")
              ((and (>= dsets dgets) (> miss-pct 30) (> nkeys 0))
               \"lfu|flat|pin\")
-             ; classic write-heavy → lfu (+ hot_cold when not pinning)
              ((> dsets (* dgets 2)) \"lfu|flat\")
-             ; eviction pressure + miss spike → protect with lfu+pin
              ((and (> devicted 0) (> miss-pct 40)) \"lfu|flat|pin\")
-             ; WS shift: read-heavy → lru fast (unpin stale via controller)
              ((and (> dgets (* dsets 3)) (>= hit-pct 50)) \"lru|flat\")
-             ; read-ish + hit drop under pressure → flip to lru
              ((and (> dgets (* dsets 2)) (< hit-pct 55) (> miss-pct 15))
               \"lru|flat\")
              ((and (> dgets (* dsets 5)) (>= hit-pct 60)) \"lru|flat\")

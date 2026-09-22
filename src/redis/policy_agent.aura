@@ -56,12 +56,14 @@
 (define *thresh-miss-pin* 30)
 (define *threshold-mutates* 0)
 (define *phase-hint* "unknown")
+(define *ttl-pressure* #f) ; M9: short-TTL churn this tick
 
 (define *prev-gets* 0)
 (define *prev-sets* 0)
 (define *prev-hits* 0)
 (define *prev-misses* 0)
 (define *prev-evicted* 0)
+(define *prev-expired* 0)
 (define *have-prev* #f)
 (define *hit-ewma* 0) ; simple hit% EWMA (0..100), agent-side concentration proxy
 
@@ -258,14 +260,17 @@
 ;; M7 — mutate numeric thresholds inside choose-fn body string (Aura-native)
 (define (build-threshold-body min-ops miss-pin)
   (string-append
-    "(lambda (dgets dsets dhits dmisses devicted nkeys) "
+    "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) "
     "(let ((ops (+ dgets dsets))) "
     "(if (< ops " (number->string min-ops) ") \"\" "
     "(let ((hit-pct (if (> (+ dhits dmisses) 0) "
     "(quotient (* 100 dhits) (+ dhits dmisses)) 0)) "
     "(miss-pct (if (> (+ dhits dmisses) 0) "
-    "(quotient (* 100 dmisses) (+ dhits dmisses)) 0))) "
+    "(quotient (* 100 dmisses) (+ dhits dmisses)) 0)) "
+    "(ttl-share (if (> nkeys 0) (quotient (* 100 keys_ttl) nkeys) 0))) "
     "(cond "
+    "((and (> keys_ttl 0) (< avg_ttl 12000) (or (>= ttl-share 20) (> keys_ttl 15))) "
+    "\"ttl_aware|flat\") "
     "((and (>= dsets dgets) (> miss-pct " (number->string miss-pin) ") (> nkeys 0)) "
     "\"lfu|flat|pin\") "
     "((> dsets (* dgets 2)) \"lfu|flat\") "
@@ -436,13 +441,20 @@
                            (else "fitness"))))
              (if (string=? to *profile-name*)
                (do-fitness-heal! reason)
-               (if (or (string=? *profile-name* "normal")
-                       (string=? *profile-name* "conservative")
-                       (string=? *profile-name* "thresholded"))
-                 (if (do-fitness-threshold-mutate! reason)
-                   #t
-                   (do-fitness-swap! to reason))
-                 (do-fitness-swap! to reason))))
+               ; M9: under short-TTL pressure avoid threshold-mutate (eval-current
+               ; re-enters top-level and can invalidate the live choose loop).
+               (if (and *ttl-pressure*
+                        (or (string=? *profile-name* "normal")
+                            (string=? *profile-name* "conservative")
+                            (string=? *profile-name* "thresholded")))
+                 (do-fitness-swap! "aggressive" (string-append reason "-ttl"))
+                 (if (or (string=? *profile-name* "normal")
+                         (string=? *profile-name* "conservative")
+                         (string=? *profile-name* "thresholded"))
+                   (if (do-fitness-threshold-mutate! reason)
+                     #t
+                     (do-fitness-swap! to reason))
+                   (do-fitness-swap! to reason)))))
           (else #f)))))))
 
 (define (maybe-reload-profile!)
@@ -472,7 +484,7 @@
                     (set! *swaps* (+ *swaps* 1))
                     (if (string=? name "broken")
                       (begin
-                        (let ((probe (try (choose-fn 100 10 90 10 0 100)
+                        (let ((probe (try (choose-fn 100 10 90 10 0 100 0 0 0)
                                           (catch (e) "FAIL"))))
                           (if (or (not (car r))
                                   (not (string? probe))
@@ -491,7 +503,7 @@
 
 ; ── seed choose-fn in workspace for hot-strategy ──
 (display "policy_agent: seeding choose-fn (hot-strategy)\n")
-(set-code "(define (choose-fn dgets dsets dhits dmisses devicted nkeys) \"\")")
+(set-code "(define (choose-fn dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) \"\")")
 (eval-current)
 
 (define *safety* (mutate:safety-snapshot))
@@ -575,19 +587,24 @@
                   (h (info-num info "hits"))
                   (m (info-num info "misses"))
                   (ev (info-num info "evicted"))
+                  (ex (info-num info "expired"))
                   (nk (info-num info "keys"))
+                  (kt (info-num info "keys_with_ttl"))
+                  (at (info-num info "avg_ttl_ms"))
                   (cur (info-get info "evict"))
                   (cur-layout (info-get info "layout")))
               (let ((dgets (if *have-prev* (- g *prev-gets*) 0))
                     (dsets (if *have-prev* (- s *prev-sets*) 0))
                     (dhits (if *have-prev* (- h *prev-hits*) 0))
                     (dmisses (if *have-prev* (- m *prev-misses*) 0))
-                    (devicted (if *have-prev* (- ev *prev-evicted*) 0)))
+                    (devicted (if *have-prev* (- ev *prev-evicted*) 0))
+                    (dexpired (if *have-prev* (- ex *prev-expired*) 0)))
                 (set! *prev-gets* g)
                 (set! *prev-sets* s)
                 (set! *prev-hits* h)
                 (set! *prev-misses* m)
                 (set! *prev-evicted* ev)
+                (set! *prev-expired* ex)
                 (set! *have-prev* #t)
                 ; hit% EWMA (agent-side hot concentration proxy)
                 (let ((win (+ dhits dmisses)))
@@ -596,8 +613,16 @@
                       (set! *hit-ewma*
                         (quotient (+ (* *hit-ewma* 7) (* inst 3)) 10)))
                     #t))
-                (maybe-fitness-mutate! dgets dsets dhits dmisses devicted)
-                (let ((choice (choose-fn dgets dsets dhits dmisses devicted nk)))
+                                (set! *ttl-pressure*
+                  (and (> kt 0) (< at 12000)
+                       (or (> kt 15) (>= (if (> nk 0) (quotient (* 100 kt) nk) 0) 20))))
+
+                ; Apply choose BEFORE fitness mutate so EVICT lands even if
+                ; hot-strategy:swap! → eval-current re-enters the file.
+                (let ((choice (try
+                                (choose-fn dgets dsets dhits dmisses devicted nk
+                                           dexpired at kt)
+                                (catch (e) ""))))
                   (if (and (string? choice) (> (string-length choice) 0))
                     (begin
                       ; parse "evict|layout|pin" (backward compat: bare "lfu")
@@ -636,6 +661,12 @@
                               (display dsets)
                               (display " ewma=")
                               (display *hit-ewma*)
+                              (display " dexpired=")
+                              (display dexpired)
+                              (display " avg_ttl=")
+                              (display at)
+                              (display " keys_ttl=")
+                              (display kt)
                               (display ")\n")
                               (redis-call! *sock* "EVICT" ev-name)
                               (set! *applies* (+ *applies* 1))
@@ -652,8 +683,9 @@
                               (redis-call! *sock* "LAYOUT" ly-name)
                               (set! *applies* (+ *applies* 1)))
                             #t)
-                          ; On LRU: drop stale pins so WS shift is not glued to set A
-                          (if (string=? ev-name "lru")
+                          ; On LRU swap-in: drop stale pins so WS shift is not glued to set A
+                          (if (and (string=? ev-name "lru")
+                                   (not (string=? cur "lru")))
                             (begin
                               (display "policy_agent: UNPIN stale hot/z prefixes\n")
                               (unpin-prefix-set! *sock* "hot" 40)
@@ -673,7 +705,9 @@
                               (set! *applies* (+ *applies* 1))
                               #t)
                             #t))))
-                    #t)))))))
+                    #t))
+                (maybe-fitness-mutate! dgets dsets dhits dmisses devicted)
+                #t)))))
       ; demo phase machine
       (if *demo*
         (let ((elapsed (- (monotonic-ms) *t0*)))
@@ -700,7 +734,7 @@
                 (display r)
                 (newline)
                 ; Even if swap "succeeds" at rebind, call may fail — force heal path
-                (let ((probe (try (choose-fn 100 10 90 10 0 100) (catch (e) "FAIL"))))
+                (let ((probe (try (choose-fn 100 10 90 10 0 100 0 0 0) (catch (e) "FAIL"))))
                   (display "policy_agent: probe after broken=")
                   (display probe)
                   (newline)

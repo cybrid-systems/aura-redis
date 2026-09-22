@@ -14,6 +14,7 @@ typedef struct ArEntry {
   uint64_t last_access;
   uint8_t lfu_freq; /* approximate LFU counter (Iteration 5) */
   uint8_t pinned;   /* MVP M4: skip in eviction when set */
+  uint64_t expire_at; /* 0 = none; else absolute deadline ms (M9) */
   struct ArEntry* next;
 } ArEntry;
 
@@ -64,6 +65,8 @@ struct ArCore {
   uint64_t ops, gets, sets, hits, misses;
   uint64_t evicted, expired;
   uint64_t pinned_keys; /* count of entries with pinned=1 */
+  uint64_t keys_with_ttl; /* keys with expire_at != 0 (M9) */
+  uint64_t expire_at_sum; /* sum of expire_at for avg_ttl proxy (M9) */
   uint64_t clock;
   uint64_t maxmemory; /* 0 = unlimited */
   uint64_t used_memory;
@@ -86,6 +89,10 @@ ArEntry* ar_find_entry_ex(ArCore* core, const char* key, size_t klen,
                           size_t* bucket_out, int* tier_out);
 int ar_entry_set(ArCore* core, const char* key, size_t klen, const char* val,
                  size_t vlen);
+/* M9: SET with absolute expire_at ms (0 = no TTL). */
+int ar_entry_set_ex(ArCore* core, const char* key, size_t klen, const char* val,
+                    size_t vlen, uint64_t expire_at);
+uint64_t ar_now_ms(void);
 void ar_entry_free(ArCore* core, size_t bucket, ArEntry* e);
 void ar_entry_free_ex(ArCore* core, size_t bucket, int tier, ArEntry* e);
 void ar_rehash_if_needed(ArCore* core);

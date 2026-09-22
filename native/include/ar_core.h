@@ -37,6 +37,13 @@ int ar_set(ArCore* core, const char* key, const char* val);
 /* Binary-safe SET; returns 1 on ok. */
 int ar_set_bin(ArCore* core, const char* key, size_t klen, const char* val,
                size_t vlen);
+/* M9: SET with EX seconds (expire_sec<=0 clears TTL). */
+int ar_set_bin_ex(ArCore* core, const char* key, size_t klen, const char* val,
+                  size_t vlen, int64_t expire_sec);
+/* EXPIRE key seconds — 1 if key exists, 0 else. */
+int ar_expire(ArCore* core, const char* key, size_t klen, int64_t seconds);
+/* TTL: -2 missing, -1 no expire, else remaining seconds. */
+int64_t ar_ttl(ArCore* core, const char* key, size_t klen);
 /* Returns malloc'd value (caller frees via ar_free) or NULL if missing. */
 char* ar_get(ArCore* core, const char* key);
 /* Binary get: *out_len set; caller frees via ar_free. NULL if missing. */
@@ -73,6 +80,9 @@ uint64_t ar_metric_hits(ArCore* core);
 uint64_t ar_metric_misses(ArCore* core);
 uint64_t ar_metric_evicted(ArCore* core);
 uint64_t ar_metric_expired(ArCore* core);
+uint64_t ar_core_keys_with_ttl(ArCore* core);
+/* Average remaining TTL ms among keys with expire; 0 if none. */
+uint64_t ar_core_avg_ttl_ms(ArCore* core);
 
 /* Iteration 7 — hot-load / live-reload eviction plugin .so
  * Plugin must export: const ArEvictOps* ar_plugin_evict_ops(void);

@@ -77,3 +77,9 @@ policy_agent: fitness-threshold-mutate min-ops=40→28 miss-pin=30→22 reason=f
 ```
 
 Tried before profile swap when seed is normal/conservative/thresholded.
+
+## M9 note (TTL-aware kernel)
+
+Separate from mutation_gain: C `ttl_aware` ArEvictOps + Aura choose picks it on
+`ttl_wave` / `session_churn` when INFO shows short-TTL churn (`keys_with_ttl`,
+`avg_ttl_ms`, `expired`). See `docs/high-roi-iterations.md` M9.

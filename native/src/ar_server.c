@@ -285,14 +285,55 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     return reply_bulk(c, v, vl);
   }
   if (cmd_eq(cmd, clen, "set")) {
-    /* SET key value [ignored extras for now] */
+    /* SET key value [EX seconds] — minimal TTL path (M9) */
     if (argc < 3)
       return reply_err(c, "ERR wrong number of arguments for 'set'");
-    core->ops++;
-    core->sets++;
-    if (!ar_entry_set(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len))
-      return reply_err(c, "ERR OOM");
+    int64_t ex_sec = -1; /* -1 = plain SET (clear TTL) */
+    for (int oi = 3; oi + 1 < argc; oi += 2) {
+      if (cmd_eq(argv[oi].p, argv[oi].len, "ex")) {
+        char nbuf[32];
+        if (argv[oi + 1].len == 0 || argv[oi + 1].len >= sizeof(nbuf))
+          return reply_err(c, "ERR invalid expire time in 'set'");
+        memcpy(nbuf, argv[oi + 1].p, argv[oi + 1].len);
+        nbuf[argv[oi + 1].len] = '\0';
+        ex_sec = (int64_t)atoll(nbuf);
+        if (ex_sec <= 0)
+          return reply_err(c, "ERR invalid expire time in 'set'");
+      } else {
+        return reply_err(c, "ERR syntax error");
+      }
+    }
+    if (ex_sec > 0) {
+      if (!ar_set_bin_ex(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len,
+                         ex_sec))
+        return reply_err(c, "ERR OOM");
+    } else {
+      core->ops++;
+      core->sets++;
+      if (!ar_entry_set(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len))
+        return reply_err(c, "ERR OOM");
+    }
     return reply_ok(c);
+  }
+  if (cmd_eq(cmd, clen, "expire")) {
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'expire'");
+    char nbuf[32];
+    if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[2].p, argv[2].len);
+    nbuf[argv[2].len] = '\0';
+    int64_t sec = (int64_t)atoll(nbuf);
+    int ok = ar_expire(core, argv[1].p, argv[1].len, sec);
+    core->ops++;
+    return reply_int(c, ok ? 1 : 0);
+  }
+  if (cmd_eq(cmd, clen, "ttl")) {
+    if (argc != 2)
+      return reply_err(c, "ERR wrong number of arguments for 'ttl'");
+    int64_t ttl = ar_ttl(core, argv[1].p, argv[1].len);
+    core->ops++;
+    return reply_int(c, ttl);
   }
   if (cmd_eq(cmd, clen, "del")) {
     if (argc < 2)
@@ -384,11 +425,11 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     if (argc == 2) {
       char namebuf[64];
       if (argv[1].len == 0 || argv[1].len >= sizeof(namebuf))
-        return reply_err(c, "ERR bad evict (want noop|lru|lfu)");
+        return reply_err(c, "ERR bad evict (want noop|lru|lfu|ttl_aware)");
       memcpy(namebuf, argv[1].p, argv[1].len);
       namebuf[argv[1].len] = '\0';
       if (!ar_core_set_evict_by_name(core, namebuf))
-        return reply_err(c, "ERR bad evict (want noop|lru|lfu)");
+        return reply_err(c, "ERR bad evict (want noop|lru|lfu|ttl_aware)");
       return reply_ok(c);
     }
     if (argc == 3 && cmd_eq(argv[1].p, argv[1].len, "samples")) {
@@ -406,7 +447,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   }
   /* INFO — multi-signal metrics for Aura policy agent (MVP M1). */
   if (cmd_eq(cmd, clen, "info")) {
-    char buf[768];
+    char buf[1024];
     int n = snprintf(buf, sizeof(buf),
                      "# aura-redis\n"
                      "evict:%s\n"
@@ -416,7 +457,10 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
                      "hits:%llu\n"
                      "misses:%llu\n"
                      "evicted:%llu\n"
+                     "expired:%llu\n"
                      "keys:%llu\n"
+                     "keys_with_ttl:%llu\n"
+                     "avg_ttl_ms:%llu\n"
                      "samples:%d\n"
                      "pinned:%llu\n"
                      "used_memory:%llu\n"
@@ -433,7 +477,10 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
                      (unsigned long long)ar_metric_hits(core),
                      (unsigned long long)ar_metric_misses(core),
                      (unsigned long long)ar_metric_evicted(core),
+                     (unsigned long long)ar_metric_expired(core),
                      (unsigned long long)ar_core_nkeys(core),
+                     (unsigned long long)ar_core_keys_with_ttl(core),
+                     (unsigned long long)ar_core_avg_ttl_ms(core),
                      ar_core_evict_samples(core),
                      (unsigned long long)ar_core_pinned_keys(core),
                      (unsigned long long)ar_core_used_memory(core),

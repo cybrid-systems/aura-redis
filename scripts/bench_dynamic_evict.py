@@ -33,7 +33,12 @@ Workloads
 
 7. poison_heal — start inverted choose-fn; adaptive_mutate heals, frozen stays bad.
 
-Policies: lru | lfu | adaptive (=adaptive_mutate) | adaptive_frozen |
+8. ttl_wave / session_churn (M9) — durable no-TTL keep set + mass short-TTL
+   session SETs under maxmemory (sessions also GET-boosted so LFU/LRU cling);
+   ttl_aware prefers soonest expire → keep survives GET storm. Adaptive should
+   EVICT → ttl_aware from INFO keys_with_ttl / avg_ttl_ms / expired.
+
+Policies: lru | lfu | ttl_aware | adaptive (=adaptive_mutate) | adaptive_frozen |
           adaptive_mutate | poison_frozen | poison_mutate
 
 Adaptive path (DEFAULT): Aura policy_agent.aura in Docker writes EVICT /
@@ -107,18 +112,33 @@ def choose_policy(
     dm: int,
     devicted: int,
     nkeys: int,
+    dexpired: int = 0,
+    avg_ttl: int = 0,
+    keys_ttl: int = 0,
 ) -> str:
     """HOST-ONLY CI MIRROR of choose_*.aura (policy_agent is the product path).
 
-    Returns "" | "lfu" | "lru" | "lfu|hot_cold" | "lru|flat" | "lfu|flat|pin" | …
+    Returns "" | "lfu" | "lru" | "ttl_aware" | "lfu|flat|pin" | "ttl_aware|flat" | …
     Pin path prefers flat layout so migrate does not hurt zipf/hot retention.
+    M9 TTL signals: dexpired, avg_ttl (ms), keys_ttl from INFO.
     """
     ops = dg + ds
     hit_pct = (100 * dh) // (dh + dm) if (dh + dm) > 0 else 0
     miss_pct = (100 * dm) // (dh + dm) if (dh + dm) > 0 else 0
+    ttl_share = (100 * keys_ttl) // nkeys if nkeys > 0 else 0
+
+    def ttl_pressure() -> bool:
+        return (
+            keys_ttl > 0
+            and avg_ttl < 12000
+            and (ttl_share >= 20 or keys_ttl > 15)
+        )
+
     if profile == "aggressive":
         if ops < 25:
             return ""
+        if keys_ttl > 0 and avg_ttl < 12000 and (ttl_share >= 15 or keys_ttl > 10):
+            return "ttl_aware|flat"
         if (ds >= dg and miss_pct > 20) or (miss_pct > 25 and nkeys > 0):
             if miss_pct > 28 or devicted > 2:
                 return "lfu|flat|pin"
@@ -133,6 +153,8 @@ def choose_policy(
     if profile == "conservative":
         if ops < 120:
             return ""
+        if keys_ttl > 30 and avg_ttl < 5000 and devicted > 0:
+            return "ttl_aware|flat"
         if ds > dg * 3 and miss_pct > 55:
             return "lfu|hot_cold"
         if ds > dg * 3:
@@ -153,6 +175,8 @@ def choose_policy(
     # normal (default) — mirrors choose_normal.aura
     if ops < 40:
         return ""
+    if ttl_pressure():
+        return "ttl_aware|flat"
     # cold-flood / miss spike while write-ish → lfu + pin (flat: no migrate hurt)
     if ds >= dg and miss_pct > 30 and nkeys > 0:
         return "lfu|flat|pin"
@@ -235,7 +259,7 @@ def apply_choice(sock: socket.socket, choice: str, cur_evict: str, cur_layout: s
     if ly and ly != cur_layout and ly in ("flat", "hot_cold"):
         redis_call(sock, "LAYOUT", ly)
         swaps.append(f"layout:{cur_layout}->{ly}")
-    if ev == "lru":
+    if ev == "lru" and ev != cur_evict:
         _unpin_all(sock, swaps)
     if want_pin:
         prefixes: List[str] = []
@@ -266,7 +290,7 @@ class PythonAdaptiveController(threading.Thread):
         self.pin_n = pin_n
         self._stop = threading.Event()
         self.swaps: List[str] = []
-        self.prev: Optional[Tuple[int, int, int, int, int]] = None
+        self.prev: Optional[Tuple[int, int, int, int, int, int]] = None
         self.hit_ewma: float = 0.0
         self._last_evict_swap = 0.0
         self.dwell_s = 0.6  # sticky kernel after EVICT (avoid thrash mid-boost)
@@ -296,7 +320,10 @@ class PythonAdaptiveController(threading.Thread):
                 h = info_int(info, "hits")
                 m = info_int(info, "misses")
                 ev = info_int(info, "evicted")
+                ex = info_int(info, "expired")
                 nk = info_int(info, "keys")
+                kt = info_int(info, "keys_with_ttl")
+                at = info_int(info, "avg_ttl_ms")
                 cur = info.get("evict", "")
                 cur_ly = info.get("layout", "flat")
                 if self.prev is not None:
@@ -305,11 +332,14 @@ class PythonAdaptiveController(threading.Thread):
                     dh = h - self.prev[2]
                     dm = m - self.prev[3]
                     de = ev - self.prev[4]
+                    dx = ex - self.prev[5]
                     win = dh + dm
                     if win > 0:
                         inst = 100.0 * dh / win
                         self.hit_ewma = 0.7 * self.hit_ewma + 0.3 * inst
-                    choice = choose_policy(self.profile, dg, ds, dh, dm, de, nk)
+                    choice = choose_policy(
+                        self.profile, dg, ds, dh, dm, de, nk, dx, at, kt
+                    )
                     # Dwell: ignore EVICT flips (still allow layout) shortly after swap
                     if choice and (time.time() - self._last_evict_swap) < self.dwell_s:
                         parts = choice.split("|")
@@ -329,7 +359,7 @@ class PythonAdaptiveController(threading.Thread):
                                 self._last_evict_swap = time.time()
                     except Exception:
                         pass
-                self.prev = (g, se, h, m, ev)
+                self.prev = (g, se, h, m, ev, ex)
                 time.sleep(self.tick)
         finally:
             try:
@@ -409,7 +439,9 @@ class AuraAgentController:
         for ln in text.splitlines():
             if not ln.strip().startswith("policy_agent:"):
                 continue
-            if ("EVICT" in ln and "→" in ln) or "LAYOUT" in ln or "PIN" in ln or "UNPIN" in ln:
+            if (("EVICT" in ln and "→" in ln) or "LAYOUT" in ln
+                    or ln.strip().startswith("policy_agent: PIN ")
+                    or ln.strip().startswith("policy_agent: UNPIN")):
                 self.swaps.append(ln.strip())
             if ("fitness-swap" in ln or "fitness-heal" in ln or "fitness-threshold-mutate" in ln
                     or "hot-strategy:heal!" in ln):
@@ -1001,6 +1033,61 @@ def workload_diurnal_shift(s: socket.socket, mode: str) -> List[PhaseResult]:
     return phases
 
 
+
+def workload_ttl_wave(s: socket.socket, mode: str) -> PhaseResult:
+    """M9: durable keep (no TTL) + short-TTL session churn under maxmemory.
+
+    Sessions are GET-boosted so LRU (recency) and LFU (freq) cling to them and
+    evict durable keys. ttl_aware prefers soonest expire_at → keep survives.
+    Adaptive must flip to ttl_aware *before* the mass flood (re-SET keep after).
+    """
+    import time as _t
+
+    val = "v" * 180
+    nkeep = 48
+
+    def seed_keep() -> None:
+        for i in range(nkeep):
+            redis_call(s, "SET", f"keep{i:04d}", val)
+
+    seed_keep()
+    for i in range(nkeep):
+        redis_call(s, "GET", f"keep{i:04d}")
+
+    if is_adaptive(mode):
+        # Prelude: enough short-TTL + eviction pressure for choose → ttl_aware
+        for i in range(120):
+            redis_call(s, "SET", f"sess{i:05d}", val, "EX", "4")
+        _t.sleep(0.55)
+        wait_evict(s, "ttl_aware", mode, rounds=25)
+        # Re-materialize durable set UNDER ttl_aware before the storm
+        seed_keep()
+        _t.sleep(0.15)
+
+    # Mass session churn: short TTL + GET boost (LFU/LRU trap)
+    for i in range(900):
+        redis_call(s, "SET", f"sess{i:05d}", val, "EX", "5")
+        if i % 2 == 0:
+            redis_call(s, "GET", f"sess{i:05d}")
+
+    hits = misses = 0
+    for _ in range(10):
+        for i in range(nkeep):
+            if redis_call(s, "GET", f"keep{i:04d}") is None:
+                misses += 1
+            else:
+                hits += 1
+    info = parse_info(redis_call(s, "INFO"))
+    return PhaseResult("ttl_wave", hits, misses, info_int(info, "evicted"), hits)
+
+
+def workload_session_churn(s: socket.socket, mode: str) -> PhaseResult:
+    """Alias of ttl_wave with a distinct phase name for scoreboards."""
+    p = workload_ttl_wave(s, mode)
+    p.name = "session_churn"
+    return p
+
+
 # ── orchestration ─────────────────────────────────────────────────────
 
 
@@ -1037,12 +1124,18 @@ def run_one(
 ) -> RunResult:
     global _ACTIVE_CONTROLLER
     adaptive = "off"
-    start_evict = policy if policy in ("lru", "lfu", "noop") else "lru"
+    start_evict = policy if policy in ("lru", "lfu", "noop", "ttl_aware") else "lru"
     fitness_mutate = True
     seed_profile = "normal"
     if is_adaptive(policy):
         adaptive = adaptive_backend  # python | aura
         fitness_mutate, seed_profile = _policy_agent_opts(policy)
+        # M9: ttl_wave needs stable choose_normal (has ttl_aware). Mid-loop
+        # hot-strategy:swap! → eval-current re-enters policy_agent and breaks
+        # the live tick loop (invalid closure). Freeze fitness for these.
+        if workload in ("ttl_wave", "session_churn"):
+            fitness_mutate = False
+            seed_profile = "normal"
 
     h = start_server(
         port, start_evict, maxmemory, adaptive=adaptive,
@@ -1077,6 +1170,10 @@ def run_one(
                 phases = workload_phase_marathon(s, mode)
             elif workload == "diurnal_shift":
                 phases = workload_diurnal_shift(s, mode)
+            elif workload == "ttl_wave":
+                phases = [workload_ttl_wave(s, mode)]
+            elif workload == "session_churn":
+                phases = [workload_session_churn(s, mode)]
             elif workload in ("mutation_gain", "poison_heal"):
                 # mutation_gain = diurnal under mutate-vs-frozen attribution
                 # poison_heal = hot_protect-shaped under inverted seed
