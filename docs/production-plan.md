@@ -1,7 +1,7 @@
 # aura-redis production plan
 
 **Status:** authoritative production roadmap (v1).  
-**Reality check:** tip ~`9633c0e` is ~2.2k LOC C data plane + Aura `policy_agent` control plane — a **string KV / adaptive cache** with RESP2, maxmemory eviction, and Aura-mutated policy. It is **not** Redis Cluster, modules, or full command compatibility. Production here means *production for this product*, not “become Redis overnight.”
+**Reality check:** tip ~`d2a2b08`+ is ~2.2k LOC C data plane + Aura `policy_agent` control plane — a **string KV / adaptive cache** with RESP2, maxmemory eviction, and Aura-mutated policy. It is **not** Redis Cluster, modules, or full command compatibility. Production here means *production for this product*, not “become Redis overnight.”
 
 **Companions:** [`iteration-plan.md`](iteration-plan.md) · [`mvp-plan.md`](mvp-plan.md) · [`aura-native-control.md`](aura-native-control.md) · [`commands.md`](commands.md) · [`mutation-gains.md`](mutation-gains.md)
 
@@ -102,7 +102,9 @@ MVP/explore remains valuable demos; **ship bar moves to this document.**
 python3 tests/test_prod_protocol.py   # P0.1
 python3 tests/test_prod_memory.py     # P0.2
 python3 tests/test_prod_ttl.py        # P0.3
-# later: test_prod_auth.py, …
+python3 tests/test_prod_auth.py       # P0.4
+# later: shutdown / INFO / soak …
+# or: ./scripts/ci-prod.sh
 ```
 
 ---
@@ -126,3 +128,4 @@ Production does **not** mean “C-only Redis clone.”
 | 2026-09-22 | **P0.1** | `docs/commands.md`; RESP harden (null bulk, length digits, 16MiB cap); `tests/test_prod_protocol.py` |
 | 2026-09-22 | **P0.2** | `maybe_evict` scales with nkeys (was 64); `tests/test_prod_memory.py` maxmemory bound + large-SET |
 | 2026-09-22 | **P0.3** | Active expire in serve loop; expire-if-needed in eviction samples; `tests/test_prod_ttl.py` |
+| 2026-09-22 | **P0.4** | `AUTH`/`requirepass`/`--bind`/`protected-mode`; `tests/test_prod_auth.py` |

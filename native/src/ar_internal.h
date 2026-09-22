@@ -39,6 +39,7 @@ typedef struct ArConn {
   size_t woff; /* bytes already written from wbuf */
   int should_close;
   int want_write;
+  int authenticated; /* P0.4: 1 if AUTH ok or no requirepass */
 } ArConn;
 
 struct ArCore {
@@ -74,9 +75,14 @@ struct ArCore {
   /* network */
   int listen_fd;
   int epfd;
+  int tcp_port; /* bound port for INFO */
+  char bind_addr[64]; /* e.g. 127.0.0.1 or 0.0.0.0 */
+  int protected_mode; /* P0.4: Redis-ish; default 1 */
+  char* requirepass; /* P0.4: NULL/empty = no AUTH required */
   ArConn conns[AR_MAX_CONN];
   int nconns;
   int quit;
+  int shutting_down; /* P0.5: stop accept; drain then exit */
   void* evict_plugin; /* dlopen handle; NULL if built-in */
   uint64_t plugin_reloads; /* successful ar_core_load_evict_plugin */
 

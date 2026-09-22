@@ -4,7 +4,7 @@
 **Not covered here:** pure-Lisp `AURA_REDIS_ENGINE=aura` (broader demo subset in README).  
 **Production product:** string KV cache + Aura control commands — see [`production-plan.md`](production-plan.md).
 
-Last audited: 2026-09-22 (CST) for P0.1.
+Last audited: 2026-09-22 (CST) for P0.4 AUTH / protected-mode.
 
 ---
 
@@ -12,8 +12,10 @@ Last audited: 2026-09-22 (CST) for P0.1.
 
 | Command | Arity | Reply | Notes |
 |---------|-------|-------|-------|
-| `PING` | 1 or 2 | `+PONG` or bulk | Extra args → wrong-arity error |
-| `QUIT` | any | `+OK` then close | |
+| `PING` | 1 or 2 | `+PONG` or bulk | Extra args → wrong-arity error; allowed pre-AUTH |
+| `AUTH` | 2 or 3 | `+OK` / WRONGPASS | `AUTH <pass>` or `AUTH <user> <pass>` (user ignored); need `--requirepass` / `AURA_REDIS_REQUIREPASS` |
+| `HELLO` | 1+ | array map | Minimal stub; optional `AUTH` inline; allowed pre-AUTH |
+| `QUIT` | any | `+OK` then close | Allowed pre-AUTH |
 | `GET` | 2 | bulk / null | |
 | `SET` | ≥3 | `+OK` / `ERR OOM` | Optional `EX <sec>` only (no PX/NX/XX on C path) |
 | `EXPIRE` | 3 | integer 0/1 | |
@@ -25,7 +27,7 @@ Last audited: 2026-09-22 (CST) for P0.1.
 | `INCR` / `DECR` | 2 | integer | integer strings only |
 | `FLUSHDB` | 1 | `+OK` | |
 | `COMMAND` | 1 | `*0` | stub for clients that probe |
-| `INFO` | 1+ | bulk | Multi-signal metrics (evict, layout, hits, used_memory, …) |
+| `INFO` | 1+ | bulk | Sectioned (Server/Clients/Memory/Stats/Keyspace/Persistence/Aura); flat keys kept for policy_agent |
 | `EVICT` | 1 / 2 / 3 | bulk name / `+OK` | `EVICT` \| `EVICT <noop\|lru\|lfu\|ttl_aware>` \| `EVICT samples <n>` |
 | `LAYOUT` | 1 / 2 | bulk / `+OK` | `flat` \| `hot_cold` |
 | `PIN` | 1 / 2 | list / `+OK` | `PIN` lists; `PIN key` pins |
@@ -52,7 +54,7 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 
 | Area | Examples |
 |------|----------|
-| Auth / admin | `AUTH`, `CONFIG`, `SHUTDOWN`, `CLIENT`, `SLOWLOG`, `MONITOR` |
+| Auth / admin | `CONFIG`, `SHUTDOWN`, `CLIENT`, `SLOWLOG`, `MONITOR` (AUTH/HELLO done in P0.4) |
 | Persistence / repl | `SAVE`, `BGSAVE`, `BGREWRITEAOF`, `REPLICAOF`, `PSYNC` |
 | Strings extras | `APPEND`, `STRLEN`, `GETSET`, `SETEX`, `PSETEX`, `SET` NX/XX/PX |
 | Keys extras | `KEYS`, `DBSIZE`, `RENAME`, `TYPE`, `UNLINK` (≠ DEL alias) |
@@ -68,3 +70,19 @@ Clients needing these should not assume Redis parity; extend only under producti
 
 `policy_agent` applies policy via **supported** RESP: `INFO` → `EVICT` / `LAYOUT` / `PIN` / `POLICY`.  
 Production profile: `AURA_REDIS_DENY_PLUGIN=1`.
+
+
+---
+
+## Security (P0.4)
+
+| Knob | Flag | Env | Default |
+|------|------|-----|---------|
+| Password | `--requirepass <pass>` | `AURA_REDIS_REQUIREPASS` | unset (no AUTH) |
+| Bind | `--bind <ip>` | `AURA_REDIS_BIND` | `127.0.0.1` |
+| Protected mode | `--protected-mode yes|no` | `AURA_REDIS_PROTECTED_MODE` | `yes` |
+
+- When `requirepass` is set, unauthenticated clients may only run `AUTH` / `PING` / `QUIT` / `HELLO`; others → `-NOAUTH Authentication required.`
+- **Protected-mode** (Redis spirit): if enabled **and** no password, non-loopback peers are refused with `-DENIED …` even when `--bind 0.0.0.0`. Loopback always allowed. Password **or** `--protected-mode no` permits remote.
+- Default bind remains loopback — safest deploy default; use `--bind 0.0.0.0` + `requirepass` for remote + Aura policy_agent on another host.
+- `CONFIG SET requirepass` lands in **P1.1**; until then use flag/env (restart to change).

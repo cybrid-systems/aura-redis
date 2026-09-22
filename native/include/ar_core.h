@@ -23,14 +23,23 @@ typedef struct ArEvictOps {
 ArCore* ar_core_create(void);
 void ar_core_destroy(ArCore* core);
 
-/* TCP (Iteration 2+): bind 127.0.0.1:port (loopback only; documented).
- * Returns 1 on success, 0 on error (Aura FFI-friendly). */
+/* TCP: bind bind_addr:port (default 127.0.0.1). Returns 1 on success, 0 on error. */
 int ar_core_listen(ArCore* core, int port);
 /* Pump event loop up to ms milliseconds (0 = process ready events once).
  * Returns 0 normally, 1 if quit requested, -1 on fatal error. */
 int ar_core_serve_ms(ArCore* core, int ms);
-/* Blocking serve until listen socket closed or fatal error. Returns 0. */
+/* Blocking serve until quit/shutdown or fatal error. Returns 0 on clean exit. */
 int ar_core_serve_forever(ArCore* core);
+/* P0.4 — AUTH / bind / protected-mode */
+int ar_core_set_requirepass(ArCore* core, const char* pass); /* NULL/"" clears */
+const char* ar_core_requirepass(ArCore* core); /* may be NULL */
+int ar_core_set_bind(ArCore* core, const char* addr); /* e.g. 127.0.0.1 / 0.0.0.0 */
+const char* ar_core_bind_addr(ArCore* core);
+int ar_core_set_protected_mode(ArCore* core, int on); /* 1=on 0=off; default 1 */
+int ar_core_protected_mode(ArCore* core);
+/* P0.5 — request graceful shutdown (also from SIGTERM/SIGINT when installed). */
+void ar_core_request_shutdown(ArCore* core);
+void ar_core_install_signal_handlers(ArCore* core);
 
 /* In-process string KV (also used by TCP command path). */
 int ar_set(ArCore* core, const char* key, const char* val);

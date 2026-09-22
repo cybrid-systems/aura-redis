@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <unistd.h>
+#include <signal.h>
 
 #define AR_MAX_ARGV 64
 #define AR_MAX_EVENTS 64
@@ -34,6 +35,7 @@ static void conn_reset(ArConn* c) {
   c->woff = 0;
   c->should_close = 0;
   c->want_write = 0;
+  c->authenticated = 0;
 }
 
 static ArConn* conn_alloc(ArCore* core, int fd) {
@@ -53,6 +55,9 @@ static ArConn* conn_alloc(ArCore* core, int fd) {
       conn_reset(c);
       c->fd = fd;
       c->in_use = 1;
+      /* No password configured → treat as authenticated. */
+      if (!core->requirepass || !core->requirepass[0])
+        c->authenticated = 1;
       if (i + 1 > core->nconns)
         core->nconns = i + 1;
       return c;
@@ -286,11 +291,90 @@ static int get_ptr(ArCore* core, const char* key, size_t klen,
   return 1;
 }
 
+static int pass_eq(const char* a, size_t alen, const char* pass) {
+  if (!pass)
+    return 0;
+  size_t n = strlen(pass);
+  if (alen != n)
+    return 0;
+  return memcmp(a, pass, n) == 0;
+}
+
+static int cmd_allowed_unauth(const char* cmd, size_t clen) {
+  return cmd_eq(cmd, clen, "auth") || cmd_eq(cmd, clen, "ping") ||
+         cmd_eq(cmd, clen, "quit") || cmd_eq(cmd, clen, "hello");
+}
+
+static int connected_clients(ArCore* core) {
+  int n = 0;
+  for (int i = 0; i < AR_MAX_CONN; ++i)
+    if (core->conns[i].in_use)
+      n++;
+  return n;
+}
+
 static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (argc < 1)
     return reply_err(c, "ERR empty command");
   const char* cmd = argv[0].p;
   size_t clen = argv[0].len;
+
+  /* P0.4: requirepass — unauthenticated clients limited to AUTH/PING/QUIT/HELLO */
+  if (core->requirepass && core->requirepass[0] && !c->authenticated &&
+      !cmd_allowed_unauth(cmd, clen))
+    return reply_err(c, "NOAUTH Authentication required.");
+
+  if (cmd_eq(cmd, clen, "auth")) {
+    if (!core->requirepass || !core->requirepass[0])
+      return reply_err(c, "ERR AUTH called without any password configured for "
+                          "the default user. Are you sure your configuration "
+                          "is correct?");
+    const char* pw;
+    size_t pwlen;
+    if (argc == 2) {
+      pw = argv[1].p;
+      pwlen = argv[1].len;
+    } else if (argc == 3) {
+      /* Redis 6 ACL form: AUTH username password — username ignored */
+      pw = argv[2].p;
+      pwlen = argv[2].len;
+    } else {
+      return reply_err(c, "ERR wrong number of arguments for 'auth'");
+    }
+    if (pass_eq(pw, pwlen, core->requirepass)) {
+      c->authenticated = 1;
+      return reply_ok(c);
+    }
+    return reply_err(c, "WRONGPASS invalid username-password pair");
+  }
+  if (cmd_eq(cmd, clen, "hello")) {
+    /* Minimal HELLO: optional AUTH inline; reply simple map-ish array */
+    for (int i = 1; i + 1 < argc; ++i) {
+      if (cmd_eq(argv[i].p, argv[i].len, "auth")) {
+        if (i + 2 < argc) {
+          /* AUTH user pass */
+          if (core->requirepass && core->requirepass[0] &&
+              pass_eq(argv[i + 2].p, argv[i + 2].len, core->requirepass))
+            c->authenticated = 1;
+          else if (core->requirepass && core->requirepass[0])
+            return reply_err(c, "WRONGPASS invalid username-password pair");
+        } else if (i + 1 < argc) {
+          if (core->requirepass && core->requirepass[0] &&
+              pass_eq(argv[i + 1].p, argv[i + 1].len, core->requirepass))
+            c->authenticated = 1;
+          else if (core->requirepass && core->requirepass[0])
+            return reply_err(c, "WRONGPASS invalid username-password pair");
+        }
+      }
+    }
+    char buf[128];
+    int n = snprintf(buf, sizeof(buf),
+                     "*4\r\n$6\r\nserver\r\n$10\r\naura-redis\r\n"
+                     "$7\r\nversion\r\n$3\r\n0.1\r\n");
+    if (n < 0)
+      return reply_err(c, "ERR hello");
+    return wbuf_append(c, buf, (size_t)n);
+  }
 
   if (cmd_eq(cmd, clen, "ping")) {
     if (argc == 1)
@@ -474,55 +558,78 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     }
     return reply_err(c, "ERR wrong number of arguments for 'evict'");
   }
-  /* INFO — multi-signal metrics for Aura policy agent (MVP M1). */
+  /* INFO — Redis-ish sections; keep flat metric keys for policy_agent (P0.6). */
   if (cmd_eq(cmd, clen, "info")) {
     char hints[160];
     ar_core_policy_hints(core, hints, sizeof(hints));
-    char buf[1280];
-    int n = snprintf(buf, sizeof(buf),
-                     "# aura-redis\n"
-                     "evict:%s\n"
-                     "layout:%s\n"
-                     "gets:%llu\n"
-                     "sets:%llu\n"
-                     "hits:%llu\n"
-                     "misses:%llu\n"
-                     "evicted:%llu\n"
-                     "expired:%llu\n"
-                     "keys:%llu\n"
-                     "keys_with_ttl:%llu\n"
-                     "avg_ttl_ms:%llu\n"
-                     "samples:%d\n"
-                     "pinned:%llu\n"
-                     "used_memory:%llu\n"
-                     "maxmemory:%llu\n"
-                     "plugin:%d\n"
-                     "plugin_reloads:%llu\n"
-                     "layout_gen:%llu\n"
-                     "hot_keys:%llu\n"
-                     "cold_keys:%llu\n"
-                     "policy_hints:%s\n",
-                     ar_core_evict_name(core),
-                     ar_core_layout_name(core),
-                     (unsigned long long)ar_metric_gets(core),
-                     (unsigned long long)ar_metric_sets(core),
-                     (unsigned long long)ar_metric_hits(core),
-                     (unsigned long long)ar_metric_misses(core),
-                     (unsigned long long)ar_metric_evicted(core),
-                     (unsigned long long)ar_metric_expired(core),
-                     (unsigned long long)ar_core_nkeys(core),
-                     (unsigned long long)ar_core_keys_with_ttl(core),
-                     (unsigned long long)ar_core_avg_ttl_ms(core),
-                     ar_core_evict_samples(core),
-                     (unsigned long long)ar_core_pinned_keys(core),
-                     (unsigned long long)ar_core_used_memory(core),
-                     (unsigned long long)ar_core_maxmemory(core),
-                     ar_core_has_evict_plugin(core),
-                     (unsigned long long)ar_metric_plugin_reloads(core),
-                     (unsigned long long)ar_core_layout_gen(core),
-                     (unsigned long long)ar_core_hot_keys(core),
-                     (unsigned long long)ar_core_cold_keys(core),
-                     hints);
+    char buf[2048];
+    int n = snprintf(
+        buf, sizeof(buf),
+        "# Server\n"
+        "aura_redis_version:0.1\n"
+        "tcp_port:%d\n"
+        "binding:%s\n"
+        "protected_mode:%s\n"
+        "requirepass:%s\n"
+        "# Clients\n"
+        "connected_clients:%d\n"
+        "# Memory\n"
+        "used_memory:%llu\n"
+        "maxmemory:%llu\n"
+        "# Stats\n"
+        "ops:%llu\n"
+        "gets:%llu\n"
+        "sets:%llu\n"
+        "hits:%llu\n"
+        "misses:%llu\n"
+        "evicted:%llu\n"
+        "expired:%llu\n"
+        "# Keyspace\n"
+        "keys:%llu\n"
+        "keys_with_ttl:%llu\n"
+        "avg_ttl_ms:%llu\n"
+        "# Persistence\n"
+        "loading:0\n"
+        "aof_enabled:0\n"
+        "rdb_bgsave_in_progress:0\n"
+        "# Aura\n"
+        "evict:%s\n"
+        "layout:%s\n"
+        "samples:%d\n"
+        "pinned:%llu\n"
+        "plugin:%d\n"
+        "plugin_reloads:%llu\n"
+        "layout_gen:%llu\n"
+        "hot_keys:%llu\n"
+        "cold_keys:%llu\n"
+        "policy_hints:%s\n",
+        core->tcp_port,
+        core->bind_addr[0] ? core->bind_addr : "127.0.0.1",
+        core->protected_mode ? "yes" : "no",
+        (core->requirepass && core->requirepass[0]) ? "yes" : "no",
+        connected_clients(core),
+        (unsigned long long)ar_core_used_memory(core),
+        (unsigned long long)ar_core_maxmemory(core),
+        (unsigned long long)ar_metric_ops(core),
+        (unsigned long long)ar_metric_gets(core),
+        (unsigned long long)ar_metric_sets(core),
+        (unsigned long long)ar_metric_hits(core),
+        (unsigned long long)ar_metric_misses(core),
+        (unsigned long long)ar_metric_evicted(core),
+        (unsigned long long)ar_metric_expired(core),
+        (unsigned long long)ar_core_nkeys(core),
+        (unsigned long long)ar_core_keys_with_ttl(core),
+        (unsigned long long)ar_core_avg_ttl_ms(core),
+        ar_core_evict_name(core),
+        ar_core_layout_name(core),
+        ar_core_evict_samples(core),
+        (unsigned long long)ar_core_pinned_keys(core),
+        ar_core_has_evict_plugin(core),
+        (unsigned long long)ar_metric_plugin_reloads(core),
+        (unsigned long long)ar_core_layout_gen(core),
+        (unsigned long long)ar_core_hot_keys(core),
+        (unsigned long long)ar_core_cold_keys(core),
+        hints);
     if (n < 0)
       return reply_err(c, "ERR info");
     return reply_bulk(c, buf, (size_t)n);
@@ -745,7 +852,14 @@ static int handle_read(ArCore* core, ArConn* c) {
   return process_reads(core, c);
 }
 
+static int peer_is_loopback(const struct sockaddr_in* addr) {
+  uint32_t a = ntohl(addr->sin_addr.s_addr);
+  return (a >> 24) == 127;
+}
+
 static int accept_clients(ArCore* core) {
+  if (core->shutting_down || core->listen_fd < 0)
+    return 0;
   for (;;) {
     struct sockaddr_in addr;
     socklen_t alen = sizeof(addr);
@@ -754,6 +868,17 @@ static int accept_clients(ArCore* core) {
       if (errno == EAGAIN || errno == EWOULDBLOCK)
         return 0;
       return -1;
+    }
+    /* P0.4 protected-mode: no password + non-loopback peer → refuse */
+    int has_pass = core->requirepass && core->requirepass[0];
+    if (core->protected_mode && !has_pass && !peer_is_loopback(&addr)) {
+      static const char denied[] =
+          "-DENIED aura-redis is running in protected mode because "
+          "protected-mode is enabled and no requirepass is set. Connect "
+          "from loopback, set --requirepass, or --protected-mode no.\r\n";
+      (void)!write(fd, denied, sizeof(denied) - 1);
+      close(fd);
+      continue;
     }
     set_nonblock(fd);
     int one = 1;
@@ -811,7 +936,13 @@ int ar_core_listen(ArCore* core, int port) {
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
   addr.sin_port = htons((uint16_t)port);
-  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); /* 127.0.0.1 only */
+  if (!core->bind_addr[0])
+    snprintf(core->bind_addr, sizeof(core->bind_addr), "127.0.0.1");
+  if (inet_pton(AF_INET, core->bind_addr, &addr.sin_addr) != 1) {
+    fprintf(stderr, "aura-redis: bad --bind %s\n", core->bind_addr);
+    close(fd);
+    return 0;
+  }
 
   if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
     close(fd);
@@ -838,9 +969,14 @@ int ar_core_listen(ArCore* core, int port) {
 
   core->listen_fd = fd;
   core->epfd = ep;
+  core->tcp_port = port;
   core->quit = 0;
-  fprintf(stderr, "aura-redis-ffi listening on 127.0.0.1:%d (loopback only; C epoll)\n",
-          port);
+  core->shutting_down = 0;
+  fprintf(stderr,
+          "aura-redis-ffi listening on %s:%d (protected-mode=%s requirepass=%s; "
+          "C epoll)\n",
+          core->bind_addr, port, core->protected_mode ? "yes" : "no",
+          (core->requirepass && core->requirepass[0]) ? "yes" : "no");
   fflush(stderr);
   return 1;
 }
@@ -881,11 +1017,51 @@ static int serve_once(ArCore* core, int timeout_ms) {
   return 0;
 }
 
-int ar_core_serve_ms(ArCore* core, int ms) {
+static void stop_accepting(ArCore* core) {
   if (!core || core->listen_fd < 0)
+    return;
+  epoll_ctl(core->epfd, EPOLL_CTL_DEL, core->listen_fd, NULL);
+  close(core->listen_fd);
+  core->listen_fd = -1;
+}
+
+/* Flush pending replies then close clients; hard-timeout closes remainder. */
+static void drain_clients(ArCore* core, int timeout_ms) {
+  uint64_t deadline = ar_now_ms() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0);
+  for (;;) {
+    int pending_write = 0;
+    for (int i = 0; i < AR_MAX_CONN; ++i) {
+      ArConn* c = &core->conns[i];
+      if (!c->in_use)
+        continue;
+      if (c->woff < c->wlen) {
+        pending_write = 1;
+        if (flush_writes(core, c) < 0)
+          conn_close(core, c);
+      } else {
+        conn_close(core, c);
+      }
+    }
+    if (!pending_write)
+      break;
+    if (timeout_ms <= 0 || ar_now_ms() >= deadline)
+      break;
+    if (core->epfd >= 0)
+      serve_once(core, 50);
+  }
+  for (int i = 0; i < AR_MAX_CONN; ++i) {
+    if (core->conns[i].in_use)
+      conn_close(core, &core->conns[i]);
+  }
+}
+
+int ar_core_serve_ms(ArCore* core, int ms) {
+  if (!core || (core->listen_fd < 0 && !core->shutting_down))
     return -1;
-  if (core->quit)
+  if (core->quit && !core->shutting_down)
     return 1;
+  if (core->epfd < 0)
+    return core->quit ? 1 : -1;
   int rc = serve_once(core, ms < 0 ? -1 : ms);
   if (rc < 0)
     return -1;
@@ -899,5 +1075,33 @@ int ar_core_serve_forever(ArCore* core) {
     if (serve_once(core, 1000) < 0)
       return -1;
   }
+  /* P0.5: stop accept, drain writes (2s), close, exit cleanly */
+  core->shutting_down = 1;
+  stop_accepting(core);
+  drain_clients(core, 2000);
+  fprintf(stderr, "aura-redis: graceful shutdown complete\n");
+  fflush(stderr);
   return 0;
 }
+
+static ArCore* g_signal_core = NULL;
+
+static void ar_on_signal(int sig) {
+  (void)sig;
+  if (g_signal_core) {
+    g_signal_core->quit = 1;
+    g_signal_core->shutting_down = 1;
+  }
+}
+
+void ar_core_install_signal_handlers(ArCore* core) {
+  g_signal_core = core;
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = ar_on_signal;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  sigaction(SIGTERM, &sa, NULL);
+  sigaction(SIGINT, &sa, NULL);
+}
+

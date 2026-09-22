@@ -778,16 +778,23 @@ ArCore* ar_core_create(void) {
   c->plugin_reloads = 0;
   c->listen_fd = -1;
   c->epfd = -1;
+  c->tcp_port = 0;
+  snprintf(c->bind_addr, sizeof(c->bind_addr), "127.0.0.1");
+  c->protected_mode = 1;
+  c->requirepass = NULL;
+  c->shutting_down = 0;
   return c;
 }
 
 void ar_core_destroy(ArCore* core) {
   if (!core)
     return;
-  if (core->listen_fd >= 0) {
+  if (core->listen_fd >= 0 || core->epfd >= 0) {
     extern void ar_net_shutdown(ArCore* core);
     ar_net_shutdown(core);
   }
+  free(core->requirepass);
+  core->requirepass = NULL;
   if (core->evict_plugin) {
     dlclose(core->evict_plugin);
     core->evict_plugin = NULL;
@@ -1358,4 +1365,55 @@ int ar_core_policy_hints(ArCore* core, char* buf, size_t buflen) {
     buf[used] = '\0';
   }
   return (int)used;
+}
+
+/* P0.4 — requirepass / bind / protected-mode */
+int ar_core_set_requirepass(ArCore* core, const char* pass) {
+  if (!core)
+    return 0;
+  free(core->requirepass);
+  core->requirepass = NULL;
+  if (pass && pass[0]) {
+    size_t n = strlen(pass);
+    core->requirepass = (char*)malloc(n + 1);
+    if (!core->requirepass)
+      return 0;
+    memcpy(core->requirepass, pass, n + 1);
+  }
+  return 1;
+}
+
+const char* ar_core_requirepass(ArCore* core) {
+  return core ? core->requirepass : NULL;
+}
+
+int ar_core_set_bind(ArCore* core, const char* addr) {
+  if (!core || !addr || !addr[0])
+    return 0;
+  if (strlen(addr) >= sizeof(core->bind_addr))
+    return 0;
+  snprintf(core->bind_addr, sizeof(core->bind_addr), "%s", addr);
+  return 1;
+}
+
+const char* ar_core_bind_addr(ArCore* core) {
+  return core ? core->bind_addr : NULL;
+}
+
+int ar_core_set_protected_mode(ArCore* core, int on) {
+  if (!core)
+    return 0;
+  core->protected_mode = on ? 1 : 0;
+  return 1;
+}
+
+int ar_core_protected_mode(ArCore* core) {
+  return core ? core->protected_mode : 0;
+}
+
+void ar_core_request_shutdown(ArCore* core) {
+  if (!core)
+    return;
+  core->quit = 1;
+  core->shutting_down = 1;
 }

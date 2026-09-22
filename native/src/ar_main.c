@@ -10,6 +10,9 @@ int main(int argc, char** argv) {
   const char* evict = "noop";
   const char* plugin = NULL;
   const char* layout = NULL;
+  const char* requirepass = NULL;
+  const char* bind_addr = NULL;
+  int protected_mode = -1; /* -1 = default (on) */
   uint64_t maxmem = 0;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
@@ -22,6 +25,17 @@ int main(int argc, char** argv) {
       plugin = argv[++i];
     else if (strcmp(argv[i], "--layout") == 0 && i + 1 < argc)
       layout = argv[++i];
+    else if (strcmp(argv[i], "--requirepass") == 0 && i + 1 < argc)
+      requirepass = argv[++i];
+    else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc)
+      bind_addr = argv[++i];
+    else if (strcmp(argv[i], "--protected-mode") == 0 && i + 1 < argc) {
+      const char* v = argv[++i];
+      if (strcmp(v, "no") == 0 || strcmp(v, "0") == 0 || strcmp(v, "false") == 0)
+        protected_mode = 0;
+      else
+        protected_mode = 1;
+    }
   }
   /* Env fallbacks (Iteration 8 layout + existing eviction) */
   if (!layout || !layout[0]) {
@@ -44,12 +58,44 @@ int main(int argc, char** argv) {
     if (em && em[0] && maxmem == 0)
       maxmem = strtoull(em, NULL, 10);
   }
+  if (!requirepass || !requirepass[0]) {
+    const char* rp = getenv("AURA_REDIS_REQUIREPASS");
+    if (rp && rp[0])
+      requirepass = rp;
+  }
+  if (!bind_addr || !bind_addr[0]) {
+    const char* ba = getenv("AURA_REDIS_BIND");
+    if (ba && ba[0])
+      bind_addr = ba;
+  }
+  if (protected_mode < 0) {
+    const char* pm = getenv("AURA_REDIS_PROTECTED_MODE");
+    if (pm && pm[0]) {
+      if (strcmp(pm, "no") == 0 || strcmp(pm, "0") == 0 ||
+          strcmp(pm, "false") == 0 || strcmp(pm, "off") == 0)
+        protected_mode = 0;
+      else
+        protected_mode = 1;
+    } else {
+      protected_mode = 1;
+    }
+  }
 
   ArCore* core = ar_core_create();
   if (!core) {
     fprintf(stderr, "ar_main: create failed\n");
     return 1;
   }
+  if (bind_addr && bind_addr[0]) {
+    if (!ar_core_set_bind(core, bind_addr)) {
+      fprintf(stderr, "ar_main: bad --bind %s\n", bind_addr);
+      ar_core_destroy(core);
+      return 1;
+    }
+  }
+  ar_core_set_protected_mode(core, protected_mode);
+  if (requirepass && requirepass[0])
+    ar_core_set_requirepass(core, requirepass);
   if (layout && layout[0]) {
     if (!ar_core_set_layout(core, layout)) {
       fprintf(stderr, "ar_main: bad layout %s (want flat|hot_cold)\n", layout);
@@ -64,6 +110,7 @@ int main(int argc, char** argv) {
     ar_core_set_evict_by_name(core, evict);
   if (maxmem)
     ar_core_set_maxmemory(core, maxmem);
+  ar_core_install_signal_handlers(core);
   if (ar_core_listen(core, port) != 1) {
     fprintf(stderr, "ar_main: listen %d failed\n", port);
     ar_core_destroy(core);
