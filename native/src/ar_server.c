@@ -558,6 +558,111 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     }
     return reply_err(c, "ERR wrong number of arguments for 'evict'");
   }
+  /* P1.1 — CONFIG GET/SET (runtime knobs; not persisted). */
+  if (cmd_eq(cmd, clen, "config")) {
+    if (argc < 2)
+      return reply_err(c, "ERR wrong number of arguments for 'config'");
+    if (cmd_eq(argv[1].p, argv[1].len, "get")) {
+      if (argc != 3)
+        return reply_err(c, "ERR wrong number of arguments for 'config|get'");
+      char pat[64];
+      size_t pl = argv[2].len < sizeof(pat) - 1 ? argv[2].len : sizeof(pat) - 1;
+      memcpy(pat, argv[2].p, pl);
+      pat[pl] = '\0';
+      /* Collect matching pairs into temp buffer as RESP array */
+      char pairs[1024];
+      int pn = 0;
+      int nitems = 0;
+      char tmp[256];
+#define AR_CFG_ADD(name, valfmt, ...)                                          \
+  do {                                                                         \
+    int match = (strcmp(pat, "*") == 0) || (strcmp(pat, name) == 0);             \
+    if (match) {                                                               \
+      int kn = snprintf(tmp, sizeof(tmp), "$%zu\r\n%s\r\n", strlen(name), name); \
+      if (kn > 0 && pn + kn < (int)sizeof(pairs)) {                            \
+        memcpy(pairs + pn, tmp, (size_t)kn);                                   \
+        pn += kn;                                                              \
+      }                                                                        \
+      int vn = snprintf(tmp, sizeof(tmp), valfmt, __VA_ARGS__);                \
+      if (vn >= 0) {                                                            \
+        char bulk[320];                                                        \
+        int bn = snprintf(bulk, sizeof(bulk), "$%d\r\n%.*s\r\n", vn, vn, tmp);  \
+        if (bn > 0 && pn + bn < (int)sizeof(pairs)) {                          \
+          memcpy(pairs + pn, bulk, (size_t)bn);                                \
+          pn += bn;                                                            \
+          nitems += 2;                                                         \
+        }                                                                      \
+      }                                                                        \
+    }                                                                          \
+  } while (0)
+      {
+        char vbuf[64];
+        snprintf(vbuf, sizeof(vbuf), "%llu",
+                 (unsigned long long)ar_core_maxmemory(core));
+        AR_CFG_ADD("maxmemory", "%s", vbuf);
+      }
+      AR_CFG_ADD("requirepass", "%s",
+                 (core->requirepass && core->requirepass[0]) ? core->requirepass
+                                                             : "");
+      AR_CFG_ADD("protected-mode", "%s",
+                 core->protected_mode ? "yes" : "no");
+      {
+        char vbuf[32];
+        snprintf(vbuf, sizeof(vbuf), "%d", ar_core_evict_samples(core));
+        AR_CFG_ADD("evict-samples", "%s", vbuf);
+      }
+      AR_CFG_ADD("bind", "%s",
+                 core->bind_addr[0] ? core->bind_addr : "127.0.0.1");
+#undef AR_CFG_ADD
+      char hdr[32];
+      int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", nitems);
+      if (hn < 0 || wbuf_append(c, hdr, (size_t)hn) < 0)
+        return -1;
+      if (pn > 0 && wbuf_append(c, pairs, (size_t)pn) < 0)
+        return -1;
+      return 0;
+    }
+    if (cmd_eq(argv[1].p, argv[1].len, "set")) {
+      if (argc != 4)
+        return reply_err(c, "ERR wrong number of arguments for 'config|set'");
+      char key[64], val[256];
+      size_t kl = argv[2].len < sizeof(key) - 1 ? argv[2].len : sizeof(key) - 1;
+      size_t vl = argv[3].len < sizeof(val) - 1 ? argv[3].len : sizeof(val) - 1;
+      memcpy(key, argv[2].p, kl);
+      key[kl] = '\0';
+      memcpy(val, argv[3].p, vl);
+      val[vl] = '\0';
+      /* case-insensitive key match via cmd_eq */
+      if (cmd_eq(argv[2].p, argv[2].len, "maxmemory")) {
+        uint64_t m = strtoull(val, NULL, 10);
+        ar_core_set_maxmemory(core, m);
+        return reply_ok(c);
+      }
+      if (cmd_eq(argv[2].p, argv[2].len, "requirepass")) {
+        if (!ar_core_set_requirepass(core, val))
+          return reply_err(c, "ERR config set requirepass");
+        /* Existing connections keep auth state; new ones need AUTH if set */
+        return reply_ok(c);
+      }
+      if (cmd_eq(argv[2].p, argv[2].len, "protected-mode")) {
+        int on = !(strcmp(val, "no") == 0 || strcmp(val, "0") == 0 ||
+                   strcmp(val, "false") == 0);
+        ar_core_set_protected_mode(core, on);
+        return reply_ok(c);
+      }
+      if (cmd_eq(argv[2].p, argv[2].len, "evict-samples") ||
+          cmd_eq(argv[2].p, argv[2].len, "samples")) {
+        int n = atoi(val);
+        if (!ar_core_set_evict_samples(core, n))
+          return reply_err(c, "ERR config set evict-samples");
+        return reply_ok(c);
+      }
+      return reply_err(c, "ERR Unknown option or number of arguments for CONFIG "
+                          "SET");
+    }
+    return reply_err(c, "ERR CONFIG subcommand must be GET or SET");
+  }
+
   /* INFO — Redis-ish sections; keep flat metric keys for policy_agent (P0.6). */
   if (cmd_eq(cmd, clen, "info")) {
     char hints[160];

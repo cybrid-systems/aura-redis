@@ -82,7 +82,8 @@
 | Aura-native control (iter 9) | **DONE** |
 | MVP M0–M5 | **DONE** |
 | High-ROI M6–M12 (mutation, TTL kernel, soft-goal, evolve, prefix POLICY) | **DONE** |
-| **Production P0** | **P0.1–P0.7 DONE** → next P1.1 CONFIG |
+| **Production P0** | **P0.1–P0.7 DONE** |
+| **P1.1 CONFIG** | **DONE** (runtime; no persist) → next P1.9 policy_agent HA |
 | **Production P1–P3** | **ACTIVE** ← you are here |
 
 MVP/explore remains valuable demos; **ship bar moves to this document.**
@@ -135,3 +136,4 @@ Production does **not** mean “C-only Redis clone.”
 | 2026-09-22 | **P0.5** | SIGTERM/SIGINT drain; `tests/test_prod_shutdown.py` clean exit 0 |
 | 2026-09-22 | **P0.6** | INFO Server/Clients/Memory/Stats/Keyspace/Persistence/Aura; flat keys for policy_agent; `tests/test_prod_info.py` |
 | 2026-09-22 | **P0.7** | `scripts/prod-soak.sh` + `tests/test_prod_soak.py`; `scripts/ci-prod.sh` P0.1–P0.7; CI workflow note |
+| 2026-09-22 | **P1.1** (start) | `CONFIG GET/SET` maxmemory/requirepass/protected-mode/evict-samples/bind; `tests/test_prod_config.py` |
