@@ -374,6 +374,57 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     /* redis-benchmark / some clients probe; reply empty array */
     return wbuf_append(c, "*0\r\n", 4);
   }
+  /* Aura-native control plane: EVICT [name] — query or select built-in
+   * eviction kernel (noop|lru|lfu). Policy agents apply swaps via RESP
+   * instead of FFI soup (see docs/aura-native-control.md). */
+  if (cmd_eq(cmd, clen, "evict")) {
+    if (argc == 1) {
+      const char* name = ar_core_evict_name(core);
+      return reply_bulk(c, name, strlen(name));
+    }
+    if (argc == 2) {
+      char namebuf[64];
+      if (argv[1].len == 0 || argv[1].len >= sizeof(namebuf))
+        return reply_err(c, "ERR bad evict (want noop|lru|lfu)");
+      memcpy(namebuf, argv[1].p, argv[1].len);
+      namebuf[argv[1].len] = '\0';
+      if (!ar_core_set_evict_by_name(core, namebuf))
+        return reply_err(c, "ERR bad evict (want noop|lru|lfu)");
+      return reply_ok(c);
+    }
+    return reply_err(c, "ERR wrong number of arguments for 'evict'");
+  }
+  /* INFO — metrics bulk for Aura policy agent (no FFI required). */
+  if (cmd_eq(cmd, clen, "info")) {
+    char buf[512];
+    int n = snprintf(buf, sizeof(buf),
+                     "# aura-redis\n"
+                     "evict:%s\n"
+                     "layout:%s\n"
+                     "gets:%llu\n"
+                     "sets:%llu\n"
+                     "hits:%llu\n"
+                     "misses:%llu\n"
+                     "evicted:%llu\n"
+                     "used_memory:%llu\n"
+                     "maxmemory:%llu\n"
+                     "plugin:%d\n"
+                     "plugin_reloads:%llu\n",
+                     ar_core_evict_name(core),
+                     ar_core_layout_name(core),
+                     (unsigned long long)ar_metric_gets(core),
+                     (unsigned long long)ar_metric_sets(core),
+                     (unsigned long long)ar_metric_hits(core),
+                     (unsigned long long)ar_metric_misses(core),
+                     (unsigned long long)ar_metric_evicted(core),
+                     (unsigned long long)ar_core_used_memory(core),
+                     (unsigned long long)ar_core_maxmemory(core),
+                     ar_core_has_evict_plugin(core),
+                     (unsigned long long)ar_metric_plugin_reloads(core));
+    if (n < 0)
+      return reply_err(c, "ERR info");
+    return reply_bulk(c, buf, (size_t)n);
+  }
   /* Iteration 8: LAYOUT [name] — query or migrate dict layout (quiescent). */
   if (cmd_eq(cmd, clen, "layout")) {
     if (argc == 1) {
@@ -423,6 +474,14 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         return reply_err(c, "ERR bad plugin path");
       memcpy(pathbuf, argv[1].p, argv[1].len);
       pathbuf[argv[1].len] = '\0';
+      {
+        /* Sandbox / Aura-native profile: refuse .so escape hatch. */
+        const char* deny = getenv("AURA_REDIS_DENY_PLUGIN");
+        if (deny && deny[0] && strcmp(deny, "0") != 0 &&
+            strcmp(deny, "false") != 0 && strcmp(deny, "off") != 0 &&
+            strcmp(deny, "FALSE") != 0 && strcmp(deny, "OFF") != 0)
+          return reply_err(c, "ERR PLUGIN denied (AURA_REDIS_DENY_PLUGIN; Aura-native path)");
+      }
       if (!ar_core_load_evict_plugin(core, pathbuf))
         return reply_err(c, "ERR plugin load failed");
       return reply_ok(c);

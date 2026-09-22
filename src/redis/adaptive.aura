@@ -15,7 +15,7 @@
 ;     top-level (c-func) binds with (require)/(load) closures makes user
 ;     procedures inert. See comments in server_ffi.aura.
 ;
-; hot-strategy: not wired (Iteration 7 can hot-update strategy .so).
+; hot-strategy: wired in policy_agent.aura (Iteration 9) — not this FFI file.
 
 (export adaptive-rules-doc
         adaptive-choose

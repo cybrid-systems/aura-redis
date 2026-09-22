@@ -13,7 +13,7 @@ Pinned Aura revision: [`b0c6b3555e4287c8807b019a8b9316ee94c988b6`](https://githu
 Detailed design: [`docs/architecture.md`](docs/architecture.md)  
 Iteration plan: [`docs/iteration-plan.md`](docs/iteration-plan.md)
 
-**Direction:** C data plane via Aura `std/ffi` + Aura control plane for adaptive eviction/layout (self-modification). Pure Lisp engine remains as `AURA_REDIS_ENGINE=aura`.
+**Direction:** C data plane for fast GET/SET + built-in kernels; **Aura mutates policy code** (`hot-strategy` / sandbox) and applies via RESP `EVICT`/`LAYOUT`. PLUGIN/.so is an escape hatch only — see [`docs/aura-native-control.md`](docs/aura-native-control.md).
 
 ---
 
@@ -27,7 +27,9 @@ Iteration plan: [`docs/iteration-plan.md`](docs/iteration-plan.md)
 | `AURA_REDIS_MAXMEMORY` | bytes; enables eviction when strategy ≠ `noop` |
 | `AURA_REDIS_EVICT` | `noop` \| `lru` \| `lfu` |
 | `AURA_REDIS_ADAPTIVE` | `1` = Aura supervisor polls metrics and swaps `lru`↔`lfu` via `serve_ms` pump |
-| `AURA_REDIS_EVICT_SO` | path to eviction plugin `.so` (Iteration 7; overrides `EVICT`) |
+| `AURA_REDIS_EVICT_SO` | path to eviction plugin `.so` (**escape hatch**; overrides name) |
+| `AURA_REDIS_DENY_PLUGIN` | `1` = refuse RESP `PLUGIN` (Aura-native profile) |
+| `AURA_REDIS_POLICY_DEMO` | `1` = timed hot-strategy invert+heal in `policy_agent` |
 | `AURA_REDIS_LAYOUT` | `flat` \| `hot_cold` (Iteration 8 dict layout) |
 | `AURA_REDIS_LAYOUT_ADAPTIVE` | `1` = adapt layout from adaptive tick |
 
@@ -45,6 +47,17 @@ python3 tests/test_plugin_reload.py         # live PLUGIN swap mid-traffic (no r
 ./scripts/demo-plugin-reload.sh            # same as above
 python3 tests/test_layout.py                # flat↔hot_cold migrate under load
 ```
+
+### Aura-native adaptation (moat)
+
+```bash
+./scripts/demo-aura-native.sh              # C server + policy_agent hot-strategy + loads
+python3 tests/test_aura_native.py          # EVICT / INFO / DENY_PLUGIN smoke
+python3 tests/test_aura_native.py --unit-aura
+source scripts/sandbox-policy-profile.sh   # DENY_PLUGIN=1; no ffi required for agent
+```
+
+Story: mutate `choose-fn` under sandbox → `EVICT lru|lfu|noop`. Not “swap a .so”.
 
 **Perf (2026-09-22):** C data plane memtier p=1 **~1.13× Redis**, p=16 **~1.30× Redis**; Lisp path ~143 ops/s. Details: [`docs/perf-log.md`](docs/perf-log.md).
 
@@ -202,9 +215,12 @@ src/redis/resp.aura          RESP2 encode/decode
 src/redis/store.aura         in-memory KV (+ list/hash); lazy TTL
 src/redis/commands.aura      command dispatch
 src/redis/server.aura        pure Lisp engine (AURA_REDIS_ENGINE=aura)
-src/redis/server_ffi.aura    FFI control plane → C serve_forever
+src/redis/policy_agent.aura  Aura-native control (hot-strategy → EVICT)
+src/redis/policy/            choose-fn body strings
+src/redis/server_ffi.aura    optional FFI serve + inlined adaptive
 src/redis/ffi_boot.aura      in-process FFI helpers
-native/                      libaura_redis_core.so (epoll/RESP/dict/evict)
+docs/aura-native-control.md  sandbox + mutation + hot-strategy story
+native/                      libaura_redis_core.so + aura_redis_server
 scripts/build-native.sh
 scripts/run-server-ffi.sh
 scripts/memtier-cmp.sh

@@ -94,6 +94,16 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 ---
 
+## Iteration 9 — Aura-native mutate / hot-strategy control plane ✅
+
+**Goal:** Maximize sandbox + mutation + hot-strategy; demote PLUGIN/.so as moat.
+
+**Exit:** RESP `EVICT`/`INFO`; `policy_agent.aura` + policy bodies; demo shows choose-fn swap changes eviction under two loads; heal smoked; docs.
+
+**Result:** Split C `aura_redis_server` + Aura `policy_agent` (RESP apply — avoids FFI+closure inertness); `hot-strategy:register!/swap!/heal!` + `mutate:safety-snapshot`; `AURA_REDIS_DENY_PLUGIN`; `docs/aura-native-control.md`; `scripts/demo-aura-native.sh` / `tests/test_aura_native.py` / `tests/test_hot_strategy_policy.aura`.
+
+---
+
 ## Parallel track (not blocking gates)
 
 - Keep pure `AURA_REDIS_ENGINE=aura` for reference tests.
@@ -104,4 +114,4 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 ## Current position
 
-**Iterations 0–8 done.** Iter 7 stretch (live dlopen plugin reload under traffic) **done**; AOT/`aot:reload` path intentionally deferred (documented).
+**Iterations 0–9 done.** Aura-native path is the product story; PLUGIN remains escape hatch (DENY_PLUGIN under sandbox profile).

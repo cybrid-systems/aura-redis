@@ -1,0 +1,319 @@
+; policy_agent.aura — Aura-native control plane (no FFI soup)
+;
+; Split architecture (see docs/aura-native-control.md):
+;   C aura_redis_server  = data plane (GET/SET + EVICT/LAYOUT/INFO kernels)
+;   this process         = policy workspace: hot-strategy mutate choose-fn,
+;                          apply via RESP EVICT / LAYOUT
+;
+; Why separate process: on this Aura rev, many top-level c-func binds make
+; user closures inert — so hot-strategy must live in a fresh workspace.
+;
+; Env:
+;   AURA_REDIS_PORT          target C server (default 6379)
+;   AURA_REDIS_HOST          default 127.0.0.1
+;   AURA_REDIS_POLICY_DEMO=1 timed swap+heal demo then exit
+;   AURA_REDIS_POLICY_MS     tick period (default 200)
+
+(require "std/mutate" all:)
+(require "std/hot-strategy" all:)
+(require "std/socket" all:)
+(require "src/redis/policy/choose_normal" all:)
+(require "src/redis/policy/choose_inverted" all:)
+(require "src/redis/policy/choose_broken" all:)
+
+(define *host* "127.0.0.1")
+(define *port* 6379)
+(define *tick-ms* 200)
+(define *demo* #f)
+(define *fatal* #f)
+(define *sock* #f)
+(define *running* #t)
+(define *exit* 1)
+(define *swaps* 0)
+(define *applies* 0)
+(define *heals* 0)
+
+(define *prev-gets* 0)
+(define *prev-sets* 0)
+(define *prev-hits* 0)
+(define *prev-misses* 0)
+(define *have-prev* #f)
+
+(define *t0* 0)
+(define *phase* 0)
+(define *did-invert* #f)
+(define *did-heal* #f)
+
+; ── env ──
+(let ((e (getenv "AURA_REDIS_HOST")))
+  (if (and (string? e) (> (string-length e) 0)) (set! *host* e) #t))
+(let ((e (getenv "AURA_REDIS_PORT")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *port* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_POLICY_MS")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *tick-ms* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_POLICY_DEMO")))
+  (set! *demo*
+    (and (string? e)
+         (or (string=? e "1") (string=? e "true") (string=? e "yes")))))
+
+; ── tiny string helpers ──
+(define (find-substr s pat start)
+  (let ((n (string-length s))
+        (m (string-length pat))
+        (i start)
+        (found -1))
+    (while (and (< i n) (< found 0))
+      (begin
+        (if (and (<= (+ i m) n)
+                 (string=? (substring s i (+ i m)) pat))
+          (set! found i)
+          (set! i (+ i 1)))))
+    found))
+
+(define (info-get text key)
+  (let ((pat (string-append key ":"))
+        (pos (find-substr text (string-append key ":") 0)))
+    (if (< pos 0)
+      ""
+      (let ((start (+ pos (string-length pat)))
+            (end (find-substr text "\n" (+ pos (string-length pat)))))
+        (if (< end 0)
+          (substring text start (string-length text))
+          (substring text start end))))))
+
+(define (info-num text key)
+  (let ((v (string->number (info-get text key))))
+    (if (number? v) v 0)))
+
+(define (busy-wait-ms ms)
+  (let ((t0 (monotonic-ms)))
+    (while (< (- (monotonic-ms) t0) ms) 0)
+    #t))
+
+; ── RESP client (encode array of bulk strings; parse simple/bulk/err) ──
+(define (resp-encode-bulk s)
+  (string-append "$" (number->string (string-length s)) "\r\n" s "\r\n"))
+
+(define (resp-encode-cmd args)
+  (let ((out (string-append "*" (number->string (length args)) "\r\n"))
+        (xs args))
+    (while (pair? xs)
+      (begin
+        (set! out (string-append out (resp-encode-bulk (car xs))))
+        (set! xs (cdr xs))))
+    out))
+
+(define (resp-parse-one buf)
+  ; returns (list consumed value) or #f if incomplete; value may be string / "OK" / error string prefixed ERR
+  (if (or (not (string? buf)) (= (string-length buf) 0))
+    #f
+    (let ((t (substring buf 0 1)))
+      (cond
+        ((or (string=? t "+") (string=? t "-") (string=? t ":"))
+         (let ((cr (find-substr buf "\r\n" 0)))
+           (if (< cr 0)
+             #f
+             (list (+ cr 2)
+                   (if (string=? t "-")
+                     (string-append "ERR " (substring buf 1 cr))
+                     (substring buf 1 cr))))))
+        ((string=? t "$")
+         (let ((cr (find-substr buf "\r\n" 0)))
+           (if (< cr 0)
+             #f
+             (let ((n (string->number (substring buf 1 cr))))
+               (if (not (number? n))
+                 #f
+                 (if (< n 0)
+                   (list (+ cr 2) "")
+                   (let ((start (+ cr 2))
+                         (end (+ (+ cr 2) n)))
+                     (if (< (string-length buf) (+ end 2))
+                       #f
+                       (list (+ end 2) (substring buf start end))))))))))
+        (else #f)))))
+
+(define (redis-call! sock . args)
+  (let ((wire (resp-encode-cmd args)))
+    (tcp-send sock wire)
+    (let ((buf "")
+          (done #f)
+          (result ""))
+      (while (not done)
+        (begin
+          (let ((chunk (tcp-recv sock 65536)))
+            (if (or (not (string? chunk)) (= (string-length chunk) 0))
+              (begin (set! done #t) (set! result "ERR closed"))
+              (begin
+                (set! buf (string-append buf chunk))
+                (let ((parsed (resp-parse-one buf)))
+                  (if parsed
+                    (begin
+                      (set! result (cadr parsed))
+                      (set! done #t))
+                    #t)))))))
+      result)))
+
+; ── seed choose-fn in workspace for hot-strategy ──
+(display "policy_agent: seeding choose-fn (hot-strategy)\n")
+(set-code "(define (choose-fn dgets dsets dhits dmisses) \"\")")
+(eval-current)
+
+(define *safety* (mutate:safety-snapshot))
+(display "policy_agent: mutate:safety-snapshot ok boundary-safe? probe\n")
+(display "policy_agent: mutate:boundary-safe?=")
+(display (mutate:boundary-safe?))
+(newline)
+
+(hot-strategy:register! "choose-fn" *policy-choose-normal*)
+(let ((r (hot-strategy:swap! "choose-fn" *policy-choose-normal* "seed-normal")))
+  (display "policy_agent: register/swap normal → ")
+  (display r)
+  (newline))
+
+; ── connect to C data plane ──
+(display "policy_agent: connect ")
+(display *host*)
+(display ":")
+(display *port*)
+(newline)
+
+(set! *sock* (tcp-connect *host* *port*))
+(if (not (number? *sock*))
+  (begin
+    (display "policy_agent: tcp-connect failed\n")
+    (set! *fatal* #t))
+  (begin
+    (display "policy_agent: PING → ")
+    (display (redis-call! *sock* "PING"))
+    (newline)))
+
+(if (and (not *fatal*) *demo*)
+  (begin
+    (display "policy_agent: DEMO mode (normal → invert swap → heal)\n")
+    (set! *t0* (monotonic-ms)))
+  #t)
+
+(if (not *fatal*)
+  (while *running*
+    (begin
+      (busy-wait-ms *tick-ms*)
+      ; safety before any swap in demo phases
+      (let ((info (redis-call! *sock* "INFO")))
+        (if (or (not (string? info)) (string=? (substring info 0 (if (< (string-length info) 3) (string-length info) 3)) "ERR"))
+          (begin
+            (display "policy_agent: INFO failed: ")
+            (display info)
+            (newline)
+            (set! *running* #f))
+          (begin
+            (let ((g (info-num info "gets"))
+                  (s (info-num info "sets"))
+                  (h (info-num info "hits"))
+                  (m (info-num info "misses"))
+                  (cur (info-get info "evict")))
+              (let ((dgets (if *have-prev* (- g *prev-gets*) 0))
+                    (dsets (if *have-prev* (- s *prev-sets*) 0))
+                    (dhits (if *have-prev* (- h *prev-hits*) 0))
+                    (dmisses (if *have-prev* (- m *prev-misses*) 0)))
+                (set! *prev-gets* g)
+                (set! *prev-sets* s)
+                (set! *prev-hits* h)
+                (set! *prev-misses* m)
+                (set! *have-prev* #t)
+                (let ((choice (choose-fn dgets dsets dhits dmisses)))
+                  (if (and (string? choice)
+                           (> (string-length choice) 0)
+                           (not (string=? choice cur)))
+                    (begin
+                      (display "policy_agent: EVICT ")
+                      (display cur)
+                      (display " → ")
+                      (display choice)
+                      (display " (dgets=")
+                      (display dgets)
+                      (display " dsets=")
+                      (display dsets)
+                      (display ")\n")
+                      (redis-call! *sock* "EVICT" choice)
+                      (set! *applies* (+ *applies* 1))
+                      (set! *swaps* (+ *swaps* 1)))
+                    #t)))))))
+      ; demo phase machine
+      (if *demo*
+        (let ((elapsed (- (monotonic-ms) *t0*)))
+          (if (and (not *did-invert*) (>= elapsed 3000))
+            (begin
+              (display "policy_agent: hot-strategy:swap! → inverted (demo)\n")
+              (if (mutate:boundary-safe?)
+                (begin
+                  (mutate:safety-snapshot)
+                  (let ((r (hot-strategy:swap! "choose-fn" *policy-choose-inverted* "demo-invert")))
+                    (display "policy_agent: swap inverted result=")
+                    (display r)
+                    (newline)
+                    (set! *did-invert* #t)
+                    (set! *swaps* (+ *swaps* 1))))
+                (display "policy_agent: skip invert (boundary not safe)\n")))
+            #t)
+          (if (and *did-invert* (not *did-heal*) (>= elapsed 6500))
+            (begin
+              (display "policy_agent: attempting broken body (expect heal)\n")
+              (mutate:safety-snapshot)
+              (let ((r (hot-strategy:swap! "choose-fn" *policy-choose-broken* "demo-broken")))
+                (display "policy_agent: broken swap result=")
+                (display r)
+                (newline)
+                ; Even if swap "succeeds" at rebind, call may fail — force heal path
+                (let ((probe (try (choose-fn 100 10 90 10) (catch (e) "FAIL"))))
+                  (display "policy_agent: probe after broken=")
+                  (display probe)
+                  (newline)
+                  (if (or (not (car r)) (string=? (if (string? probe) probe "") "FAIL")
+                          (not (string? probe)))
+                    (begin
+                      (display "policy_agent: hot-strategy:heal!\n")
+                      (hot-strategy:heal!)
+                      (set! *heals* (+ *heals* 1))
+                      (display "policy_agent: healed body active; version=")
+                      (display (hot-strategy:version))
+                      (newline))
+                    (begin
+                      ; swap reported ok but we still heal to exercise path
+                      (display "policy_agent: force heal! (smoke)\n")
+                      (hot-strategy:heal!)
+                      (set! *heals* (+ *heals* 1)))))
+                (set! *did-heal* #t)))
+            #t)
+          (if (>= elapsed 10000)
+            (begin
+              (display "policy_agent: demo done applies=")
+              (display *applies*)
+              (display " swaps=")
+              (display *swaps*)
+              (display " heals=")
+              (display *heals*)
+              (newline)
+              (display "policy_agent: mutate:summary=")
+              (display (mutate:summary))
+              (newline)
+              (set! *running* #f)
+              (set! *exit* 0))
+            #t))
+        #t)))
+  #t)
+
+(if (number? *sock*)
+  (tcp-close *sock*)
+  #t)
+
+(display "policy_agent: exit applies=")
+(display *applies*)
+(display " heals=")
+(display *heals*)
+(newline)
+(if *fatal* (set! *exit* 1) #t)

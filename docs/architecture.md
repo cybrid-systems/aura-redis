@@ -33,8 +33,13 @@ Redis is a **fixed** C data plane + fixed eviction knobs.
 
 **Aura Redis** should be:
 
-- **Fast** where bytes move (C kernels via existing `std/ffi`).
-- **Alive** where policy lives (Aura can **mutate / hot-swap** eviction, layout, and adaptive logic under load).
+- **Fast** where bytes move (C kernels: built-in `lru`/`lfu`/`noop` + layout).
+- **Alive** where policy lives: Aura **mutates policy code** (`std/hot-strategy` /
+  `mutate:rebind`) under sandbox discipline, then applies choices via RESP
+  `EVICT` / `LAYOUT`. See [`aura-native-control.md`](aura-native-control.md).
+
+**Not the moat:** swapping eviction `.so` files (`PLUGIN` / dlopen) — that is an
+escape hatch only.
 
 That combination is the product story—not “another C Redis with an Aura logo.”
 
@@ -43,9 +48,9 @@ That combination is the product story—not “another C Redis with an Aura logo
 ## 2. Design principles
 
 1. **Aura owns the process and policy.** The server entry remains an Aura program (or Aura-launched). C is a library, not a fork that abandons Aura.
-2. **Use existing C interop** — `std/ffi`: `c-load`, `c-func`, `c-alloc` / `c-free`, `c-opaque*`, `c-struct-*`, `ffi:pin-buffer`. Eviction strategy `.so`s reload via **`ar_core_load_evict_plugin` (dlopen)** — not Aura `aot:reload` (see §4.4).
+2. **Prefer Aura-native policy** — `std/hot-strategy` + RESP `EVICT`/`LAYOUT`/`INFO` in a **separate policy agent** (avoids FFI+closure inertness on this Aura rev). `std/ffi` remains for the optional in-process `server_ffi.aura` path.
 3. **No Redis-shaped prims in Aura core.** Generic Aura work (if ever) = better strings/buffers/hash/GC/AOT for everyone. RESP, commands, LRU, memtier gates = **aura-redis only**.
-4. **Pluggable strategies in C, chosen/rewritten from Aura.** Eviction and layout are vtables (or reloadable `.so`s). Aura decides *which* and *when* to swap.
+4. **C kernels, Aura choose-fn.** Built-in eviction/layout vtables stay in C. Aura mutates the **choose-fn** (code string) and applies the name. `PLUGIN`/.so is optional escape hatch (§4.4).
 5. **Two engines for honesty:**
    - `aura` — pure Lisp (demo / correctness reference).
    - `ffi` (default for perf) — C data plane + Aura control plane.
@@ -55,30 +60,24 @@ That combination is the product story—not “another C Redis with an Aura logo
 ## 3. Process architecture
 
 ```text
-                    ┌──────────────────────────────────────────┐
-                    │  Aura process                            │
-                    │                                          │
-  clients ──TCP──►  │  control plane (.aura)                   │
-                    │   - load libaura_redis_core.so (c-load)  │
-                    │   - bind c-func symbols                  │
-                    │   - adaptive supervisor (metrics→swap)   │
-                    │   - hot-strategy / evolve for policy     │
-                    │   - optional pure-Aura command fallback  │
-                    │              │                            │
-                    │              │ std/ffi                    │
-                    │              ▼                            │
-                    │  data plane (C, this repo)               │
-                    │   - epoll + read buffers                 │
-                    │   - RESP parse/encode                    │
-                    │   - dict + value blobs                   │
-                    │   - command table (GET/SET/…)            │
-                    │   - eviction / layout vtable             │
-                    └──────────────────────────────────────────┘
+  clients ──TCP──►  aura_redis_server (C data plane)
+                      epoll / RESP / dict / lru|lfu|noop / LAYOUT
+                      admin: EVICT, LAYOUT, INFO  (PLUGIN = escape hatch)
+                            ▲
+                            │ RESP (no FFI in agent)
+                            │
+                    policy_agent.aura (Aura control plane)
+                      hot-strategy:register!/swap!/heal!
+                      mutate:safety-snapshot / boundary-safe?
+                      choose-fn bodies in src/redis/policy/
+
+  Legacy (still supported): server_ffi.aura = FFI serve + inlined adaptive
+  (closures after many c-func binds are inert on this Aura rev).
 ```
 
 **Threading model (v1):** single-threaded event loop in C (Redis-like), called from Aura as “run forever” or “run N ms / until idle.” Aura fibers may run the **supervisor** concurrently later; dict access stays single-threaded until an explicit shard/mutex iteration.
 
-**Sandbox:** FFI needs `effect:ffi` / `AURA_SANDBOX=off` (same class as sockets). Document in run scripts.
+**Sandbox:** Policy agent needs TCP (`AURA_SANDBOX=off` or `effect:network`) but **not** `effect:ffi`. Set `AURA_REDIS_DENY_PLUGIN=1` for the Aura-native profile (`scripts/sandbox-policy-profile.sh`).
 
 ---
 
@@ -158,16 +157,19 @@ int ar_core_set_evict_by_name(void* core, const char* name); /* built-ins */
 - Decides strategy name or generates parameters (sample size, thresholds).
 - Calls `ar_core_set_evict_by_name` **or** `hot-strategy:swap!` on an Aura function that chooses the next name **or** (later) `hot-update:reload` a strategy `.so`.
 
-Self-modification paths:
+Self-modification paths (**primary = Aura-native**):
 
 | Mechanism | Use |
 |-----------|-----|
-| `std/hot-strategy` + `mutate:rebind` | Swap Aura policy lambdas (thresholds, choose-fn) |
-| `std/evolve` | Evolve policy bodies from analytics |
-| Direct `ar_core_set_evict_by_name` | Fast path for built-in C strategies (`noop`/`lru`/`lfu`) |
-| **`ar_core_load_evict_plugin` / RESP `PLUGIN`** | Live-reload eviction policy `.so` (dlopen) **without dropping the listen socket** |
+| **`std/hot-strategy` + `mutate:rebind`** | **Primary moat:** swap Aura `choose-fn` bodies; heal via snapshot |
+| RESP **`EVICT` / `LAYOUT` / `INFO`** | Apply/observe from policy agent without FFI |
+| `std/evolve` | Optional: evolve policy bodies from analytics |
+| Direct `ar_core_set_evict_by_name` | C/FFI fast path for built-ins |
+| `ar_core_load_evict_plugin` / RESP `PLUGIN` | **Escape hatch only** (denied under `AURA_REDIS_DENY_PLUGIN=1`) |
 
-#### Live plugin reload (Iteration 7 stretch)
+Details: [`aura-native-control.md`](aura-native-control.md).
+
+#### Live plugin reload (Iteration 7 stretch — escape hatch)
 
 ```c
 int ar_core_load_evict_plugin(ArCore* core, const char* so_path);
@@ -209,10 +211,11 @@ Migrate is **synchronous**, single-threaded, between commands (`layout_busy` gua
 
 | Module | Role |
 |--------|------|
-| `src/redis/server.aura` | Keep as **pure Lisp engine** (`AURA_REDIS_ENGINE=aura`) |
-| `src/redis/server_ffi.aura` | **Default perf entry:** FFI load + listen + serve + optional supervisor |
-| `src/redis/adaptive.aura` | Metrics poll → strategy selection → swap |
-| `src/redis/policy/*.aura` | Named policy bodies for `hot-strategy` |
+| `src/redis/policy_agent.aura` | **Aura-native control plane** (hot-strategy + RESP EVICT) |
+| `src/redis/policy/*.aura` | `choose-fn` body strings for hot-strategy |
+| `src/redis/server.aura` | Pure Lisp engine (`AURA_REDIS_ENGINE=aura`) |
+| `src/redis/server_ffi.aura` | Optional FFI serve + inlined adaptive (legacy/perf) |
+| `src/redis/adaptive.aura` | Choose rules (unit-testable; mirrored in agent bodies) |
 
 Env:
 
@@ -222,7 +225,9 @@ Env:
 | `AURA_REDIS_PORT` | port |
 | `AURA_REDIS_MAXMEMORY` | bytes; enables eviction |
 | `AURA_REDIS_EVICT` | initial strategy name |
-| `AURA_REDIS_ADAPTIVE` | `1` = run supervisor |
+| `AURA_REDIS_ADAPTIVE` | `1` = run inlined supervisor in `server_ffi` |
+| `AURA_REDIS_POLICY_DEMO` | `1` = policy_agent timed invert+heal demo |
+| `AURA_REDIS_DENY_PLUGIN` | `1` = refuse RESP PLUGIN (Aura-native profile) |
 
 ---
 
@@ -261,5 +266,6 @@ Env:
 | M2 | memtier p=1 Totals ≥ 20% Redis |
 | M3 | memtier p=1 Totals ≥ 80% Redis |
 | M4 | Adaptive swap LRU↔LFU under synthetic load (correctness + telemetry) |
-| M5 | Documented layout swap or hot-update strategy `.so` |
+| M5 | Aura-native hot-strategy swap + heal demo (EVICT); PLUGIN documented as escape hatch |
+| M6 | Layout migrate (`flat`↔`hot_cold`) under load |
 

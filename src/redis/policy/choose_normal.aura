@@ -1,0 +1,16 @@
+; choose_normal — default Aura eviction choose-fn body (code string)
+; Rules match Iteration 6 adaptive_body (min-ops=80).
+(export *policy-choose-normal*)
+
+(define *policy-choose-normal*
+  "(lambda (dgets dsets dhits dmisses)
+     (let ((ops (+ dgets dsets)))
+       (if (< ops 80)
+         \"\"
+         (let ((hit-pct (if (> (+ dhits dmisses) 0)
+                          (quotient (* 100 dhits) (+ dhits dmisses))
+                          0)))
+           (cond
+             ((> dsets (* dgets 2)) \"lfu\")
+             ((and (> dgets (* dsets 5)) (>= hit-pct 60)) \"lru\")
+             (else \"\"))))))")

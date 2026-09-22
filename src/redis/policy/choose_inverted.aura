@@ -1,0 +1,15 @@
+; choose_inverted — swap target for demo (write→lru, read→lfu)
+(export *policy-choose-inverted*)
+
+(define *policy-choose-inverted*
+  "(lambda (dgets dsets dhits dmisses)
+     (let ((ops (+ dgets dsets)))
+       (if (< ops 80)
+         \"\"
+         (let ((hit-pct (if (> (+ dhits dmisses) 0)
+                          (quotient (* 100 dhits) (+ dhits dmisses))
+                          0)))
+           (cond
+             ((> dsets (* dgets 2)) \"lru\")
+             ((and (> dgets (* dsets 5)) (>= hit-pct 60)) \"lfu\")
+             (else \"\"))))))")

@@ -1,0 +1,5 @@
+; choose_broken — deliberately bad body to exercise heal!
+(export *policy-choose-broken*)
+
+(define *policy-choose-broken*
+  "(lambda (dgets dsets dhits dmisses) (this-is-not-bound-xyz))")

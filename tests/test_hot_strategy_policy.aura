@@ -1,0 +1,57 @@
+; Pure-Aura smoke: hot-strategy swap + heal on choose-fn (no Redis/FFI).
+(require "std/mutate" all:)
+(require "std/hot-strategy" all:)
+(require "src/redis/policy/choose_normal" all:)
+(require "src/redis/policy/choose_inverted" all:)
+(require "src/redis/policy/choose_broken" all:)
+
+(define *fail* 0)
+
+(display "test_hot_strategy: safety-snapshot\n")
+(display (mutate:safety-snapshot))
+(newline)
+(if (not (mutate:boundary-safe?))
+  (begin (display "WARN: boundary-safe? false (continuing)\n") #t)
+  #t)
+
+(set-code "(define (choose-fn dgets dsets dhits dmisses) \"\")")
+(eval-current)
+
+(hot-strategy:register! "choose-fn" *policy-choose-normal*)
+(let ((r (hot-strategy:swap! "choose-fn" *policy-choose-normal* "test-normal")))
+  (display "swap normal=") (display r) (newline)
+  (if (not (car r)) (set! *fail* (+ *fail* 1)) #t))
+
+(define w (choose-fn 10 100 5 5))
+(display "write-heavy→") (display w) (newline)
+(if (not (string=? w "lfu")) (set! *fail* (+ *fail* 1)) #t)
+
+(define r1 (choose-fn 500 10 480 20))
+(display "read-heavy→") (display r1) (newline)
+(if (not (string=? r1 "lru")) (set! *fail* (+ *fail* 1)) #t)
+
+(let ((r (hot-strategy:swap! "choose-fn" *policy-choose-inverted* "test-invert")))
+  (display "swap invert=") (display r) (newline)
+  (if (not (car r)) (set! *fail* (+ *fail* 1)) #t))
+
+(define w2 (choose-fn 10 100 5 5))
+(display "write-heavy inverted→") (display w2) (newline)
+(if (not (string=? w2 "lru")) (set! *fail* (+ *fail* 1)) #t)
+
+; Broken body then heal
+(let ((r (hot-strategy:swap! "choose-fn" *policy-choose-broken* "test-broken")))
+  (display "swap broken=") (display r) (newline))
+(display "heal→") (display (hot-strategy:heal!)) (newline)
+(define w3 (choose-fn 10 100 5 5))
+(display "after heal write→") (display w3) (newline)
+; heal restores last-good which was inverted (last successful swap)
+(if (not (or (string=? w3 "lru") (string=? w3 "lfu")))
+  (set! *fail* (+ *fail* 1))
+  #t)
+
+(display "mutate:summary=") (display (mutate:summary)) (newline)
+(display "hot-strategy:version=") (display (hot-strategy:version)) (newline)
+
+(if (= *fail* 0)
+  (begin (display "PASS test_hot_strategy_policy\n") (define *exit* 0))
+  (begin (display "FAIL count=") (display *fail*) (newline) (define *exit* 1)))
