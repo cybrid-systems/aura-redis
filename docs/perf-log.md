@@ -1,7 +1,45 @@
 # aura-redis perf log
 
+## 2026-09-23 06:55:00 CST (Asia/Shanghai) — tip `b64fd21`
+
+**SHA:** `b64fd2171257eb50cae7fc248b69f196f4b0d7d2` (post P2 TLS)  
+**Host:** Linux x86_64, 8 CPUs, Intel Xeon (KVM); Release `aura_redis_server` (OpenSSL TLS linked).
+
+Frozen memtier: **1c×1t**, SET:GET=**1:10**, 32B, key 1..10000 **R:R**, `-n 20000`.  
+Redis: `redis:7-alpine` (Docker host net). Adaptive throughput row = Py controller (not Aura story).
+
+| Engine | pipeline | Totals ops/s | vs Redis |
+|--------|----------|--------------|----------|
+| redis:7-alpine | 1 | 42345.61 | 1.00 |
+| aura-redis C EVICT=lru | 1 | 47773.97 | **1.128** |
+| aura-redis C EVICT=lfu | 1 | 45254.19 | **1.069** |
+| aura-redis C adaptive (Py) | 1 | 46341.78 | **1.094** |
+| redis:7-alpine | 16 | 413787.40 | 1.00 |
+| aura-redis C EVICT=lru | 16 | 460553.59 | **1.113** |
+| aura-redis C EVICT=lfu | 16 | 420203.38 | **1.015** |
+| aura-redis C adaptive (Py) | 16 | 456225.19 | **1.103** |
+
+**Expanded (lru vs redis):**
+
+| Variant | redis ops/s | aura-lru ops/s | vs Redis |
+|---------|-------------|----------------|----------|
+| n=100000 p=1 | 41459.49 | 44615.93 | **1.076** |
+| n=100000 p=16 | 391785.05 | 447623.57 | **1.142** |
+| n=20000 p=8 | 256383.96 | 287079.97 | **1.120** |
+| n=20000 p=1 4c×4t | 151140.16 | 168461.66 | **1.115** |
+
+**Gates:** p=1 lru ratio ≥ **1.077** — cleared (**1.128**). Full matrix + hit-rate: **`docs/perf-eval.md`**.
+
+Hit-quality headline (Aura `policy_agent`, same SHA): `phase_marathon` adaptive **100%** / 1956 vs LRU **81.8%** / LFU **42.9%** (+18.2pp / +57.1pp; regret=0). Industry pack PASS. Mutation: `poison_heal` +100pp; `ttl_wave`/`flash_churn`/`prefix_mix` PASS; `mutation_gain`/`evolve_gain` stretch asserts FAIL (Δ=0 vs frozen).
+
+Reproduce: `./scripts/build-native.sh` then memtier matrix + `python3 scripts/bench_regret.py` / `bench_industry.py`.
+
+---
+
+## Prior: 2026-09-22 21:22:30 CST — tip `d1d1db2` / eval `9a968aa`
+
 Recorded: 2026-09-22 21:22:30 CST (Asia/Shanghai)  
-**SHA:** `d1d1db2` (docs refresh after e2e at this tip)
+**SHA:** `d1d1db2` (docs refresh after e2e at this tip); full eval table also cited at `9a968aa`.
 
 Frozen memtier: **1c×1t**, SET:GET=**1:10**, 32B, key 1..10000 **R:R**, `-n 20000`.  
 Data plane: host `aura_redis_server` (Release). Redis: `redis:7-alpine` (Docker host net).
@@ -19,10 +57,9 @@ Data plane: host `aura_redis_server` (Release). Redis: `redis:7-alpine` (Docker 
 
 **Gates:** p=1 ratio ≥ **1.077** (lru) — cleared (≥0.80 iter4). Full matrix + hit-rate: **`docs/perf-eval.md`**.
 
-Hit-rate headline (same SHA): LRU **0%** vs adaptive **100%** on `hot_protect` / demo-mvp Phase A; `zipf_hotkey` LRU **0%** vs adaptive **97.6%**.
+Hit-rate headline (same era): LRU **0%** vs adaptive **100%** on `hot_protect` / demo-mvp Phase A; `zipf_hotkey` LRU **0%** vs adaptive **97.6%** (later pin-fix → 100%).
 
 Reproduce: `./scripts/bench-e2e.sh` or `./scripts/memtier-cmp.sh`.
-
 
 ### Dynamic eviction + zipf (2026-09-22 Asia/Shanghai)
 
@@ -50,4 +87,3 @@ Added `flat` / `hot_cold` layouts with quiescent `ar_core_set_layout` migrate. N
 ### Iteration 7 stretch — plugin live-reload (2026-09-22 Asia/Shanghai)
 
 `PLUGIN` / `ar_core_load_evict_plugin` swaps eviction `.so` under concurrent SET/GET without closing the listen fd. Evidence: `tests/test_plugin_reload.py` (control socket survives; new clients connect; worker errors=0; `reloads>=4`). Not a memtier gate change.
-
