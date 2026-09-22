@@ -95,7 +95,9 @@
 | **Production P2 band** | **COMPLETE** (P2.13–P2.15) |
 | **P3.16a HASH** | **DONE** — HSET/HGET/HMGET/HGETALL/HDEL/HEXISTS/HLEN/HINCRBY + TYPE; RDB string-only |
 | **P3.16b LIST** | **DONE** — LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE/LINDEX |
-| **Production P3** | **IN PROGRESS** (HASH done; LIST/ZSET/MULTI/PubSub next) |
+| **P3.16c ZSET** | **DONE** — ZADD/ZSCORE/ZREM/ZCARD/ZRANGE/ZRANGEBYSCORE (sorted array) |
+| **P3.16** | **DONE** (HASH+LIST+ZSET) |
+| **Production P3** | **IN PROGRESS** (P3.16 done; MULTI/PubSub next) |
 
 MVP/explore remains valuable demos; **ship bar moves to this document.**
 
@@ -160,3 +162,4 @@ Production does **not** mean “C-only Redis clone.”
 | 2026-09-23 | **P2.15** | Native OpenSSL `--tls-port`/`--tls-cert-file`/`--tls-key-file`; soft CMake; `docs/tls.md`; stunnel example; `tests/test_prod_tls.py` |
 | 2026-09-23 | **P3.16a** | HASH + TYPE; `ar_types.c`; RDB skips non-string; `tests/test_prod_hash.py` |
 | 2026-09-23 | **P3.16b** | LIST commands; `tests/test_prod_list.py` |
+| 2026-09-23 | **P3.16c** | ZSET sorted-array; ZRANGEBYSCORE+LIMIT; `tests/test_prod_zset.py` |

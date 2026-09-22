@@ -155,6 +155,30 @@ static int reply_bulk(ArConn* c, const char* data, size_t n) {
 static int reply_ok(ArConn* c) { return wbuf_append(c, "+OK\r\n", 5); }
 static int reply_pong(ArConn* c) { return wbuf_append(c, "+PONG\r\n", 7); }
 
+
+static int parse_double(const char* p, size_t n, double* out) {
+  if (!p || n == 0 || n >= 64)
+    return 0;
+  char buf[64];
+  memcpy(buf, p, n);
+  buf[n] = '\0';
+  if (n == 4 && (memcmp(buf, "-inf", 4) == 0 || memcmp(buf, "-Inf", 4) == 0 ||
+                 memcmp(buf, "-INF", 4) == 0)) {
+    *out = -1.0 / 0.0;
+    return 1;
+  }
+  if ((n == 3 && (memcmp(buf, "inf", 3) == 0 || memcmp(buf, "Inf", 3) == 0 ||
+                  memcmp(buf, "INF", 3) == 0)) ||
+      (n == 4 && (memcmp(buf, "+inf", 4) == 0 || memcmp(buf, "+Inf", 4) == 0 ||
+                  memcmp(buf, "+INF", 4) == 0))) {
+    *out = 1.0 / 0.0;
+    return 1;
+  }
+  char* end = NULL;
+  *out = strtod(buf, &end);
+  return end && end != buf && *end == '\0';
+}
+
 static int cmd_eq(const char* a, size_t alen, const char* lit) {
   size_t n = strlen(lit);
   if (alen != n)
@@ -1286,6 +1310,219 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     return reply_err(c, "ERR wrong number of arguments for 'plugin'");
   }
 
+
+
+  /* ---- P3.16c ZSET (sorted array, O(n) insert) ---- */
+  if (cmd_eq(cmd, clen, "zadd")) {
+    if (argc < 4 || ((argc - 2) % 2) != 0)
+      return reply_err(c, "ERR wrong number of arguments for 'zadd'");
+    int np = (argc - 2) / 2;
+    if (np > 64)
+      return reply_err(c, "ERR too many members");
+    double scores[64];
+    const char* members[64];
+    size_t mlens[64];
+    for (int i = 0; i < np; ++i) {
+      if (!parse_double(argv[2 + 2 * i].p, argv[2 + 2 * i].len, &scores[i]))
+        return reply_err(c, "ERR value is not a valid float");
+      members[i] = argv[3 + 2 * i].p;
+      mlens[i] = argv[3 + 2 * i].len;
+    }
+    int wt = 0;
+    int added = ar_zset_zadd(core, argv[1].p, argv[1].len, np, scores, members,
+                             mlens, &wt);
+    if (wt || added < 0)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    return reply_int(c, added);
+  }
+  if (cmd_eq(cmd, clen, "zscore")) {
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'zscore'");
+    int wt = 0;
+    size_t ol = 0;
+    char* v = ar_zset_zscore(core, argv[1].p, argv[1].len, argv[2].p,
+                             argv[2].len, &ol, &wt);
+    if (wt)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (!v)
+      return reply_null_bulk(c);
+    int rc = reply_bulk(c, v, ol);
+    free(v);
+    return rc;
+  }
+  if (cmd_eq(cmd, clen, "zrem")) {
+    if (argc < 3)
+      return reply_err(c, "ERR wrong number of arguments for 'zrem'");
+    int nm = argc - 2;
+    if (nm > 64)
+      return reply_err(c, "ERR too many members");
+    const char* members[64];
+    size_t mlens[64];
+    for (int i = 0; i < nm; ++i) {
+      members[i] = argv[2 + i].p;
+      mlens[i] = argv[2 + i].len;
+    }
+    int wt = 0;
+    int rem = ar_zset_zrem(core, argv[1].p, argv[1].len, nm, members, mlens, &wt);
+    if (wt || rem < 0)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    return reply_int(c, rem);
+  }
+  if (cmd_eq(cmd, clen, "zcard")) {
+    if (argc != 2)
+      return reply_err(c, "ERR wrong number of arguments for 'zcard'");
+    int wt = 0;
+    int64_t n = ar_zset_zcard(core, argv[1].p, argv[1].len, &wt);
+    if (wt || n < 0)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    return reply_int(c, n);
+  }
+  if (cmd_eq(cmd, clen, "zrange")) {
+    if (argc < 4 || argc > 5)
+      return reply_err(c, "ERR wrong number of arguments for 'zrange'");
+    int withscores = 0;
+    if (argc == 5) {
+      if (!cmd_eq(argv[4].p, argv[4].len, "withscores"))
+        return reply_err(c, "ERR syntax error");
+      withscores = 1;
+    }
+    char nbuf[32];
+    long long start, stop;
+    char* end = NULL;
+    if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf) ||
+        argv[3].len == 0 || argv[3].len >= sizeof(nbuf))
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[2].p, argv[2].len);
+    nbuf[argv[2].len] = '\0';
+    start = strtoll(nbuf, &end, 10);
+    if (end == nbuf || *end != '\0')
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[3].p, argv[3].len);
+    nbuf[argv[3].len] = '\0';
+    end = NULL;
+    stop = strtoll(nbuf, &end, 10);
+    if (end == nbuf || *end != '\0')
+      return reply_err(c, "ERR value is not an integer or out of range");
+    int wt = 0;
+    ArZSet* z = ar_zset_get(core, argv[1].p, argv[1].len, &wt);
+    if (wt)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (!z || z->len == 0)
+      return wbuf_append(c, "*0\r\n", 4);
+    int64_t len = (int64_t)z->len;
+    if (start < 0)
+      start = len + start;
+    if (stop < 0)
+      stop = len + stop;
+    if (start < 0)
+      start = 0;
+    if (stop >= len)
+      stop = len - 1;
+    if (start > stop || start >= len)
+      return wbuf_append(c, "*0\r\n", 4);
+    int nmem = (int)(stop - start + 1);
+    int n = withscores ? nmem * 2 : nmem;
+    char hdr[32];
+    int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", n);
+    if (wbuf_append(c, hdr, (size_t)hn) < 0)
+      return -1;
+    for (int64_t i = start; i <= stop; ++i) {
+      if (reply_bulk(c, z->arr[i].member, z->arr[i].mlen) < 0)
+        return -1;
+      if (withscores) {
+        char sbuf[64];
+        int sn = snprintf(sbuf, sizeof(sbuf), "%.17g", z->arr[i].score);
+        if (sn < 0 || reply_bulk(c, sbuf, (size_t)sn) < 0)
+          return -1;
+      }
+    }
+    return 0;
+  }
+  if (cmd_eq(cmd, clen, "zrangebyscore")) {
+    if (argc < 4)
+      return reply_err(c, "ERR wrong number of arguments for 'zrangebyscore'");
+    double minv, maxv;
+    if (!parse_double(argv[2].p, argv[2].len, &minv) ||
+        !parse_double(argv[3].p, argv[3].len, &maxv))
+      return reply_err(c, "ERR min or max is not a float");
+    int withscores = 0;
+    int64_t lim_off = 0, lim_cnt = -1;
+    for (int ai = 4; ai < argc; ++ai) {
+      if (cmd_eq(argv[ai].p, argv[ai].len, "withscores")) {
+        withscores = 1;
+      } else if (cmd_eq(argv[ai].p, argv[ai].len, "limit")) {
+        if (ai + 2 >= argc)
+          return reply_err(c, "ERR syntax error");
+        char nbuf[32];
+        char* end = NULL;
+        if (argv[ai + 1].len >= sizeof(nbuf) || argv[ai + 2].len >= sizeof(nbuf))
+          return reply_err(c, "ERR value is not an integer or out of range");
+        memcpy(nbuf, argv[ai + 1].p, argv[ai + 1].len);
+        nbuf[argv[ai + 1].len] = '\0';
+        lim_off = strtoll(nbuf, &end, 10);
+        if (end == nbuf || *end != '\0')
+          return reply_err(c, "ERR value is not an integer or out of range");
+        memcpy(nbuf, argv[ai + 2].p, argv[ai + 2].len);
+        nbuf[argv[ai + 2].len] = '\0';
+        end = NULL;
+        lim_cnt = strtoll(nbuf, &end, 10);
+        if (end == nbuf || *end != '\0')
+          return reply_err(c, "ERR value is not an integer or out of range");
+        ai += 2;
+      } else {
+        return reply_err(c, "ERR syntax error");
+      }
+    }
+    int wt = 0;
+    ArZSet* z = ar_zset_get(core, argv[1].p, argv[1].len, &wt);
+    if (wt)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (!z || z->len == 0)
+      return wbuf_append(c, "*0\r\n", 4);
+    /* collect matching indices */
+    size_t match[256];
+    int nm = 0;
+    for (size_t i = 0; i < z->len && nm < 256; ++i) {
+      double sc = z->arr[i].score;
+      if (sc < minv || sc > maxv)
+        continue;
+      match[nm++] = i;
+    }
+    int skip = (int)lim_off;
+    if (skip < 0)
+      skip = 0;
+    int take = (lim_cnt < 0) ? nm : (int)lim_cnt;
+    if (skip > nm)
+      skip = nm;
+    int outn = nm - skip;
+    if (outn > take)
+      outn = take;
+    if (outn < 0)
+      outn = 0;
+    int n = withscores ? outn * 2 : outn;
+    char hdr[32];
+    int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", n);
+    if (wbuf_append(c, hdr, (size_t)hn) < 0)
+      return -1;
+    for (int i = 0; i < outn; ++i) {
+      size_t idx = match[skip + i];
+      if (reply_bulk(c, z->arr[idx].member, z->arr[idx].mlen) < 0)
+        return -1;
+      if (withscores) {
+        char sbuf[64];
+        int sn = snprintf(sbuf, sizeof(sbuf), "%.17g", z->arr[idx].score);
+        if (sn < 0 || reply_bulk(c, sbuf, (size_t)sn) < 0)
+          return -1;
+      }
+    }
+    return 0;
+  }
 
   /* ---- P3.16b LIST ---- */
   if (cmd_eq(cmd, clen, "lpush") || cmd_eq(cmd, clen, "rpush")) {

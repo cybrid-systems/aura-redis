@@ -53,6 +53,12 @@ Last audited: 2026-09-23 (CST) for P3.16 HASH (+TYPE).
 | `LLEN` | 2 | integer | |
 | `LRANGE` | 4 | array | Redis index semantics (neg OK) |
 | `LINDEX` | 3 | bulk/null | |
+| `ZADD` | ≥4 even | integer added | sorted array O(n); P3.16c |
+| `ZSCORE` | 3 | bulk/null | score string |
+| `ZREM` | ≥3 | integer | |
+| `ZCARD` | 2 | integer | |
+| `ZRANGE` | 4–5 | array | optional WITHSCORES |
+| `ZRANGEBYSCORE` | ≥4 | array | min/max, -inf/+inf; WITHSCORES; LIMIT |
 
 
 
@@ -79,7 +85,7 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 | Persistence / repl | `BGREWRITEAOF`, `PSYNC` (SAVE/BGSAVE/REPLICAOF/SYNC done P2.13–14) |
 | Strings extras | `APPEND`, `STRLEN`, `GETSET`, `SETEX`, `PSETEX`, `SET` NX/XX/PX |
 | Keys extras | `KEYS`, `DBSIZE`, `RENAME`, `UNLINK` (≠ DEL alias) |
-| Zsets | `ZADD`, … (HASH+LIST done P3.16a/b) |
+| (types) | HASH/LIST/ZSET done P3.16 |
 | Pub/Sub, transactions | `SUBSCRIBE`, `MULTI`/`EXEC` |
 | Cluster / modules | all |
 

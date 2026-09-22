@@ -25,5 +25,6 @@ run P0.7 tests/test_prod_soak.py
 
 run P3.16a tests/test_prod_hash.py
 run P3.16b tests/test_prod_list.py
+run P3.16c tests/test_prod_zset.py
 
 echo "=== ci-prod: ALL PASSED ==="
