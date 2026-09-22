@@ -28,6 +28,8 @@ Iteration plan: [`docs/iteration-plan.md`](docs/iteration-plan.md)
 | `AURA_REDIS_EVICT` | `noop` \| `lru` \| `lfu` |
 | `AURA_REDIS_ADAPTIVE` | `1` = Aura supervisor polls metrics and swaps `lru`↔`lfu` via `serve_ms` pump |
 | `AURA_REDIS_EVICT_SO` | path to eviction plugin `.so` (Iteration 7; overrides `EVICT`) |
+| `AURA_REDIS_LAYOUT` | `flat` \| `hot_cold` (Iteration 8 dict layout) |
+| `AURA_REDIS_LAYOUT_ADAPTIVE` | `1` = adapt layout from adaptive tick |
 
 ```bash
 ./scripts/build-native.sh
@@ -39,6 +41,7 @@ AURA_REDIS_ENGINE=ffi ./scripts/smoke-test.sh
 python3 tests/test_eviction.py --evict lru
 python3 tests/test_adaptive.py --spawn
 python3 tests/test_evict_plugin.py          # dlopen random eviction plugin
+python3 tests/test_layout.py                # flat↔hot_cold migrate under load
 ```
 
 **Perf (2026-09-22):** C data plane memtier p=1 **~1.13× Redis**, p=16 **~1.30× Redis**; Lisp path ~143 ops/s. Details: [`docs/perf-log.md`](docs/perf-log.md).

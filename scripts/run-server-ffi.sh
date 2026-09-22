@@ -25,5 +25,7 @@ exec sudo docker run --rm --network host --entrypoint '' \
   -e AURA_REDIS_MAXMEMORY="${AURA_REDIS_MAXMEMORY:-}" \
   -e AURA_REDIS_EVICT="${AURA_REDIS_EVICT:-noop}" \
   -e AURA_REDIS_ADAPTIVE="${AURA_REDIS_ADAPTIVE:-0}" \
+  -e AURA_REDIS_LAYOUT="${AURA_REDIS_LAYOUT:-}" \
+  -e AURA_REDIS_LAYOUT_ADAPTIVE="${AURA_REDIS_LAYOUT_ADAPTIVE:-0}" \
   "$IMG" \
   /work/.deps/aura/build/aura /work/src/redis/server_ffi.aura

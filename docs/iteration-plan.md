@@ -82,11 +82,13 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 ---
 
-## Iteration 8 — Layout evolution (optional)
+## Iteration 8 — Layout evolution ✅
 
 **Goal:** Second layout or hot/cold tier; Aura triggers migrate on signal.
 
 **Exit:** Documented API + one migrate demo.
+
+**Result:** Layouts `flat` (alias `flat_hash`) and `hot_cold`; `ar_core_set_layout` / `ar_core_layout_name` with generation + `layout_busy` quiescent migrate; RESP `LAYOUT [name]`; env `AURA_REDIS_LAYOUT` / `AURA_REDIS_LAYOUT_ADAPTIVE` + `ar_core_adapt_layout` (GET-heavy → hot_cold); promote-on-GET / demote under hot soft-cap; `tests/test_layout.py`.
 
 ---
 
@@ -100,4 +102,4 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 ## Current position
 
-**Iterations 0–7 (v1 dlopen) done.** **Next: Iteration 8** (layout evolution) or deepen hot-update/AOT.
+**Iterations 0–8 done.** Optional deepen: full `std/hot-update` / AOT strategy reload (iter 7 stretch).

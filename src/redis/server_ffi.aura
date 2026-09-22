@@ -4,6 +4,8 @@
 ;   AURA_REDIS_PORT / AURA_REDIS_CORE_SO / AURA_REDIS_MAXMEMORY / AURA_REDIS_EVICT
 ;   AURA_REDIS_ADAPTIVE=1 → serve_ms pump + inlined adaptive supervisor (Iteration 6)
 ;   AURA_REDIS_EVICT_SO   path to eviction plugin .so (Iteration 7; overrides EVICT)
+;   AURA_REDIS_LAYOUT     flat | hot_cold (Iteration 8; initial dict layout)
+;   AURA_REDIS_LAYOUT_ADAPTIVE=1 → call ar_core_adapt_layout from adaptive tick
 ;
 ; Aura FFI quirks (this rev) — documented so we do not "clean up" into breakage:
 ;   - Top-level (c-func) binds work for many symbols, but user closures defined
@@ -19,6 +21,7 @@
 (define *serve-rc* 1)
 (define *ad-running* #f)
 (define adaptive-on #f)
+(define *layout-adapt* #f)
 
 ; ── Adaptive state (scalars only; no user procs called after c-func) ──
 (define *ad-min-ops* 80)
@@ -72,6 +75,9 @@
 (define ar-metric-misses (c-func lib "ar_metric_misses" "(Opaque) -> Int"))
 (define ar-used-memory (c-func lib "ar_core_used_memory" "(Opaque) -> Int"))
 (define ar-load-plugin (c-func lib "ar_core_load_evict_plugin" "(Opaque String) -> Int"))
+(define ar-set-layout (c-func lib "ar_core_set_layout" "(Opaque String) -> Int"))
+(define ar-layout-name (c-func lib "ar_core_layout_name" "(Opaque) -> String"))
+(define ar-adapt-layout (c-func lib "ar_core_adapt_layout" "(Opaque) -> Int"))
 
 (define core #f)
 (if (not *fatal*)
@@ -108,6 +114,14 @@
       (if (and (string? mm) (> (string-length mm) 0) (number? (string->number mm)))
         (ar-set-maxmem core (string->number mm))
         #t))
+    (let ((ly (getenv "AURA_REDIS_LAYOUT")))
+      (if (and (string? ly) (> (string-length ly) 0))
+        (begin
+          (ar-set-layout core ly)
+          (display "server_ffi: layout=")
+          (display (ar-layout-name core))
+          (newline))
+        #t))
     (display "server_ffi: binding port=")
     (display bind-port)
     (newline)
@@ -121,7 +135,14 @@
     (let ((ad (getenv "AURA_REDIS_ADAPTIVE")))
       (set! adaptive-on
         (and (string? ad)
-             (or (string=? ad "1") (string=? ad "true") (string=? ad "yes"))))))
+             (or (string=? ad "1") (string=? ad "true") (string=? ad "yes")))))
+    (let ((la (getenv "AURA_REDIS_LAYOUT_ADAPTIVE")))
+      (if (and (string? la)
+               (or (string=? la "1") (string=? la "true") (string=? la "yes")))
+        (begin
+          (display "server_ffi: layout adaptive ON (ar_core_adapt_layout)\n")
+          (set! *layout-adapt* #t))
+        (set! *layout-adapt* #f))))
   #t)
 
 (if (and (not *fatal*) adaptive-on)
@@ -146,6 +167,16 @@
             (set! *ad-prev-hits* (ar-metric-hits core))
             (set! *ad-prev-misses* (ar-metric-misses core))
             (set! *ad-last-eval-ms* *ad-now*)
+            (if *layout-adapt*
+              (begin
+                (let ((lr (ar-adapt-layout core)))
+                  (if (= lr 1)
+                    (begin
+                      (display "adaptive: layout → ")
+                      (display (ar-layout-name core))
+                      (newline))
+                    #t)))
+              #t)
             (set! *ad-ops* (+ *ad-dgets* *ad-dsets*))
             (set! *ad-choice* "")
             (if (>= *ad-ops* *ad-min-ops*)

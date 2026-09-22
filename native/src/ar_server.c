@@ -233,12 +233,15 @@ static int parse_command(const char* buf, size_t len, size_t pos, Arg* argv,
   return (int)(i - pos);
 }
 
-/* Pointer-stable get without malloc: returns entry val pointer. */
+/* Pointer-stable get without malloc: returns entry val pointer.
+ * Promotes cold→hot under hot_cold layout. */
 static int get_ptr(ArCore* core, const char* key, size_t klen,
                    const char** val, size_t* vlen) {
   core->ops++;
   core->gets++;
-  ArEntry* e = ar_find_entry(core, key, klen, NULL);
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
   if (!e) {
     core->misses++;
     *val = NULL;
@@ -246,7 +249,7 @@ static int get_ptr(ArCore* core, const char* key, size_t klen,
     return 0;
   }
   core->hits++;
-  e->last_access = ++core->clock;
+  ar_touch_get(core, e, b, tier);
   if (core->evict && core->evict->on_get)
     core->evict->on_get(core, e);
   *val = e->val;
@@ -370,6 +373,34 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (cmd_eq(cmd, clen, "command")) {
     /* redis-benchmark / some clients probe; reply empty array */
     return wbuf_append(c, "*0\r\n", 4);
+  }
+  /* Iteration 8: LAYOUT [name] — query or migrate dict layout (quiescent). */
+  if (cmd_eq(cmd, clen, "layout")) {
+    if (argc == 1) {
+      const char* name = ar_core_layout_name(core);
+      char buf[128];
+      int n = snprintf(buf, sizeof(buf),
+                       "%s gen=%llu hot=%llu cold=%llu promo=%llu demo=%llu",
+                       name, (unsigned long long)ar_core_layout_gen(core),
+                       (unsigned long long)ar_core_hot_keys(core),
+                       (unsigned long long)ar_core_cold_keys(core),
+                       (unsigned long long)ar_metric_promotions(core),
+                       (unsigned long long)ar_metric_demotions(core));
+      if (n < 0)
+        return reply_err(c, "ERR layout status");
+      return reply_bulk(c, buf, (size_t)n);
+    }
+    if (argc == 2) {
+      char namebuf[64];
+      if (argv[1].len == 0 || argv[1].len >= sizeof(namebuf))
+        return reply_err(c, "ERR bad layout (want flat|hot_cold)");
+      memcpy(namebuf, argv[1].p, argv[1].len);
+      namebuf[argv[1].len] = '\0';
+      if (!ar_core_set_layout(core, namebuf))
+        return reply_err(c, "ERR bad layout (want flat|hot_cold)");
+      return reply_ok(c);
+    }
+    return reply_err(c, "ERR wrong number of arguments for 'layout'");
   }
   return reply_err(c, "ERR unknown command");
 }

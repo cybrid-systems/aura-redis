@@ -81,6 +81,21 @@ int ar_core_over_maxmemory(ArCore* core);
 int ar_core_evict_random_one(ArCore* core);
 int ar_core_load_evict_plugin(ArCore* core, const char* so_path);
 
+/* Iteration 8 — dict layout evolution
+ * Names: "flat" (alias "flat_hash"), "hot_cold" (alias "hot-cold").
+ * Migrate is synchronous and single-threaded-safe between commands
+ * (layout_busy / generation). May block briefly while re-linking entries. */
+int ar_core_set_layout(ArCore* core, const char* name);
+const char* ar_core_layout_name(ArCore* core);
+uint64_t ar_core_layout_gen(ArCore* core);
+uint64_t ar_core_hot_keys(ArCore* core);
+uint64_t ar_core_cold_keys(ArCore* core);
+uint64_t ar_metric_promotions(ArCore* core);
+uint64_t ar_metric_demotions(ArCore* core);
+uint64_t ar_metric_migrates(ArCore* core);
+/* Simple rule: nkeys>=500 && GET-heavy → hot_cold; tiny store → flat.
+ * Returns 1 if a migrate ran. Safe to call from Aura adaptive tick. */
+int ar_core_adapt_layout(ArCore* core);
 
 #ifdef __cplusplus
 }

@@ -26,3 +26,7 @@ Reproduce: `./scripts/memtier-cmp.sh`
 Already applied in v1 C path: epoll ET, TCP_NODELAY, pipelined parse-many-per-read, buffered writes, binary-safe dict with rehash, static `+OK`/`+PONG`/`$-1`, zero-copy GET reply from entry pointer.
 
 Next if needed: `writev` multi-reply, arena/slab values, dict load-factor tuning, io_uring, multi-thread shard.
+
+### Iteration 8 — layout (2026-09-22 Asia/Shanghai)
+
+Added `flat` / `hot_cold` layouts with quiescent `ar_core_set_layout` migrate. Not a memtier gate change; correctness demo: `tests/test_layout.py` (migrate under concurrent SET/GET; promote/demote counters). Soft hot cap ≈ nkeys/4.

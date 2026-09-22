@@ -16,6 +16,11 @@ typedef struct ArEntry {
   struct ArEntry* next;
 } ArEntry;
 
+typedef enum {
+  AR_LAYOUT_FLAT = 0,
+  AR_LAYOUT_HOT_COLD = 1,
+} ArLayoutKind;
+
 #define AR_MAX_CONN 1024
 #define AR_RBUF_INIT (64 * 1024)
 #define AR_WBUF_INIT (64 * 1024)
@@ -35,9 +40,24 @@ typedef struct ArConn {
 } ArConn;
 
 struct ArCore {
+  /* Primary / hot hash (flat = only table; hot_cold = hot tier) */
   ArEntry** buckets;
   size_t nbuckets;
-  size_t nkeys;
+  size_t nkeys; /* total keys across all tiers */
+
+  /* Cold tier (hot_cold only; NULL when flat) */
+  ArEntry** cold_buckets;
+  size_t cold_nbuckets;
+  size_t hot_nkeys;
+  size_t cold_nkeys;
+
+  ArLayoutKind layout;
+  uint64_t layout_gen; /* bumped on each successful migrate */
+  int layout_busy;     /* 1 while migrate runs (quiescent guard) */
+  uint64_t promotions; /* cold→hot on GET */
+  uint64_t demotions;  /* hot→cold under pressure */
+  uint64_t migrates;
+
   const ArEvictOps* evict;
   uint64_t ops, gets, sets, hits, misses;
   uint64_t evicted, expired;
@@ -55,11 +75,17 @@ struct ArCore {
 };
 
 /* dict helpers used by server */
+/* tier_out: 0=hot/flat, 1=cold (only meaningful for hot_cold) */
 ArEntry* ar_find_entry(ArCore* core, const char* key, size_t klen,
                        size_t* bucket_out);
+ArEntry* ar_find_entry_ex(ArCore* core, const char* key, size_t klen,
+                          size_t* bucket_out, int* tier_out);
 int ar_entry_set(ArCore* core, const char* key, size_t klen, const char* val,
                  size_t vlen);
 void ar_entry_free(ArCore* core, size_t bucket, ArEntry* e);
+void ar_entry_free_ex(ArCore* core, size_t bucket, int tier, ArEntry* e);
 void ar_rehash_if_needed(ArCore* core);
+/* Promote cold→hot on GET hit; may demote if hot soft-full. */
+void ar_touch_get(ArCore* core, ArEntry* e, size_t bucket, int tier);
 
 #endif

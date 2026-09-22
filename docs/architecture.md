@@ -167,14 +167,23 @@ Self-modification paths (use what Aura already has):
 | `std/hot-update` / `aot:reload` | Swap compiled strategy `.so` without restarting the core listen loop (iteration N) |
 | Direct `ar_core_set_evict_by_name` | Fast path for built-in C strategies |
 
-### 4.5 Layout evolution (later iterations)
+### 4.5 Layout evolution (Iteration 8)
 
 Descriptor for dict/slab:
 
-- `flat_hash` (v1)
-- `segmented` / `hot_cold` (later)
+| Name | Behavior |
+|------|----------|
+| `flat` / `flat_hash` | Single open-addressing-style chain hash (v1 default) |
+| `hot_cold` | Two hashes: **hot** (working set) + **cold**; GET on cold **promotes** to hot; excess hot **demotes** (approx LRU sample) when hot > ~nkeys/4 |
 
-`ar_core_set_layout(core, name)` triggers controlled rehash/migrate (may block briefly; document). Aura triggers on load class change (e.g. working set >> RSS).
+```c
+int ar_core_set_layout(ArCore* core, const char* name); /* flat | hot_cold */
+const char* ar_core_layout_name(ArCore* core);
+uint64_t ar_core_layout_gen(ArCore* core); /* bumps each migrate */
+int ar_core_adapt_layout(ArCore* core);    /* simple GET-heavy rule */
+```
+
+Migrate is **synchronous**, single-threaded, between commands (`layout_busy` guard). May block briefly while re-linking entries (fold cold→hot, or allocate cold table). RESP: `LAYOUT` / `LAYOUT hot_cold`. Env: `AURA_REDIS_LAYOUT`, optional `AURA_REDIS_LAYOUT_ADAPTIVE=1` (with adaptive serve_ms pump).
 
 ---
 
