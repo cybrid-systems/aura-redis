@@ -103,7 +103,8 @@ python3 tests/test_prod_protocol.py   # P0.1
 python3 tests/test_prod_memory.py     # P0.2
 python3 tests/test_prod_ttl.py        # P0.3
 python3 tests/test_prod_auth.py       # P0.4
-# later: shutdown / INFO / soak …
+python3 tests/test_prod_shutdown.py   # P0.5
+# later: INFO / soak …
 # or: ./scripts/ci-prod.sh
 ```
 
@@ -129,3 +130,4 @@ Production does **not** mean “C-only Redis clone.”
 | 2026-09-22 | **P0.2** | `maybe_evict` scales with nkeys (was 64); `tests/test_prod_memory.py` maxmemory bound + large-SET |
 | 2026-09-22 | **P0.3** | Active expire in serve loop; expire-if-needed in eviction samples; `tests/test_prod_ttl.py` |
 | 2026-09-22 | **P0.4** | `AUTH`/`requirepass`/`--bind`/`protected-mode`; `tests/test_prod_auth.py` |
+| 2026-09-22 | **P0.5** | SIGTERM/SIGINT drain; `tests/test_prod_shutdown.py` clean exit 0 |
