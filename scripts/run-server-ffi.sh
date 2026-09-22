@@ -13,8 +13,8 @@ if [[ ! -f "$SO" ]]; then
 fi
 
 export AURA_REDIS_PORT="$PORT"
-echo "run-server-ffi: starting on 127.0.0.1:$PORT via $IMG" >&2
-exec sudo docker run --rm --network host \
+echo "run-server-ffi: starting on 127.0.0.1:$PORT via $IMG (adaptive=${AURA_REDIS_ADAPTIVE:-0})" >&2
+exec sudo docker run --rm --network host --entrypoint '' \
   -v "$ROOT:/work" -w /work \
   -e AURA_SANDBOX=off \
   -e AURA_PIPELINE_STRICT=0 \
@@ -24,5 +24,6 @@ exec sudo docker run --rm --network host \
   -e AURA_REDIS_CORE_SO=/work/native/build/libaura_redis_core.so \
   -e AURA_REDIS_MAXMEMORY="${AURA_REDIS_MAXMEMORY:-}" \
   -e AURA_REDIS_EVICT="${AURA_REDIS_EVICT:-noop}" \
+  -e AURA_REDIS_ADAPTIVE="${AURA_REDIS_ADAPTIVE:-0}" \
   "$IMG" \
   /work/.deps/aura/build/aura /work/src/redis/server_ffi.aura

@@ -26,13 +26,17 @@ Iteration plan: [`docs/iteration-plan.md`](docs/iteration-plan.md)
 | `AURA_REDIS_CORE_SO` | path to `libaura_redis_core.so` |
 | `AURA_REDIS_MAXMEMORY` | bytes; enables eviction when strategy ≠ `noop` |
 | `AURA_REDIS_EVICT` | `noop` \| `lru` \| `lfu` |
+| `AURA_REDIS_ADAPTIVE` | `1` = Aura supervisor polls metrics and swaps `lru`↔`lfu` via `serve_ms` pump |
 
 ```bash
 ./scripts/build-native.sh
 ./scripts/run-server-ffi.sh 6379          # Aura+FFI in dev container (host network)
+AURA_REDIS_ADAPTIVE=1 ./scripts/run-server-ffi.sh 6379   # adaptive control plane
+./scripts/demo-adaptive.sh               # two load patterns → strategy swaps in logs
 AURA_REDIS_ENGINE=ffi ./scripts/smoke-test.sh
 ./scripts/memtier-cmp.sh                 # vs redis:7-alpine → docs/perf-log.md
 python3 tests/test_eviction.py --evict lru
+python3 tests/test_adaptive.py --spawn
 ```
 
 **Perf (2026-09-22):** C data plane memtier p=1 **~1.13× Redis**, p=16 **~1.30× Redis**; Lisp path ~143 ops/s. Details: [`docs/perf-log.md`](docs/perf-log.md).

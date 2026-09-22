@@ -62,11 +62,13 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 ---
 
-## Iteration 6 — Aura adaptive supervisor (the moat)
+## Iteration 6 — Aura adaptive supervisor (the moat) ✅
 
 **Goal:** `adaptive.aura` polls metrics; swaps LRU↔LFU (or adaptive) via FFI; optional `hot-strategy` for threshold lambdas.
 
 **Exit:** Demo script: load pattern A → strategy X; pattern B → strategy Y; logged swaps; correctness preserved.
+
+**Result:** `AURA_REDIS_ADAPTIVE=1` serve_ms pump in `server_ffi.aura` (policy inlined; mirrors `adaptive.aura` / `adaptive_body.aura` — Aura FFI+closure quirks); rules write-heavy→lfu / read-heavy+hit≥60%→lru; `scripts/demo-adaptive.sh` / `tests/test_adaptive.py --spawn` shows lru→lfu then lfu→lru.
 
 ---
 
@@ -96,4 +98,4 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 ## Current position
 
-**Iterations 0–5 done.** **Next: Iteration 6** (Aura adaptive supervisor).
+**Iterations 0–6 done.** **Next: Iteration 7** (hot-update strategy `.so` / plugins).

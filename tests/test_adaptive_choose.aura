@@ -1,0 +1,6 @@
+(require "src/redis/adaptive" all:)
+(display "rules=") (display (adaptive-rules-doc 0)) (newline)
+(display "write->") (display (adaptive-choose 10 100 5 5)) (newline)
+(display "read->") (display (adaptive-choose 500 10 480 20)) (newline)
+(display "keep->") (display (adaptive-choose 50 50 40 10)) (newline)
+(define *ok* 1)
