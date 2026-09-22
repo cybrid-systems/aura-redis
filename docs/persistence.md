@@ -57,3 +57,13 @@ python3 tests/test_prod_rdb.py
 ```
 
 Exit criteria: `SET` + `EXPIRE` → `SAVE` → kill → restart with same `--dir`/`--dbfilename` → `GET`/`TTL` restored.
+
+## Replication (P2.14)
+
+Best-effort **single async replica** for string KV (not Redis Cluster / PSYNC):
+
+- Replica: `REPLICAOF <host> <port>` → connects, sends `SYNC`, applies streamed `SET`/`DEL`/`EXPIRE`/…
+- Replica clients: `GET`/`TTL`/… OK; writes → `-READONLY …`
+- `REPLICAOF NO ONE` restores master role on that node
+- Master `INFO`: `role:master`, `connected_slaves`
+- Test: `python3 tests/test_prod_replica.py`

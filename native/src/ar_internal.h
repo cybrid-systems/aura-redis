@@ -41,6 +41,8 @@ typedef struct ArConn {
   int want_write;
   int authenticated; /* P0.4: 1 if AUTH ok or no requirepass */
   uint64_t last_active_ms; /* P1.12: idle timeout clock */
+  int is_replica; /* P2.14: master→replica feed connection */
+  int is_master_link; /* P2.14: replica's outbound link to master */
 } ArConn;
 
 struct ArCore {
@@ -108,6 +110,12 @@ struct ArCore {
   int rdb_bgsave_pid;          /* >0 while BGSAVE child runs */
   int rdb_loading;
   int rdb_last_bgsave_ok; /* 1 ok / 0 fail */
+
+  /* P2.14 — best-effort single-replica async replication */
+  int repl_readonly; /* 1 if this node is a replica */
+  char master_host[64];
+  int master_port;
+  int repl_applying; /* 1 while applying master stream (no re-entry) */
 };
 
 /* P2.13 RDB (implemented in ar_rdb.c) */

@@ -159,6 +159,11 @@ int ar_rdb_save(ArCore* core);   /* SAVE — sync write; 1 ok */
 int ar_rdb_bgsave(ArCore* core); /* BGSAVE — fork child or sync fallback */
 int ar_rdb_load(ArCore* core);   /* load on startup; missing file = ok */
 
+/* P2.14 — REPLICAOF (best-effort async string KV) */
+int ar_core_repl_readonly(ArCore* core);
+const char* ar_core_master_host(ArCore* core);
+int ar_core_master_port(ArCore* core);
+
 #ifdef __cplusplus
 }
 #endif

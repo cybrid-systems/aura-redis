@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdio.h>
@@ -21,6 +22,9 @@
 
 void ar_net_shutdown(ArCore* core);
 
+static int flush_writes(ArCore* core, ArConn* c);
+static void conn_close(ArCore* core, ArConn* c);
+
 static int set_nonblock(int fd) {
   int fl = fcntl(fd, F_GETFL, 0);
   if (fl < 0)
@@ -37,6 +41,8 @@ static void conn_reset(ArConn* c) {
   c->should_close = 0;
   c->want_write = 0;
   c->authenticated = 0;
+  c->is_replica = 0;
+  c->is_master_link = 0;
 }
 
 static ArConn* conn_alloc(ArCore* core, int fd) {
@@ -162,6 +168,181 @@ typedef struct {
   const char* p;
   size_t len;
 } Arg;
+
+/* --- P2.14 replication (best-effort string KV) --- */
+static int resp_append_bulk(ArConn* dst, const char* p, size_t n) {
+  char hdr[48];
+  int hn = snprintf(hdr, sizeof(hdr), "$%zu\r\n", n);
+  if (hn < 0 || wbuf_append(dst, hdr, (size_t)hn) < 0)
+    return -1;
+  if (n && wbuf_append(dst, p, n) < 0)
+    return -1;
+  return wbuf_append(dst, "\r\n", 2);
+}
+
+static int resp_append_array_hdr(ArConn* dst, int argc) {
+  char hdr[32];
+  int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", argc);
+  if (hn < 0)
+    return -1;
+  return wbuf_append(dst, hdr, (size_t)hn);
+}
+
+static void repl_arm_flush(ArCore* core, ArConn* r) {
+  if (!r || !r->in_use)
+    return;
+  if (flush_writes(core, r) < 0)
+    conn_close(core, r);
+}
+
+static void repl_propagate(ArCore* core, Arg* argv, int argc) {
+  if (!core || !argv || argc < 1)
+    return;
+  if (core->repl_readonly || core->repl_applying)
+    return;
+  for (int i = 0; i < AR_MAX_CONN; ++i) {
+    ArConn* r = &core->conns[i];
+    if (!r->in_use || !r->is_replica)
+      continue;
+    if (resp_append_array_hdr(r, argc) < 0) {
+      conn_close(core, r);
+      continue;
+    }
+    int bad = 0;
+    for (int a = 0; a < argc; ++a) {
+      if (resp_append_bulk(r, argv[a].p, argv[a].len) < 0) {
+        bad = 1;
+        break;
+      }
+    }
+    if (bad)
+      conn_close(core, r);
+    else
+      repl_arm_flush(core, r);
+  }
+}
+
+static int repl_fullsync(ArCore* core, ArConn* c) {
+  if (!core || !c)
+    return -1;
+  uint64_t now = ar_now_ms();
+  for (int tier = 0; tier < 2; ++tier) {
+    ArEntry** table = (tier == 0) ? core->buckets : core->cold_buckets;
+    size_t nb = (tier == 0) ? core->nbuckets : core->cold_nbuckets;
+    if (!table)
+      continue;
+    for (size_t i = 0; i < nb; ++i) {
+      for (ArEntry* e = table[i]; e; e = e->next) {
+        if (e->expire_at && now >= e->expire_at)
+          continue;
+        int64_t ttl_sec = -1;
+        if (e->expire_at) {
+          ttl_sec = (int64_t)((e->expire_at - now + 999) / 1000);
+          if (ttl_sec <= 0)
+            continue;
+        }
+        if (ttl_sec > 0) {
+          char ttlbuf[32];
+          int tn = snprintf(ttlbuf, sizeof(ttlbuf), "%lld", (long long)ttl_sec);
+          if (resp_append_array_hdr(c, 5) < 0 || resp_append_bulk(c, "SET", 3) < 0 ||
+              resp_append_bulk(c, e->key, e->klen) < 0 ||
+              resp_append_bulk(c, e->val, e->vlen) < 0 ||
+              resp_append_bulk(c, "EX", 2) < 0 ||
+              resp_append_bulk(c, ttlbuf, (size_t)tn) < 0)
+            return -1;
+        } else {
+          if (resp_append_array_hdr(c, 3) < 0 || resp_append_bulk(c, "SET", 3) < 0 ||
+              resp_append_bulk(c, e->key, e->klen) < 0 ||
+              resp_append_bulk(c, e->val, e->vlen) < 0)
+            return -1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+static void repl_close_master_links(ArCore* core) {
+  for (int i = 0; i < AR_MAX_CONN; ++i) {
+    ArConn* c = &core->conns[i];
+    if (c->in_use && c->is_master_link)
+      conn_close(core, c);
+  }
+}
+
+static int repl_connect_master(ArCore* core, const char* host, int port) {
+  if (!core || !host || port <= 0 || port > 65535)
+    return 0;
+  if (core->epfd < 0)
+    return 0;
+  repl_close_master_links(core);
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0)
+    return 0;
+  struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons((uint16_t)port);
+  if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+    struct hostent* he = gethostbyname(host);
+    if (!he || !he->h_addr_list || !he->h_addr_list[0]) {
+      close(fd);
+      return 0;
+    }
+    memcpy(&addr.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
+  }
+  if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    close(fd);
+    return 0;
+  }
+  set_nonblock(fd);
+  int one = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+  ArConn* c = conn_alloc(core, fd);
+  if (!c) {
+    close(fd);
+    return 0;
+  }
+  c->is_master_link = 1;
+  c->authenticated = 1;
+  struct epoll_event ev;
+  ev.events = EPOLLIN | EPOLLET;
+  ev.data.ptr = c;
+  if (epoll_ctl(core->epfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+    conn_close(core, c);
+    return 0;
+  }
+  if (resp_append_array_hdr(c, 1) < 0 || resp_append_bulk(c, "SYNC", 4) < 0) {
+    conn_close(core, c);
+    return 0;
+  }
+  if (flush_writes(core, c) < 0) {
+    conn_close(core, c);
+    return 0;
+  }
+  snprintf(core->master_host, sizeof(core->master_host), "%s", host);
+  core->master_port = port;
+  core->repl_readonly = 1;
+  fprintf(stderr, "ar_repl: replicaof %s:%d (master link up)\n", host, port);
+  fflush(stderr);
+  return 1;
+}
+
+static int cmd_is_write(const char* cmd, size_t clen) {
+  return cmd_eq(cmd, clen, "set") || cmd_eq(cmd, clen, "del") ||
+         cmd_eq(cmd, clen, "expire") || cmd_eq(cmd, clen, "flushdb") ||
+         cmd_eq(cmd, clen, "mset") || cmd_eq(cmd, clen, "incr") ||
+         cmd_eq(cmd, clen, "decr") || cmd_eq(cmd, clen, "pin") ||
+         cmd_eq(cmd, clen, "unpin") || cmd_eq(cmd, clen, "policy") ||
+         cmd_eq(cmd, clen, "evict") || cmd_eq(cmd, clen, "layout") ||
+         cmd_eq(cmd, clen, "plugin") || cmd_eq(cmd, clen, "save") ||
+         cmd_eq(cmd, clen, "bgsave");
+}
+
+
 
 /* Parse one RESP value starting at *pos; for command arrays of bulk strings.
  * Returns bytes consumed (>0), 0 if incomplete, -1 on protocol error. */
@@ -353,6 +534,55 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       !cmd_allowed_unauth(cmd, clen))
     return reply_err(c, "NOAUTH Authentication required.");
 
+  /* P2.14: replica is read-only for client writes (master link may apply). */
+  if (core->repl_readonly && cmd_is_write(cmd, clen) && !c->is_master_link)
+    return reply_err(c, "READONLY You can't write against a read only replica.");
+
+  /* P2.14: CONFIG SET denied on replica (CONFIG GET ok). */
+  if (core->repl_readonly && !c->is_master_link && cmd_eq(cmd, clen, "config") &&
+      argc >= 2 && cmd_eq(argv[1].p, argv[1].len, "set"))
+    return reply_err(c, "READONLY You can't write against a read only replica.");
+
+  /* P2.14 — SYNC: mark feed + full sync (no +OK; stream SET commands). */
+  if (cmd_eq(cmd, clen, "sync")) {
+    if (argc != 1)
+      return reply_err(c, "ERR wrong number of arguments for 'sync'");
+    if (core->repl_readonly)
+      return reply_err(c, "ERR SYNC against a replica");
+    c->is_replica = 1;
+    if (repl_fullsync(core, c) < 0)
+      return reply_err(c, "ERR sync failed");
+    return 0;
+  }
+
+  /* P2.14 — REPLICAOF host port | REPLICAOF NO ONE */
+  if (cmd_eq(cmd, clen, "replicaof") || cmd_eq(cmd, clen, "slaveof")) {
+    if (argc == 3 && cmd_eq(argv[1].p, argv[1].len, "no") &&
+        cmd_eq(argv[2].p, argv[2].len, "one")) {
+      repl_close_master_links(core);
+      core->repl_readonly = 0;
+      core->master_host[0] = '\0';
+      core->master_port = 0;
+      return reply_ok(c);
+    }
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'replicaof'");
+    char host[64];
+    char portbuf[16];
+    size_t hl = argv[1].len < sizeof(host) - 1 ? argv[1].len : sizeof(host) - 1;
+    size_t pl = argv[2].len < sizeof(portbuf) - 1 ? argv[2].len : sizeof(portbuf) - 1;
+    memcpy(host, argv[1].p, hl);
+    host[hl] = '\0';
+    memcpy(portbuf, argv[2].p, pl);
+    portbuf[pl] = '\0';
+    int port = atoi(portbuf);
+    if (port <= 0)
+      return reply_err(c, "ERR invalid port");
+    if (!repl_connect_master(core, host, port))
+      return reply_err(c, "ERR replicaof connect failed");
+    return reply_ok(c);
+  }
+
   if (cmd_eq(cmd, clen, "auth")) {
     if (!core->requirepass || !core->requirepass[0])
       return reply_err(c, "ERR AUTH called without any password configured for "
@@ -473,6 +703,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       if (!ar_entry_set(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len))
         return reply_err(c, "ERR OOM");
     }
+    repl_propagate(core, argv, argc);
     return reply_ok(c);
   }
   if (cmd_eq(cmd, clen, "expire")) {
@@ -486,6 +717,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     int64_t sec = (int64_t)atoll(nbuf);
     int ok = ar_expire(core, argv[1].p, argv[1].len, sec);
     core->ops++;
+    if (ok)
+      repl_propagate(core, argv, argc);
     return reply_int(c, ok ? 1 : 0);
   }
   if (cmd_eq(cmd, clen, "ttl")) {
@@ -503,6 +736,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       if (ar_del_bin(core, argv[i].p, argv[i].len))
         n++;
     }
+    if (n > 0)
+      repl_propagate(core, argv, argc);
     return reply_int(c, n);
   }
   if (cmd_eq(cmd, clen, "exists")) {
@@ -547,6 +782,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
                         argv[i + 1].len))
         return reply_err(c, "ERR OOM");
     }
+    repl_propagate(core, argv, argc);
     return reply_ok(c);
   }
   if (cmd_eq(cmd, clen, "incr")) {
@@ -556,6 +792,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     int64_t v = ar_incr(core, argv[1].p, argv[1].len, 1, &ok);
     if (!ok)
       return reply_err(c, "ERR value is not an integer or out of range");
+    repl_propagate(core, argv, argc);
     return reply_int(c, v);
   }
   if (cmd_eq(cmd, clen, "decr")) {
@@ -565,10 +802,12 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     int64_t v = ar_incr(core, argv[1].p, argv[1].len, -1, &ok);
     if (!ok)
       return reply_err(c, "ERR value is not an integer or out of range");
+    repl_propagate(core, argv, argc);
     return reply_int(c, v);
   }
   if (cmd_eq(cmd, clen, "flushdb")) {
     ar_flushdb(core);
+    repl_propagate(core, argv, argc);
     return reply_ok(c);
   }
   if (cmd_eq(cmd, clen, "command")) {
@@ -770,6 +1009,10 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (cmd_eq(cmd, clen, "info")) {
     char hints[160];
     ar_core_policy_hints(core, hints, sizeof(hints));
+    int connected_slaves_count = 0;
+    for (int i = 0; i < AR_MAX_CONN; ++i)
+      if (core->conns[i].in_use && core->conns[i].is_replica)
+        connected_slaves_count++;
     char buf[4096];
     int n = snprintf(
         buf, sizeof(buf),
@@ -779,6 +1022,10 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         "binding:%s\n"
         "protected_mode:%s\n"
         "requirepass:%s\n"
+        "role:%s\n"
+        "master_host:%s\n"
+        "master_port:%d\n"
+        "connected_slaves:%d\n"
         "# Clients\n"
         "connected_clients:%d\n"
         "maxclients:%d\n"
@@ -830,6 +1077,10 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         core->bind_addr[0] ? core->bind_addr : "127.0.0.1",
         core->protected_mode ? "yes" : "no",
         (core->requirepass && core->requirepass[0]) ? "yes" : "no",
+        core->repl_readonly ? "slave" : "master",
+        core->master_host[0] ? core->master_host : "",
+        core->master_port,
+        connected_slaves_count,
         connected_clients(core),
         core->maxclients,
         core->timeout_sec,
@@ -1033,6 +1284,11 @@ static int flush_writes(ArCore* core, ArConn* c) {
 }
 
 static int process_reads(ArCore* core, ArConn* c) {
+  /* Master→replica feed: ignore replica ACKs/noise on the write link. */
+  if (c->is_replica) {
+    c->rlen = 0;
+    return flush_writes(core, c);
+  }
   Arg argv[AR_MAX_ARGV];
   size_t pos = 0;
   while (pos < c->rlen) {
@@ -1047,7 +1303,15 @@ static int process_reads(ArCore* core, ArConn* c) {
     }
     {
       uint64_t t0 = ar_now_us();
+      if (c->is_master_link)
+        core->repl_applying = 1;
       int dr = dispatch(core, c, argv, argc);
+      if (c->is_master_link) {
+        core->repl_applying = 0;
+        /* Drop +OK etc. — master does not read replica replies as commands. */
+        c->wlen = 0;
+        c->woff = 0;
+      }
       note_cmd_latency(core, ar_now_us() - t0);
       if (dr < 0) {
         c->should_close = 1;
@@ -1249,6 +1513,8 @@ static void close_idle_clients(ArCore* core) {
   for (int i = 0; i < AR_MAX_CONN; ++i) {
     ArConn* c = &core->conns[i];
     if (!c->in_use)
+      continue;
+    if (c->is_replica || c->is_master_link)
       continue;
     if (c->last_active_ms && now > c->last_active_ms &&
         (now - c->last_active_ms) >= limit) {

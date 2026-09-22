@@ -18,6 +18,8 @@ Last audited: 2026-09-22 (CST) for P0.4 AUTH / protected-mode.
 | `CONFIG` | GET 3 / SET 4 | array / `+OK` | P1.1+P1.12+P2.13: `maxmemory`, `requirepass`, `protected-mode`, `evict-samples`, `bind`, `maxclients`, `timeout`, `tcp-backlog`, `slowlog-log-slower-than`, `dir`, `dbfilename` |
 | `SAVE` | 1 | `+OK` | P2.13 sync `aura-rdb` snapshot |
 | `BGSAVE` | 1 | `+OK` | P2.13 fork child (or sync fallback) |
+| `REPLICAOF` / `SLAVEOF` | 3 | `+OK` | P2.14: `host port` or `NO ONE`; replica read-only |
+| `SYNC` | 1 | (stream) | P2.14 internal: full sync + feed; not for apps |
 | `QUIT` | any | `+OK` then close | Allowed pre-AUTH |
 | `GET` | 2 | bulk / null | |
 | `SET` | ≥3 | `+OK` / `ERR OOM` | Optional `EX <sec>` only (no PX/NX/XX on C path) |
@@ -58,7 +60,7 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 | Area | Examples |
 |------|----------|
 | Auth / admin | `SHUTDOWN`, `CLIENT`, `SLOWLOG`, `MONITOR` (AUTH/HELLO done in P0.4) |
-| Persistence / repl | `BGREWRITEAOF`, `REPLICAOF`, `PSYNC` (SAVE/BGSAVE done in P2.13) |
+| Persistence / repl | `BGREWRITEAOF`, `PSYNC` (SAVE/BGSAVE/REPLICAOF/SYNC done P2.13–14) |
 | Strings extras | `APPEND`, `STRLEN`, `GETSET`, `SETEX`, `PSETEX`, `SET` NX/XX/PX |
 | Keys extras | `KEYS`, `DBSIZE`, `RENAME`, `TYPE`, `UNLINK` (≠ DEL alias) |
 | Lists / hashes | `LPUSH`, `HSET`, … |

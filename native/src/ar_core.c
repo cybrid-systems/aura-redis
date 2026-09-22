@@ -793,6 +793,10 @@ ArCore* ar_core_create(void) {
   c->rdb_bgsave_pid = 0;
   c->rdb_loading = 0;
   c->rdb_last_bgsave_ok = 1;
+  c->repl_readonly = 0;
+  c->master_host[0] = '\0';
+  c->master_port = 0;
+  c->repl_applying = 0;
   return c;
 }
 
@@ -1473,4 +1477,18 @@ int ar_core_set_slowlog_slower_than(ArCore* core, int us) {
 
 int ar_core_slowlog_slower_than(ArCore* core) {
   return core ? core->slowlog_slower_than_us : 0;
+}
+
+int ar_core_repl_readonly(ArCore* core) {
+  return core ? core->repl_readonly : 0;
+}
+
+const char* ar_core_master_host(ArCore* core) {
+  if (!core || !core->master_host[0])
+    return "";
+  return core->master_host;
+}
+
+int ar_core_master_port(ArCore* core) {
+  return core ? core->master_port : 0;
 }
