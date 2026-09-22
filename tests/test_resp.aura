@@ -1,0 +1,51 @@
+; test_resp.aura — unit-style RESP encode/decode checks
+; Run: AURA_SANDBOX=off AURA_PATH=.deps/aura/lib ./.deps/aura/build/aura tests/test_resp.aura
+
+(require "src/redis/resp" all:)
+
+(define *fails* 0)
+
+(define (check name got want)
+  (if (equal? got want)
+    (begin (display "  OK ") (display name) (newline))
+    (begin
+      (set! *fails* (+ *fails* 1))
+      (display "  FAIL ") (display name)
+      (display " got=") (display got)
+      (display " want=") (display want)
+      (newline))))
+
+(display "test_resp: encode\n")
+(check "simple" (resp-encode-simple "OK") "+OK\r\n")
+(check "pong" (resp-encode-pong) "+PONG\r\n")
+(check "err" (resp-encode-error "ERR x") "-ERR x\r\n")
+(check "int" (resp-encode-int 42) ":42\r\n")
+(check "bulk" (resp-encode-bulk "hi") "$2\r\nhi\r\n")
+(check "null" (resp-encode-null) "$-1\r\n")
+
+(display "test_resp: parse\n")
+(define r1 (resp-try-parse "+PONG\r\n" 0))
+(check "parse simple next" (car r1) 7)
+(check "parse simple tag" (car (car (cdr r1))) "simple")
+(check "parse simple val" (car (cdr (car (cdr r1)))) "PONG")
+
+(define r2 (resp-try-parse "$3\r\nfoo\r\n" 0))
+(check "parse bulk" (car (cdr (car (cdr r2)))) "foo")
+
+(define r3 (resp-try-parse "$-1\r\n" 0))
+(check "parse null" (car (car (cdr r3))) "null")
+
+(define r4 (resp-try-parse "*2\r\n$4\r\nPING\r\n$4\r\nTEST\r\n" 0))
+(define args (resp-cmd-args (car (cdr r4))))
+(check "cmd0" (car args) "PING")
+(check "cmd1" (car (cdr args)) "TEST")
+
+; Incomplete
+(check "incomplete" (resp-try-parse "$3\r\nfo" 0) #f)
+
+(display "test_resp: fails=")
+(display *fails*)
+(newline)
+(if (= *fails* 0)
+  (display "test_resp: ALL PASSED\n")
+  (display "test_resp: FAILED\n"))

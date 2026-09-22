@@ -1,0 +1,197 @@
+; resp.aura — RESP2 encode / decode for aura-redis v0
+; (require "src/redis/resp" all:)
+;
+; Wire values (internal):
+;   ("simple" s)  — +simple string
+;   ("error" s)   — -error
+;   ("int" n)     — :integer
+;   ("bulk" s)    — $bulk string (s is string)
+;   ("null")      — $-1 null bulk
+;   ("array" xs)  — *array of wire values
+;
+; Incomplete input → #f from resp-try-parse.
+; Complete → (list next-index wire-value)
+
+(export resp-crlf
+        resp-encode-simple
+        resp-encode-error
+        resp-encode-int
+        resp-encode-bulk
+        resp-encode-null
+        resp-encode-array
+        resp-encode-ok
+        resp-encode-pong
+        resp-encode
+        resp-find-crlf
+        resp-parse-int-at
+        resp-try-parse
+        resp-unwrap-bulk
+        resp-cmd-args)
+
+(define (resp-crlf) "\r\n")
+
+(define (resp-encode-simple s)
+  (string-append "+" s "\r\n"))
+
+(define (resp-encode-error s)
+  (string-append "-" s "\r\n"))
+
+(define (resp-encode-int n)
+  (string-append ":" n "\r\n"))
+
+(define (resp-encode-bulk s)
+  (if (not (string? s))
+    (resp-encode-null)
+    (string-append "$" (string-length s) "\r\n" s "\r\n")))
+
+(define (resp-encode-null)
+  "$-1\r\n")
+
+(define (resp-encode-ok) (resp-encode-simple "OK"))
+(define (resp-encode-pong) (resp-encode-simple "PONG"))
+
+(define (resp-encode-array items)
+  (let ((n (length items))
+        (body "")
+        (xs items))
+    (while (lambda () (pair? xs))
+      (lambda ()
+        (set! body (string-append body (resp-encode (car xs))))
+        (set! xs (cdr xs))))
+    (string-append "*" n "\r\n" body)))
+
+(define (resp-encode v)
+  (cond
+    ((not (pair? v))
+     (if (string? v)
+       (resp-encode-bulk v)
+       (if (number? v)
+         (resp-encode-int v)
+         (resp-encode-error "ERR encode"))))
+    ((string=? (car v) "simple") (resp-encode-simple (car (cdr v))))
+    ((string=? (car v) "error") (resp-encode-error (car (cdr v))))
+    ((string=? (car v) "int") (resp-encode-int (car (cdr v))))
+    ((string=? (car v) "bulk") (resp-encode-bulk (car (cdr v))))
+    ((string=? (car v) "null") (resp-encode-null))
+    ((string=? (car v) "array") (resp-encode-array (car (cdr v))))
+    (else (resp-encode-error "ERR encode"))))
+
+; Find index of \r\n starting at `start`, or -1
+(define (resp-find-crlf buf start)
+  (let ((n (string-length buf))
+        (i start)
+        (found -1))
+    (while (lambda () (and (< i (- n 1)) (< found 0)))
+      (lambda ()
+        (if (and (= (string-ref buf i) 13)
+                 (= (string-ref buf (+ i 1)) 10))
+          (set! found i)
+          (set! i (+ i 1)))))
+    found))
+
+; Parse signed integer from buf[start .. crlf-index). Returns number or #f
+(define (resp-parse-int-at buf start end)
+  (if (>= start end)
+    #f
+    (let ((s (substring buf start end))
+          (n (string->number (substring buf start end))))
+      (if (number? n) n #f))))
+
+; Try parse one RESP value at index `i`.
+; Returns #f if incomplete, else (list next-index value)
+(define (resp-try-parse buf i)
+  (let ((n (string-length buf)))
+    (if (>= i n)
+      #f
+      (let ((t (string-ref buf i)))
+        (cond
+          ((or (= t 43) (= t 45) (= t 58))
+           (resp-parse-line buf i n t))
+          ((= t 36)
+           (resp-parse-bulk buf i n))
+          ((= t 42)
+           (resp-parse-array buf i n))
+          (else
+           (list (+ i 1) (list "error" "ERR protocol"))))))))
+
+(define (resp-parse-line buf i n t)
+  (let ((cr (resp-find-crlf buf (+ i 1))))
+    (if (< cr 0)
+      #f
+      (let ((payload (substring buf (+ i 1) cr))
+            (next (+ cr 2)))
+        (cond
+          ((= t 43) (list next (list "simple" payload)))
+          ((= t 45) (list next (list "error" payload)))
+          (else
+           (let ((num (string->number payload)))
+             (if (number? num)
+               (list next (list "int" num))
+               (list next (list "error" "ERR int"))))))))))
+
+(define (resp-parse-bulk buf i n)
+  (let ((cr (resp-find-crlf buf (+ i 1))))
+    (if (< cr 0)
+      #f
+      (let ((len (string->number (substring buf (+ i 1) cr))))
+        (if (not (number? len))
+          (list (+ cr 2) (list "error" "ERR bulk len"))
+          (if (< len 0)
+            (list (+ cr 2) (list "null"))
+            (let ((data-start (+ cr 2))
+                  (need (+ cr 2 len 2)))
+              (if (> need n)
+                #f
+                (list need
+                      (list "bulk"
+                            (substring buf data-start (+ data-start len))))))))))))
+
+(define (resp-parse-array buf i n)
+  (let ((cr (resp-find-crlf buf (+ i 1))))
+    (if (< cr 0)
+      #f
+      (let ((alen (string->number (substring buf (+ i 1) cr))))
+        (if (not (number? alen))
+          (list (+ cr 2) (list "error" "ERR array len"))
+          (if (< alen 0)
+            (list (+ cr 2) (list "null"))
+            (let ((pos (+ cr 2))
+                  (items (list))
+                  (k 0)
+                  (ok #t)
+                  (fail #f))
+              (while (lambda () (and ok (< k alen)))
+                (lambda ()
+                  (let ((r (resp-try-parse buf pos)))
+                    (if (not r)
+                      (begin (set! ok #f) (set! fail #t))
+                      (begin
+                        (set! pos (car r))
+                        (set! items (append items (list (car (cdr r)))))
+                        (set! k (+ k 1)))))))
+              (if fail
+                #f
+                (list pos (list "array" items))))))))))
+
+; Unwrap bulk/simple/int to a string (for command args)
+(define (resp-unwrap-bulk v)
+  (cond
+    ((not (pair? v)) (if (string? v) v ""))
+    ((string=? (car v) "bulk") (car (cdr v)))
+    ((string=? (car v) "simple") (car (cdr v)))
+    ((string=? (car v) "int") (number->string (car (cdr v))))
+    ((string=? (car v) "null") #f)
+    (else "")))
+
+; Convert a top-level array wire value into a list of string args
+(define (resp-cmd-args v)
+  (if (and (pair? v) (string=? (car v) "array"))
+    (let ((xs (car (cdr v)))
+          (out (list)))
+      (while (lambda () (pair? xs))
+        (lambda ()
+          (let ((u (resp-unwrap-bulk (car xs))))
+            (set! out (append out (list (if u u ""))))
+            (set! xs (cdr xs)))))
+      out)
+    (list)))

@@ -1,0 +1,96 @@
+; server.aura — aura-redis TCP server entry (RESP2 over loopback)
+;
+; Usage (from repo root, after building Aura):
+;   AURA_SANDBOX=off AURA_PIPELINE_STRICT=0 AURA_PATH=.deps/aura/lib \
+;     ./.deps/aura/build/aura src/redis/server.aura [port]
+;
+; Limitations (v0):
+;   - tcp-listen binds 127.0.0.1 only (Aura std/socket)
+;   - one client handled at a time (accept → serve → close → accept)
+;   - no AUTH / persistence / pubsub / cluster
+
+(require "std/socket" all:)
+(require "src/redis/resp" all:)
+(require "src/redis/commands" all:)
+
+(define (default-port)
+  (let ((args (command-line)))
+    (if (and (pair? args) (number? (string->number (car args))))
+      (string->number (car args))
+      6379)))
+
+(define (buf-append a b)
+  (string-append a b))
+
+; Process as many complete RESP messages as possible from buffer.
+; Returns (list remaining-buffer should-quit)
+(define (process-buffer sock buf)
+  (let ((done #f)
+        (quit #f)
+        (cur buf))
+    (while (lambda () (not done))
+      (lambda ()
+        (if (= (string-length cur) 0)
+          (set! done #t)
+          (let ((r (resp-try-parse cur 0)))
+            (if (not r)
+              (set! done #t)
+              (let ((next (car r))
+                    (val (car (cdr r)))
+                    (args (resp-cmd-args (car (cdr r))))
+                    (reply ""))
+                (set! args (resp-cmd-args val))
+                (set! reply (cmd-dispatch args))
+                (tcp-send sock reply)
+                (if (and (pair? args)
+                         (string=? (ascii-upcase (car args)) "QUIT"))
+                  (begin (set! quit #t) (set! done #t))
+                  (set! cur (substring cur next (string-length cur))))))))))
+    (list cur quit)))
+
+(define (serve-client sock)
+  (let ((buf "")
+        (alive #t))
+    (while (lambda () alive)
+      (lambda ()
+        (let ((chunk (tcp-recv sock 65536)))
+          (cond
+            ((not (string? chunk))
+             (set! alive #f))
+            ((= (string-length chunk) 0)
+             (set! alive #f))
+            (else
+             (set! buf (buf-append buf chunk))
+             (let ((r (process-buffer sock buf)))
+               (set! buf (car r))
+               (if (car (cdr r))
+                 (set! alive #f))))))))
+    (tcp-close sock)
+    #t))
+
+(define (server-loop port)
+  (let ((L (tcp-listen port)))
+    (if (not (integer? L))
+      (begin
+        (display "aura-redis: tcp-listen failed (need AURA_SANDBOX=off?)\n")
+        1)
+      (begin
+        (display "aura-redis listening on 127.0.0.1:")
+        (display (tcp-local-port L))
+        (display " (loopback only; sequential clients)\n")
+        (let ((running #t))
+          (while (lambda () running)
+            (lambda ()
+              (let ((c (tcp-accept L)))
+                (if (integer? c)
+                  (serve-client c)
+                  (begin
+                    (display "aura-redis: accept failed\n")
+                    (set! running #f))))))
+          (tcp-close L)
+          0)))))
+
+(define *exit* (server-loop (default-port)))
+(display "aura-redis exit=")
+(display *exit*)
+(newline)

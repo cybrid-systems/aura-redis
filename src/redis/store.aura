@@ -1,0 +1,254 @@
+; store.aura — in-memory Redis-like store for aura-redis v0
+; (require "src/redis/store" all:)
+;
+; Entry shape (hash):
+;   "t"  → "string" | "list" | "hash"
+;   "v"  → string | list-of-strings | nested hash
+;   "ex" → expire deadline ms (0 = none)
+
+(export store-new
+        store-alive?
+        store-purge!
+        store-get
+        store-set-string!
+        store-del!
+        store-exists?
+        store-keys
+        store-flush!
+        store-type
+        store-ttl
+        store-expire!
+        store-incr!
+        store-list-push!
+        store-list-pop!
+        store-list-len
+        store-hash-set!
+        store-hash-get
+        store-hash-del!
+        store-hash-getall)
+
+(define (store-new)
+  (hash))
+
+(define (store-alive? entry now)
+  (let ((ex (hash-ref entry "ex" 0)))
+    (or (= ex 0) (> ex now))))
+
+(define (store-purge! db)
+  (let ((now (current-time-ms))
+        (ks (hash-keys db)))
+    (while (lambda () (pair? ks))
+      (lambda ()
+        (let ((k (car ks))
+              (e (hash-ref db k #f)))
+          (if (and e (not (store-alive? e now)))
+            (hash-remove! db k))
+          (set! ks (cdr ks)))))
+    db))
+
+(define (store-get db key)
+  (store-purge! db)
+  (hash-ref db key #f))
+
+(define (store-set-string! db key val ex-ms)
+  (store-purge! db)
+  (let ((entry (hash)))
+    (hash-set! entry "t" "string")
+    (hash-set! entry "v" val)
+    (hash-set! entry "ex" (if (and (number? ex-ms) (> ex-ms 0)) ex-ms 0))
+    (hash-set! db key entry)
+    #t))
+
+(define (store-del! db keys)
+  (store-purge! db)
+  (let ((n 0)
+        (ks keys))
+    (while (lambda () (pair? ks))
+      (lambda ()
+        (if (hash-has-key? db (car ks))
+          (begin
+            (hash-remove! db (car ks))
+            (set! n (+ n 1))))
+        (set! ks (cdr ks))))
+    n))
+
+(define (store-exists? db keys)
+  (store-purge! db)
+  (let ((n 0)
+        (ks keys))
+    (while (lambda () (pair? ks))
+      (lambda ()
+        (if (hash-has-key? db (car ks))
+          (set! n (+ n 1)))
+        (set! ks (cdr ks))))
+    n))
+
+(define (store-keys db)
+  (store-purge! db)
+  (hash-keys db))
+
+(define (store-flush! db)
+  (let ((ks (hash-keys db)))
+    (while (lambda () (pair? ks))
+      (lambda ()
+        (hash-remove! db (car ks))
+        (set! ks (cdr ks))))
+    #t))
+
+(define (store-type db key)
+  (let ((e (store-get db key)))
+    (if (not e)
+      "none"
+      (hash-ref e "t" "none"))))
+
+(define (store-ttl db key)
+  (let ((e (store-get db key)))
+    (if (not e)
+      -2
+      (let ((ex (hash-ref e "ex" 0)))
+        (if (= ex 0)
+          -1
+          (let ((left (quotient (- ex (current-time-ms)) 1000)))
+            (if (< left 0) -2 left)))))))
+
+(define (store-expire! db key seconds)
+  (let ((e (store-get db key)))
+    (if (not e)
+      0
+      (begin
+        (hash-set! e "ex" (+ (current-time-ms) (* seconds 1000)))
+        (hash-set! db key e)
+        1))))
+
+(define (store-incr! db key delta)
+  (store-purge! db)
+  (let ((e (hash-ref db key #f)))
+    (if (not e)
+      (begin
+        (store-set-string! db key (number->string delta) 0)
+        delta)
+      (if (not (string=? (hash-ref e "t" "") "string"))
+        #f
+        (let ((cur (string->number (hash-ref e "v" "0"))))
+          (if (not (number? cur))
+            #f
+            (let ((n (+ cur delta)))
+              (hash-set! e "v" (number->string n))
+              (hash-set! db key e)
+              n)))))))
+
+(define (store-ensure-list! db key)
+  (let ((e (hash-ref db key #f)))
+    (cond
+      ((not e)
+       (let ((entry (hash)))
+         (hash-set! entry "t" "list")
+         (hash-set! entry "v" (list))
+         (hash-set! entry "ex" 0)
+         (hash-set! db key entry)
+         entry))
+      ((string=? (hash-ref e "t" "") "list") e)
+      (else #f))))
+
+(define (store-list-push! db key val left?)
+  (store-purge! db)
+  (let ((e (store-ensure-list! db key)))
+    (if (not e)
+      #f
+      (let ((xs (hash-ref e "v" (list))))
+        (if left?
+          (hash-set! e "v" (cons val xs))
+          (hash-set! e "v" (append xs (list val))))
+        (hash-set! db key e)
+        (length (hash-ref e "v" (list)))))))
+
+(define (store-list-pop! db key left?)
+  (store-purge! db)
+  (let ((e (hash-ref db key #f)))
+    (if (or (not e) (not (string=? (hash-ref e "t" "") "list")))
+      #f
+      (let ((xs (hash-ref e "v" (list))))
+        (if (null? xs)
+          #f
+          (if left?
+            (let ((v (car xs)))
+              (hash-set! e "v" (cdr xs))
+              (if (null? (cdr xs)) (hash-remove! db key) (hash-set! db key e))
+              v)
+            (let ((rev (reverse xs)))
+              (let ((v (car rev))
+                    (rest (reverse (cdr rev))))
+                (hash-set! e "v" rest)
+                (if (null? rest) (hash-remove! db key) (hash-set! db key e))
+                v))))))))
+
+(define (store-list-len db key)
+  (let ((e (store-get db key)))
+    (if (or (not e) (not (string=? (hash-ref e "t" "") "list")))
+      0
+      (length (hash-ref e "v" (list))))))
+
+(define (store-ensure-hash! db key)
+  (let ((e (hash-ref db key #f)))
+    (cond
+      ((not e)
+       (let ((entry (hash)))
+         (hash-set! entry "t" "hash")
+         (hash-set! entry "v" (hash))
+         (hash-set! entry "ex" 0)
+         (hash-set! db key entry)
+         entry))
+      ((string=? (hash-ref e "t" "") "hash") e)
+      (else #f))))
+
+(define (store-hash-set! db key field val)
+  (store-purge! db)
+  (let ((e (store-ensure-hash! db key)))
+    (if (not e)
+      #f
+      (let ((h (hash-ref e "v"))
+            (created 0))
+        (set! created (if (hash-has-key? h field) 0 1))
+        (hash-set! h field val)
+        (hash-set! e "v" h)
+        (hash-set! db key e)
+        created))))
+
+(define (store-hash-get db key field)
+  (let ((e (store-get db key)))
+    (if (or (not e) (not (string=? (hash-ref e "t" "") "hash")))
+      #f
+      (hash-ref (hash-ref e "v") field #f))))
+
+(define (store-hash-del! db key fields)
+  (let ((e (store-get db key)))
+    (if (or (not e) (not (string=? (hash-ref e "t" "") "hash")))
+      0
+      (let ((h (hash-ref e "v"))
+            (n 0)
+            (fs fields))
+        (while (lambda () (pair? fs))
+          (lambda ()
+            (if (hash-has-key? h (car fs))
+              (begin
+                (hash-remove! h (car fs))
+                (set! n (+ n 1))))
+            (set! fs (cdr fs))))
+        (hash-set! e "v" h)
+        (if (= (hash-length h) 0)
+          (hash-remove! db key)
+          (hash-set! db key e))
+        n))))
+
+(define (store-hash-getall db key)
+  (let ((e (store-get db key)))
+    (if (or (not e) (not (string=? (hash-ref e "t" "") "hash")))
+      (list)
+      (let ((h (hash-ref e "v"))
+            (ks (hash-keys (hash-ref e "v")))
+            (out (list)))
+        (while (lambda () (pair? ks))
+          (lambda ()
+            (set! out (append out (list (car ks) (hash-ref h (car ks) ""))))
+            (set! ks (cdr ks))))
+        out))))
