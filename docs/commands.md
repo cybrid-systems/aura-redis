@@ -48,6 +48,12 @@ Last audited: 2026-09-23 (CST) for P3.16 HASH (+TYPE).
 | `HEXISTS` | 3 | 0/1 | |
 | `HLEN` | 2 | integer | |
 | `HINCRBY` | 4 | integer | integer field values |
+| `LPUSH` / `RPUSH` | ≥3 | integer length | P3.16b |
+| `LPOP` / `RPOP` | 2 | bulk/null | |
+| `LLEN` | 2 | integer | |
+| `LRANGE` | 4 | array | Redis index semantics (neg OK) |
+| `LINDEX` | 3 | bulk/null | |
+
 
 
 Wrong arity → `-ERR wrong number of arguments for '<cmd>'`.  
@@ -73,7 +79,7 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 | Persistence / repl | `BGREWRITEAOF`, `PSYNC` (SAVE/BGSAVE/REPLICAOF/SYNC done P2.13–14) |
 | Strings extras | `APPEND`, `STRLEN`, `GETSET`, `SETEX`, `PSETEX`, `SET` NX/XX/PX |
 | Keys extras | `KEYS`, `DBSIZE`, `RENAME`, `UNLINK` (≠ DEL alias) |
-| Lists / zsets | `LPUSH`, `ZADD`, … (HASH done P3.16a) |
+| Zsets | `ZADD`, … (HASH+LIST done P3.16a/b) |
 | Pub/Sub, transactions | `SUBSCRIBE`, `MULTI`/`EXEC` |
 | Cluster / modules | all |
 

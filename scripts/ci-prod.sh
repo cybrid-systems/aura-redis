@@ -24,5 +24,6 @@ export AURA_REDIS_SOAK_SEC="${AURA_REDIS_SOAK_SEC:-30}"
 run P0.7 tests/test_prod_soak.py
 
 run P3.16a tests/test_prod_hash.py
+run P3.16b tests/test_prod_list.py
 
 echo "=== ci-prod: ALL PASSED ==="

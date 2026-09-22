@@ -1286,6 +1286,138 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     return reply_err(c, "ERR wrong number of arguments for 'plugin'");
   }
 
+
+  /* ---- P3.16b LIST ---- */
+  if (cmd_eq(cmd, clen, "lpush") || cmd_eq(cmd, clen, "rpush")) {
+    if (argc < 3)
+      return reply_err(c, cmd_eq(cmd, clen, "lpush")
+                              ? "ERR wrong number of arguments for 'lpush'"
+                              : "ERR wrong number of arguments for 'rpush'");
+    int left = cmd_eq(cmd, clen, "lpush");
+    int nv = argc - 2;
+    const char* vals[64];
+    size_t vlens[64];
+    if (nv > 64)
+      return reply_err(c, "ERR too many values");
+    for (int i = 0; i < nv; ++i) {
+      vals[i] = argv[2 + i].p;
+      vlens[i] = argv[2 + i].len;
+    }
+    int wt = 0;
+    int64_t len = ar_list_push(core, argv[1].p, argv[1].len, left, nv, vals,
+                               vlens, &wt);
+    if (wt || len < 0)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    return reply_int(c, len);
+  }
+  if (cmd_eq(cmd, clen, "lpop") || cmd_eq(cmd, clen, "rpop")) {
+    if (argc != 2)
+      return reply_err(c, cmd_eq(cmd, clen, "lpop")
+                              ? "ERR wrong number of arguments for 'lpop'"
+                              : "ERR wrong number of arguments for 'rpop'");
+    int left = cmd_eq(cmd, clen, "lpop");
+    int wt = 0;
+    size_t ol = 0;
+    char* v = ar_list_pop(core, argv[1].p, argv[1].len, left, &ol, &wt);
+    if (wt)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (!v)
+      return reply_null_bulk(c);
+    int rc = reply_bulk(c, v, ol);
+    free(v);
+    return rc;
+  }
+  if (cmd_eq(cmd, clen, "llen")) {
+    if (argc != 2)
+      return reply_err(c, "ERR wrong number of arguments for 'llen'");
+    int wt = 0;
+    int64_t n = ar_list_llen(core, argv[1].p, argv[1].len, &wt);
+    if (wt || n < 0)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    return reply_int(c, n);
+  }
+  if (cmd_eq(cmd, clen, "lindex")) {
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'lindex'");
+    char nbuf[32];
+    if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[2].p, argv[2].len);
+    nbuf[argv[2].len] = '\0';
+    char* end = NULL;
+    long long idx = strtoll(nbuf, &end, 10);
+    if (end == nbuf || *end != '\0')
+      return reply_err(c, "ERR value is not an integer or out of range");
+    int wt = 0;
+    size_t ol = 0;
+    char* v = ar_list_lindex(core, argv[1].p, argv[1].len, (int64_t)idx, &ol,
+                             &wt);
+    if (wt)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (!v)
+      return reply_null_bulk(c);
+    int rc = reply_bulk(c, v, ol);
+    free(v);
+    return rc;
+  }
+  if (cmd_eq(cmd, clen, "lrange")) {
+    if (argc != 4)
+      return reply_err(c, "ERR wrong number of arguments for 'lrange'");
+    char nbuf[32];
+    long long start, stop;
+    char* end = NULL;
+    if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf) ||
+        argv[3].len == 0 || argv[3].len >= sizeof(nbuf))
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[2].p, argv[2].len);
+    nbuf[argv[2].len] = '\0';
+    start = strtoll(nbuf, &end, 10);
+    if (end == nbuf || *end != '\0')
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[3].p, argv[3].len);
+    nbuf[argv[3].len] = '\0';
+    end = NULL;
+    stop = strtoll(nbuf, &end, 10);
+    if (end == nbuf || *end != '\0')
+      return reply_err(c, "ERR value is not an integer or out of range");
+    int wt = 0;
+    ArList* l = ar_list_get(core, argv[1].p, argv[1].len, &wt);
+    if (wt)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (!l || l->len == 0)
+      return wbuf_append(c, "*0\r\n", 4);
+    int64_t len = (int64_t)l->len;
+    if (start < 0)
+      start = len + start;
+    if (stop < 0)
+      stop = len + stop;
+    if (start < 0)
+      start = 0;
+    if (stop >= len)
+      stop = len - 1;
+    if (start > stop || start >= len)
+      return wbuf_append(c, "*0\r\n", 4);
+    int n = (int)(stop - start + 1);
+    char hdr[32];
+    int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", n);
+    if (wbuf_append(c, hdr, (size_t)hn) < 0)
+      return -1;
+    ArListNode* node = l->head;
+    for (int64_t i = 0; i < start && node; ++i)
+      node = node->next;
+    for (int i = 0; i < n && node; ++i) {
+      if (reply_bulk(c, node->val, node->vlen) < 0)
+        return -1;
+      node = node->next;
+    }
+    return 0;
+  }
+
   /* ---- P3.16a HASH ---- */
   if (cmd_eq(cmd, clen, "type")) {
     if (argc != 2)
