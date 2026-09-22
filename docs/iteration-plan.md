@@ -115,3 +115,28 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 ## Current position
 
 **Iterations 0–9 done.** Aura-native path is the product story; PLUGIN remains escape hatch (DENY_PLUGIN under sandbox profile).
+
+---
+
+## Future iterations (10+) — adaptive load mutation
+
+Design exploration (archetypes, P0–P3 axes, harness names, numbered backlog with exit criteria):
+
+→ [`runtime-mutation-explore.md`](runtime-mutation-explore.md)
+
+Summary of planned next steps:
+
+| Iter | Theme |
+|------|--------|
+| 10 | Multi-signal INFO + choose-fn API |
+| 11 | Joint EVICT+LAYOUT policy |
+| 12 | Industry harness pack (`zipf_hotkey`, `diurnal_shift`, …) |
+| 13 | RESP eviction tunables (`samples N`, soft watermark) |
+| 14 | Hot-key pin set |
+| 15 | New kernel: SLRU or TTL-aware |
+| 16 | Soft-goal choose (hit% vs evict CPU) |
+| 17 | hot_cold threshold mutation via Aura |
+| 18 | Optional `std/evolve` thresholds |
+| 19 | W-TinyLFU-ish / GDSF kernel |
+| 20 | Per-prefix policy namespace sketch |
+| 21 | ZSET / gaming — only if data-type roadmap opens |

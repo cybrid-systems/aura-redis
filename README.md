@@ -11,7 +11,8 @@ Pinned Aura revision: [`b0c6b3555e4287c8807b019a8b9316ee94c988b6`](https://githu
 ## Architecture / 架构
 
 Detailed design: [`docs/architecture.md`](docs/architecture.md)  
-Iteration plan: [`docs/iteration-plan.md`](docs/iteration-plan.md)
+Iteration plan: [`docs/iteration-plan.md`](docs/iteration-plan.md)  
+Runtime mutation toward big-tech adaptive loads: [`docs/runtime-mutation-explore.md`](docs/runtime-mutation-explore.md)
 
 **Direction:** C data plane for fast GET/SET + built-in kernels; **Aura mutates policy code** (`hot-strategy` / sandbox) and applies via RESP `EVICT`/`LAYOUT`. PLUGIN/.so is an escape hatch only — see [`docs/aura-native-control.md`](docs/aura-native-control.md).
 
@@ -222,6 +223,7 @@ src/redis/policy/            choose-fn body strings
 src/redis/server_ffi.aura    optional FFI serve + inlined adaptive
 src/redis/ffi_boot.aura      in-process FFI helpers
 docs/aura-native-control.md  sandbox + mutation + hot-strategy story
+docs/runtime-mutation-explore.md  big-tech loads → mutation axes + Iter 10+
 native/                      libaura_redis_core.so + aura_redis_server
 scripts/build-native.sh
 scripts/run-server-ffi.sh

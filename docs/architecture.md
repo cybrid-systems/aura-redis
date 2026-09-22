@@ -167,7 +167,8 @@ Self-modification paths (**primary = Aura-native**):
 | Direct `ar_core_set_evict_by_name` | C/FFI fast path for built-ins |
 | `ar_core_load_evict_plugin` / RESP `PLUGIN` | **Escape hatch only** (denied under `AURA_REDIS_DENY_PLUGIN=1`) |
 
-Details: [`aura-native-control.md`](aura-native-control.md).
+Details: [`aura-native-control.md`](aura-native-control.md).  
+Next: runtime mutation axes for big-tech loads — [`runtime-mutation-explore.md`](runtime-mutation-explore.md).
 
 #### Live plugin reload (Iteration 7 stretch — escape hatch)
 
