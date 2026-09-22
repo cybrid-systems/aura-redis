@@ -59,6 +59,9 @@ Last audited: 2026-09-23 (CST) for P3.16 HASH (+TYPE).
 | `ZCARD` | 2 | integer | |
 | `ZRANGE` | 4–5 | array | optional WITHSCORES |
 | `ZRANGEBYSCORE` | ≥4 | array | min/max, -inf/+inf; WITHSCORES; LIMIT |
+| `MULTI` | 1 | +OK | P3.17a; subsequent cmds → +QUEUED |
+| `EXEC` | 1 | array | replies; error if no MULTI |
+| `DISCARD` | 1 | +OK | clear queue |
 
 
 
@@ -86,7 +89,7 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 | Strings extras | `APPEND`, `STRLEN`, `GETSET`, `SETEX`, `PSETEX`, `SET` NX/XX/PX |
 | Keys extras | `KEYS`, `DBSIZE`, `RENAME`, `UNLINK` (≠ DEL alias) |
 | (types) | HASH/LIST/ZSET done P3.16 |
-| Pub/Sub, transactions | `SUBSCRIBE`, `MULTI`/`EXEC` |
+| Pub/Sub | `SUBSCRIBE`, … (MULTI done P3.17a; no WATCH) |
 | Cluster / modules | all |
 
 Clients needing these should not assume Redis parity; extend only under production P3 demand.

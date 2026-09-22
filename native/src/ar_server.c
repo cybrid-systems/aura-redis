@@ -35,7 +35,36 @@ static int set_nonblock(int fd) {
   return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
+
+static void multi_clear(ArConn* c) {
+  if (!c)
+    return;
+  for (int i = 0; i < c->multi_n; ++i) {
+    for (int a = 0; a < c->multi_q[i].argc; ++a) {
+      free(c->multi_q[i].args[a]);
+      c->multi_q[i].args[a] = NULL;
+    }
+    c->multi_q[i].argc = 0;
+  }
+  c->multi_n = 0;
+  c->in_multi = 0;
+}
+
+static void pubsub_clear(ArConn* c) {
+  if (!c)
+    return;
+  for (int i = 0; i < c->nsubs; ++i) {
+    free(c->sub_channels[i]);
+    c->sub_channels[i] = NULL;
+    c->sub_clens[i] = 0;
+  }
+  c->nsubs = 0;
+  c->pubsub_mode = 0;
+}
+
 static void conn_reset(ArConn* c) {
+  multi_clear(c);
+  pubsub_clear(c);
   c->fd = -1;
   c->in_use = 0;
   c->rlen = 0;
@@ -587,6 +616,74 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (core->repl_readonly && !c->is_master_link && cmd_eq(cmd, clen, "config") &&
       argc >= 2 && cmd_eq(argv[1].p, argv[1].len, "set"))
     return reply_err(c, "READONLY You can't write against a read only replica.");
+
+  /* P3.17a — MULTI/EXEC/DISCARD */
+  if (cmd_eq(cmd, clen, "multi")) {
+    if (argc != 1)
+      return reply_err(c, "ERR wrong number of arguments for 'multi'");
+    if (c->in_multi)
+      return reply_err(c, "ERR MULTI calls can not be nested");
+    c->in_multi = 1;
+    c->multi_n = 0;
+    return reply_ok(c);
+  }
+  if (cmd_eq(cmd, clen, "discard")) {
+    if (argc != 1)
+      return reply_err(c, "ERR wrong number of arguments for 'discard'");
+    if (!c->in_multi)
+      return reply_err(c, "ERR DISCARD without MULTI");
+    multi_clear(c);
+    return reply_ok(c);
+  }
+  if (cmd_eq(cmd, clen, "exec")) {
+    if (argc != 1)
+      return reply_err(c, "ERR wrong number of arguments for 'exec'");
+    if (!c->in_multi)
+      return reply_err(c, "ERR EXEC without MULTI");
+    int nq = c->multi_n;
+    c->in_multi = 0; /* run without re-queuing */
+    char hdr[32];
+    int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", nq);
+    if (wbuf_append(c, hdr, (size_t)hn) < 0) {
+      multi_clear(c);
+      return -1;
+    }
+    for (int qi = 0; qi < nq; ++qi) {
+      ArQueuedCmd* q = &c->multi_q[qi];
+      Arg qargv[AR_MULTI_ARGV];
+      for (int a = 0; a < q->argc; ++a) {
+        qargv[a].p = q->args[a];
+        qargv[a].len = q->alens[a];
+      }
+      if (dispatch(core, c, qargv, q->argc) < 0) {
+        multi_clear(c);
+        return -1;
+      }
+    }
+    multi_clear(c);
+    return 0;
+  }
+  /* Inside MULTI: queue (except handled above). */
+  if (c->in_multi) {
+    if (c->multi_n >= AR_MULTI_MAX)
+      return reply_err(c, "ERR MULTI queue is full");
+    if (argc > AR_MULTI_ARGV)
+      return reply_err(c, "ERR too many arguments to queue");
+    ArQueuedCmd* q = &c->multi_q[c->multi_n];
+    q->argc = argc;
+    for (int a = 0; a < argc; ++a) {
+      q->args[a] = ar_xmemdup(argv[a].p, argv[a].len);
+      q->alens[a] = argv[a].len;
+      if (!q->args[a]) {
+        for (int j = 0; j < a; ++j)
+          free(q->args[j]);
+        q->argc = 0;
+        return reply_err(c, "ERR OOM");
+      }
+    }
+    c->multi_n++;
+    return wbuf_append(c, "+QUEUED\r\n", 9);
+  }
 
   /* P2.14 — SYNC: mark feed + full sync (no +OK; stream SET commands). */
   if (cmd_eq(cmd, clen, "sync")) {

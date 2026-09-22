@@ -97,7 +97,8 @@
 | **P3.16b LIST** | **DONE** — LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE/LINDEX |
 | **P3.16c ZSET** | **DONE** — ZADD/ZSCORE/ZREM/ZCARD/ZRANGE/ZRANGEBYSCORE (sorted array) |
 | **P3.16** | **DONE** (HASH+LIST+ZSET) |
-| **Production P3** | **IN PROGRESS** (P3.16 done; MULTI/PubSub next) |
+| **P3.17a MULTI/EXEC** | **DONE** — MULTI/EXEC/DISCARD; no WATCH |
+| **Production P3** | **IN PROGRESS** (Pub/Sub next) |
 
 MVP/explore remains valuable demos; **ship bar moves to this document.**
 
@@ -163,3 +164,4 @@ Production does **not** mean “C-only Redis clone.”
 | 2026-09-23 | **P3.16a** | HASH + TYPE; `ar_types.c`; RDB skips non-string; `tests/test_prod_hash.py` |
 | 2026-09-23 | **P3.16b** | LIST commands; `tests/test_prod_list.py` |
 | 2026-09-23 | **P3.16c** | ZSET sorted-array; ZRANGEBYSCORE+LIMIT; `tests/test_prod_zset.py` |
+| 2026-09-23 | **P3.17a** | MULTI/EXEC/DISCARD (+QUEUED); no WATCH; `tests/test_prod_multi.py` |
