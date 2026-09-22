@@ -10,3 +10,6 @@ __pycache__/
 *.log
 /tmp/
 server.pid
+
+# Native build
+native/build/

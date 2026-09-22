@@ -8,6 +8,15 @@ Pinned Aura revision: [`b0c6b3555e4287c8807b019a8b9316ee94c988b6`](https://githu
 
 ---
 
+## Architecture / 架构
+
+Detailed design: [`docs/architecture.md`](docs/architecture.md)  
+Iteration plan: [`docs/iteration-plan.md`](docs/iteration-plan.md)
+
+**Direction:** C data plane via Aura `std/ffi` + Aura control plane for adaptive eviction/layout (self-modification). Pure Lisp engine remains as `AURA_REDIS_ENGINE=aura`.
+
+---
+
 ## Purpose / 目的
 
 | EN | 中文 |

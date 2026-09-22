@@ -1,0 +1,47 @@
+; Iteration 1 smoke: load core, SET/GET via FFI (no TCP)
+; NOTE: (c-load path) returns a library INDEX; the first success is 0.
+; Do not treat 0 as failure — verify by resolving a symbol instead.
+(require "std/ffi" all:)
+
+(define so (let ((e (getenv "AURA_REDIS_CORE_SO")))
+             (if (and (string? e) (> (string-length e) 0)) e
+                 "native/build/libaura_redis_core.so")))
+
+(define ok 1)
+(define (fail msg)
+  (display "FAIL ") (display msg) (newline)
+  (set! ok 0))
+
+(define lib (c-load so))
+(define create (c-func lib "ar_core_create" "() -> Opaque"))
+; c-func returns a procedure on success; on failure often 0/int
+(if (not (procedure? create))
+  (fail "c-load/c-func ar_core_create")
+  #t)
+
+(define destroy (c-func lib "ar_core_destroy" "(Opaque) -> Void"))
+(define aset (c-func lib "ar_set" "(Opaque String String) -> Int"))
+(define ageteq (c-func lib "ar_get_eq" "(Opaque String String) -> Int"))
+(define adel (c-func lib "ar_del" "(Opaque String) -> Int"))
+(define aping (c-func lib "ar_ping" "(Opaque) -> Int"))
+(define aops (c-func lib "ar_metric_ops" "(Opaque) -> Int"))
+(define aev (c-func lib "ar_core_evict_name" "(Opaque) -> String"))
+(define aexists (c-func lib "ar_exists" "(Opaque String) -> Int"))
+
+(define core (create))
+(if (not (c-opaque? core)) (fail "create") #t)
+(if (not (= (aping core) 1)) (fail "ping") #t)
+(if (not (= (aset core "k" "v1") 1)) (fail "set") #t)
+(if (not (= (ageteq core "k" "v1") 1)) (fail "get_eq") #t)
+(if (not (= (aexists core "k") 1)) (fail "exists") #t)
+(if (not (= (adel core "k") 1)) (fail "del") #t)
+(if (not (= (aexists core "k") 0)) (fail "exists-after-del") #t)
+(if (not (= (ageteq core "k" "v1") 0)) (fail "get_eq-miss") #t)
+
+(display "lib-index=") (display lib) (newline)
+(display "evict=") (display (aev core)) (newline)
+(display "ops=") (display (aops core)) (newline)
+(destroy core)
+(if (= ok 1)
+  (display "iter1 FFI smoke OK\n")
+  (display "iter1 FFI smoke FAILED\n"))

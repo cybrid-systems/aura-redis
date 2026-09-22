@@ -1,0 +1,48 @@
+; ffi_boot.aura — load libaura_redis_core via std/ffi (Iteration 1)
+; c-load returns a library index; first success is 0 (not a failure).
+
+(export ar-boot
+        ar-core
+        ar-set!
+        ar-get-eq
+        ar-del!
+        ar-ping
+        ar-evict-name
+        ar-metric-ops)
+
+(require "std/ffi" all:)
+
+(define *ar-lib* #f)
+(define *ar-core* #f)
+(define *fn-create* #f)
+(define *fn-destroy* #f)
+(define *fn-set* #f)
+(define *fn-get-eq* #f)
+(define *fn-del* #f)
+(define *fn-ping* #f)
+(define *fn-evict-name* #f)
+(define *fn-ops* #f)
+
+(define (ar-boot so-path)
+  (set! *ar-lib* (c-load so-path))
+  (set! *fn-create* (c-func *ar-lib* "ar_core_create" "() -> Opaque"))
+  (if (not (procedure? *fn-create*))
+    #f
+    (begin
+      (set! *fn-destroy* (c-func *ar-lib* "ar_core_destroy" "(Opaque) -> Void"))
+      (set! *fn-set* (c-func *ar-lib* "ar_set" "(Opaque String String) -> Int"))
+      (set! *fn-get-eq* (c-func *ar-lib* "ar_get_eq" "(Opaque String String) -> Int"))
+      (set! *fn-del* (c-func *ar-lib* "ar_del" "(Opaque String) -> Int"))
+      (set! *fn-ping* (c-func *ar-lib* "ar_ping" "(Opaque) -> Int"))
+      (set! *fn-evict-name* (c-func *ar-lib* "ar_core_evict_name" "(Opaque) -> String"))
+      (set! *fn-ops* (c-func *ar-lib* "ar_metric_ops" "(Opaque) -> Int"))
+      (set! *ar-core* (*fn-create*))
+      (c-opaque? *ar-core*))))
+
+(define (ar-core) *ar-core*)
+(define (ar-set! key val) (*fn-set* *ar-core* key val))
+(define (ar-get-eq key expect) (*fn-get-eq* *ar-core* key expect))
+(define (ar-del! key) (*fn-del* *ar-core* key))
+(define (ar-ping) (*fn-ping* *ar-core*))
+(define (ar-evict-name) (*fn-evict-name* *ar-core*))
+(define (ar-metric-ops) (*fn-ops* *ar-core*))

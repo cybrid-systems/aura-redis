@@ -1,0 +1,238 @@
+# aura-redis architecture
+
+**Status:** design v1 (2026-09-22)  
+**Goal:** ≥80% of Redis on frozen memtier (1c×1t, SET:GET=1:10, 32B), while keeping **Aura’s runtime self-modification** as the product moat.  
+**Constraint:** Aura compiler/runtime changes (if any) stay **generic**. All Redis semantics and adaptive policy live in **this repo**.
+
+---
+
+## 1. Problem and opportunity
+
+### 1.1 Why the pure-Aura path is slow
+
+Measured (vs `redis:7-alpine`, same box):
+
+| Path | Order of magnitude |
+|------|-------------------|
+| Redis PING / GET | ~40k ops/s |
+| Aura Lisp server PING | ~400–570 ops/s (~70–110×) |
+| Aura Lisp SET (memtier) | ~10–30 ops/s |
+
+Root causes (architectural, not missing commands):
+
+1. Tree-walker interpretation of the accept→parse→dispatch loop (`set!` forces walker; default `aura file.aura` is not JIT/AOT).
+2. RESP in Lisp on copying `string-ref` / `substring`.
+3. Interpreter hash linear-scan + alloc/GC on writes.
+4. `tcp-recv` → new `string_heap_` string every chunk.
+
+Lisp micro-opts already harvested ~+28% (112→143 totals). They cannot reach 80% of Redis.
+
+### 1.2 Opportunity vs Redis
+
+Redis is a **fixed** C data plane + fixed eviction knobs.
+
+**Aura Redis** should be:
+
+- **Fast** where bytes move (C kernels via existing `std/ffi`).
+- **Alive** where policy lives (Aura can **mutate / hot-swap** eviction, layout, and adaptive logic under load).
+
+That combination is the product story—not “another C Redis with an Aura logo.”
+
+---
+
+## 2. Design principles
+
+1. **Aura owns the process and policy.** The server entry remains an Aura program (or Aura-launched). C is a library, not a fork that abandons Aura.
+2. **Use existing C interop** — `std/ffi`: `c-load`, `c-func`, `c-alloc` / `c-free`, `c-opaque*`, `c-struct-*`, `ffi:pin-buffer`. Optional later: `std/hot-update` (`aot:reload`) for swapping `.so` strategy plugins.
+3. **No Redis-shaped prims in Aura core.** Generic Aura work (if ever) = better strings/buffers/hash/GC/AOT for everyone. RESP, commands, LRU, memtier gates = **aura-redis only**.
+4. **Pluggable strategies in C, chosen/rewritten from Aura.** Eviction and layout are vtables (or reloadable `.so`s). Aura decides *which* and *when* to swap.
+5. **Two engines for honesty:**
+   - `aura` — pure Lisp (demo / correctness reference).
+   - `ffi` (default for perf) — C data plane + Aura control plane.
+
+---
+
+## 3. Process architecture
+
+```text
+                    ┌──────────────────────────────────────────┐
+                    │  Aura process                            │
+                    │                                          │
+  clients ──TCP──►  │  control plane (.aura)                   │
+                    │   - load libaura_redis_core.so (c-load)  │
+                    │   - bind c-func symbols                  │
+                    │   - adaptive supervisor (metrics→swap)   │
+                    │   - hot-strategy / evolve for policy     │
+                    │   - optional pure-Aura command fallback  │
+                    │              │                            │
+                    │              │ std/ffi                    │
+                    │              ▼                            │
+                    │  data plane (C, this repo)               │
+                    │   - epoll + read buffers                 │
+                    │   - RESP parse/encode                    │
+                    │   - dict + value blobs                   │
+                    │   - command table (GET/SET/…)            │
+                    │   - eviction / layout vtable             │
+                    └──────────────────────────────────────────┘
+```
+
+**Threading model (v1):** single-threaded event loop in C (Redis-like), called from Aura as “run forever” or “run N ms / until idle.” Aura fibers may run the **supervisor** concurrently later; dict access stays single-threaded until an explicit shard/mutex iteration.
+
+**Sandbox:** FFI needs `effect:ffi` / `AURA_SANDBOX=off` (same class as sockets). Document in run scripts.
+
+---
+
+## 4. C core API (`libaura_redis_core`)
+
+Opaque handles only across the FFI boundary (Aura sees `Opaque` / ints). Strings crossing FFI use Aura `String` or pinned buffers per `c-func` rules (`Int`, `Float`, `String`, `Opaque`, `Void`).
+
+### 4.1 Lifecycle
+
+| Symbol | Sig (conceptual) | Notes |
+|--------|------------------|-------|
+| `ar_core_create` | `() -> Opaque` | Alloc server/db |
+| `ar_core_destroy` | `(Opaque) -> Void` | |
+| `ar_core_listen` | `(Opaque, Int port) -> Int` | Bind 127.0.0.1:port (v1 loopback; document) |
+| `ar_core_serve_ms` | `(Opaque, Int ms) -> Int` | Pump epoll for up to `ms` (0 = one shot / until idle budget) |
+| `ar_core_serve_forever` | `(Opaque) -> Int` | Blocking loop (memtier / production) |
+
+Aura entry sketch:
+
+```aura
+(require "std/ffi" all:)
+(define lib (c-load "native/build/libaura_redis_core.so"))
+(define ar-create (c-func lib "ar_core_create" "() -> Opaque"))
+(define ar-listen (c-func lib "ar_core_listen" "(Opaque Int) -> Int"))
+(define ar-serve  (c-func lib "ar_core_serve_forever" "(Opaque) -> Int"))
+(define core (ar-create))
+(ar-listen core port)
+(ar-serve core)
+```
+
+### 4.2 Data commands (also callable for tests without TCP)
+
+| Symbol | Purpose |
+|--------|---------|
+| `ar_set` / `ar_get` / `ar_del` / `ar_exists` | String GET/SET/DEL/EXISTS |
+| `ar_ping` | Health |
+
+TCP path parses RESP and calls the same internals (one implementation).
+
+### 4.3 Metrics (for adaptive Aura)
+
+Export counters Aura can poll (via `c-func` returning Int, or fill a small C struct read with `c-struct-ref`):
+
+- `ops_total`, `ops_get`, `ops_set`, `hits`, `misses`
+- `evicted`, `expired`
+- `used_memory` (approx)
+- `avg_latency_ns` (EWMA)
+- `strategy_id` (current eviction plugin id)
+
+### 4.4 Eviction / layout vtable (the moat hook)
+
+```c
+typedef struct ArEvictOps {
+  void (*on_get)(void* db, void* entry);
+  void (*on_set)(void* db, void* entry);
+  int  (*should_evict)(void* db);      /* e.g. over maxmemory */
+  int  (*evict_one)(void* db);         /* free one key; 1=ok */
+  const char* name;
+} ArEvictOps;
+
+int ar_core_set_evict(void* core, const ArEvictOps* ops); /* install */
+int ar_core_set_evict_by_name(void* core, const char* name); /* built-ins */
+```
+
+**Built-in strategies (C, in-repo):**
+
+| Name | Behavior |
+|------|----------|
+| `noop` | No eviction (default v1) |
+| `lru` | Approximate LRU (Redis-like sampling) |
+| `lfu` | Approximate LFU |
+| `adaptive` | Blend/switch using local EWMA of hit rate & RSS (C-side helper); Aura may still replace the whole vtable |
+
+**Aura adaptive layer (policy):**
+
+- Reads metrics every T ms.
+- Decides strategy name or generates parameters (sample size, thresholds).
+- Calls `ar_core_set_evict_by_name` **or** `hot-strategy:swap!` on an Aura function that chooses the next name **or** (later) `hot-update:reload` a strategy `.so`.
+
+Self-modification paths (use what Aura already has):
+
+| Mechanism | Use |
+|-----------|-----|
+| `std/hot-strategy` + `mutate:rebind` | Swap Aura policy lambdas (thresholds, choose-fn) |
+| `std/evolve` | Evolve policy bodies from analytics |
+| `std/hot-update` / `aot:reload` | Swap compiled strategy `.so` without restarting the core listen loop (iteration N) |
+| Direct `ar_core_set_evict_by_name` | Fast path for built-in C strategies |
+
+### 4.5 Layout evolution (later iterations)
+
+Descriptor for dict/slab:
+
+- `flat_hash` (v1)
+- `segmented` / `hot_cold` (later)
+
+`ar_core_set_layout(core, name)` triggers controlled rehash/migrate (may block briefly; document). Aura triggers on load class change (e.g. working set >> RSS).
+
+---
+
+## 5. Aura control-plane modules (this repo)
+
+| Module | Role |
+|--------|------|
+| `src/redis/server.aura` | Keep as **pure Lisp engine** (`AURA_REDIS_ENGINE=aura`) |
+| `src/redis/server_ffi.aura` | **Default perf entry:** FFI load + listen + serve + optional supervisor |
+| `src/redis/adaptive.aura` | Metrics poll → strategy selection → swap |
+| `src/redis/policy/*.aura` | Named policy bodies for `hot-strategy` |
+
+Env:
+
+| Var | Meaning |
+|-----|---------|
+| `AURA_REDIS_ENGINE` | `ffi` (default for benches) \| `aura` |
+| `AURA_REDIS_PORT` | port |
+| `AURA_REDIS_MAXMEMORY` | bytes; enables eviction |
+| `AURA_REDIS_EVICT` | initial strategy name |
+| `AURA_REDIS_ADAPTIVE` | `1` = run supervisor |
+
+---
+
+## 6. Build & run
+
+- Toolchain: same CI image `ghcr.io/cybrid-systems/dev:v1.0.7` (GCC 16).
+- Build: `native/CMakeLists.txt` or Makefile → `native/build/libaura_redis_core.so`.
+- Script: `scripts/build-native.sh`, `scripts/run-server.sh` selects engine.
+- Smoke: extend Python client; add `scripts/memtier-cmp.sh` (ratio vs Redis).
+- **Gate:** Totals_aura_ffi / Totals_redis ≥ 0.80 on frozen memtier matrix.
+
+---
+
+## 7. Security & limits (v1)
+
+- Loopback bind until explicitly extended (Aura `tcp-listen` was loopback; C core may open `0.0.0.0` later behind a flag—default stay loopback for parity with current docs).
+- No AUTH / AOF / cluster in early iterations.
+- FFI = dangerous capability; document sandbox off for server.
+- Strategy swap must be crash-safe: install new vtable only at quiescent points (between commands) or under a generation counter.
+
+---
+
+## 8. Non-goals (explicit)
+
+- Adding `redis-*` primitives to **cybrid-systems/aura**.
+- Replacing Aura with a standalone C main that never loads Aura (Aura must remain the control plane / story).
+- 100% Redis command compatibility before the perf gate.
+
+---
+
+## 9. Success metrics
+
+| Milestone | Metric |
+|-----------|--------|
+| M1 | FFI GET/SET in-process (no TCP) ≫ Lisp store path |
+| M2 | memtier p=1 Totals ≥ 20% Redis |
+| M3 | memtier p=1 Totals ≥ 80% Redis |
+| M4 | Adaptive swap LRU↔LFU under synthetic load (correctness + telemetry) |
+| M5 | Documented layout swap or hot-update strategy `.so` |
+
