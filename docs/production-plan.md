@@ -69,9 +69,8 @@
 
 | # | Item | Goal | Exit criteria | Test | Risk |
 |---|------|------|---------------|------|------|
-| **P3.16** | More types (HASH/LIST/ZSET) | Only as product demand | Per-type smoke + memory accounting | type tests | used_memory complexity |
-| ↑ P3.16a | HASH | DONE | `tests/test_prod_hash.py` | | |
-| **P3.17** | MULTI/EXEC, Pub/Sub | Only if demanded | Spec’d subset green | dedicated tests | Pipeline interaction |
+| **P3.16** | More types (HASH/LIST/ZSET) | **DONE** | Per-type smoke + memory accounting | `test_prod_{hash,list,zset}.py` | used_memory complexity |
+| **P3.17** | MULTI/EXEC, Pub/Sub | **DONE** | Spec’d subset green | `test_prod_{multi,pubsub}.py` | Pipeline interaction |
 
 ---
 
@@ -98,7 +97,8 @@
 | **P3.16c ZSET** | **DONE** — ZADD/ZSCORE/ZREM/ZCARD/ZRANGE/ZRANGEBYSCORE (sorted array) |
 | **P3.16** | **DONE** (HASH+LIST+ZSET) |
 | **P3.17a MULTI/EXEC** | **DONE** — MULTI/EXEC/DISCARD; no WATCH |
-| **Production P3** | **IN PROGRESS** (Pub/Sub next) |
+| **P3.17b Pub/Sub** | **DONE** — SUBSCRIBE/UNSUBSCRIBE/PUBLISH (no PSUBSCRIBE) |
+| **Production P3** | **COMPLETE** (P3.16–P3.17) |
 
 MVP/explore remains valuable demos; **ship bar moves to this document.**
 
@@ -165,3 +165,5 @@ Production does **not** mean “C-only Redis clone.”
 | 2026-09-23 | **P3.16b** | LIST commands; `tests/test_prod_list.py` |
 | 2026-09-23 | **P3.16c** | ZSET sorted-array; ZRANGEBYSCORE+LIMIT; `tests/test_prod_zset.py` |
 | 2026-09-23 | **P3.17a** | MULTI/EXEC/DISCARD (+QUEUED); no WATCH; `tests/test_prod_multi.py` |
+| 2026-09-23 | **P3.17b** | SUBSCRIBE/UNSUBSCRIBE/PUBLISH; no PSUBSCRIBE; `tests/test_prod_pubsub.py` |
+| 2026-09-23 | **P3 COMPLETE** | HASH+LIST+ZSET+MULTI+Pub/Sub on main |

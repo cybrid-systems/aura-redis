@@ -4,7 +4,7 @@
 **Not covered here:** pure-Lisp `AURA_REDIS_ENGINE=aura` (broader demo subset in README).  
 **Production product:** string KV cache + Aura control commands — see [`production-plan.md`](production-plan.md).
 
-Last audited: 2026-09-23 (CST) for P3.16 HASH (+TYPE).
+Last audited: 2026-09-23 (CST) for P3.16–P3.17 (HASH/LIST/ZSET/MULTI/PubSub).
 
 ---
 
@@ -62,6 +62,9 @@ Last audited: 2026-09-23 (CST) for P3.16 HASH (+TYPE).
 | `MULTI` | 1 | +OK | P3.17a; subsequent cmds → +QUEUED |
 | `EXEC` | 1 | array | replies; error if no MULTI |
 | `DISCARD` | 1 | +OK | clear queue |
+| `SUBSCRIBE` | ≥2 | array confirms | enters pubsub mode (P3.17b) |
+| `UNSUBSCRIBE` | ≥1 | array confirms | no args = all |
+| `PUBLISH` | 3 | integer receivers | local subscribers only |
 
 
 
@@ -89,7 +92,7 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 | Strings extras | `APPEND`, `STRLEN`, `GETSET`, `SETEX`, `PSETEX`, `SET` NX/XX/PX |
 | Keys extras | `KEYS`, `DBSIZE`, `RENAME`, `UNLINK` (≠ DEL alias) |
 | (types) | HASH/LIST/ZSET done P3.16 |
-| Pub/Sub | `SUBSCRIBE`, … (MULTI done P3.17a; no WATCH) |
+| Patterns / WATCH | `PSUBSCRIBE`, `WATCH`/`UNWATCH` (deferred) |
 | Cluster / modules | all |
 
 Clients needing these should not assume Redis parity; extend only under production P3 demand.

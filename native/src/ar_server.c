@@ -50,6 +50,7 @@ static void multi_clear(ArConn* c) {
   c->in_multi = 0;
 }
 
+
 static void pubsub_clear(ArConn* c) {
   if (!c)
     return;
@@ -597,6 +598,104 @@ static int connected_clients(ArCore* core) {
   return n;
 }
 
+static int pubsub_is_allowed(const char* cmd, size_t clen) {
+  return cmd_eq(cmd, clen, "subscribe") || cmd_eq(cmd, clen, "unsubscribe") ||
+         cmd_eq(cmd, clen, "psubscribe") || cmd_eq(cmd, clen, "punsubscribe") ||
+         cmd_eq(cmd, clen, "ping") || cmd_eq(cmd, clen, "quit") ||
+         cmd_eq(cmd, clen, "reset");
+}
+
+static int reply_pubsub_msg(ArConn* c, const char* kind, size_t klen,
+                            const char* chan, size_t clen, int64_t nsubs) {
+  /* *3\r\n $kind $chan :nsubs  OR for message *3 kind chan payload */
+  if (resp_append_array_hdr(c, 3) < 0)
+    return -1;
+  if (resp_append_bulk(c, kind, klen) < 0)
+    return -1;
+  if (resp_append_bulk(c, chan, clen) < 0)
+    return -1;
+  return reply_int(c, nsubs);
+}
+
+static int conn_subscribed(ArConn* c, const char* chan, size_t clen) {
+  for (int i = 0; i < c->nsubs; ++i) {
+    if (c->sub_clens[i] == clen &&
+        memcmp(c->sub_channels[i], chan, clen) == 0)
+      return 1;
+  }
+  return 0;
+}
+
+static int conn_add_sub(ArConn* c, const char* chan, size_t clen) {
+  if (conn_subscribed(c, chan, clen))
+    return c->nsubs;
+  if (c->nsubs >= AR_PUBSUB_MAX)
+    return -1;
+  char* dup = ar_xmemdup(chan, clen);
+  if (!dup)
+    return -1;
+  c->sub_channels[c->nsubs] = dup;
+  c->sub_clens[c->nsubs] = clen;
+  c->nsubs++;
+  c->pubsub_mode = 1;
+  return c->nsubs;
+}
+
+static int conn_del_sub(ArConn* c, const char* chan, size_t clen) {
+  for (int i = 0; i < c->nsubs; ++i) {
+    if (c->sub_clens[i] == clen &&
+        memcmp(c->sub_channels[i], chan, clen) == 0) {
+      free(c->sub_channels[i]);
+      for (int j = i; j + 1 < c->nsubs; ++j) {
+        c->sub_channels[j] = c->sub_channels[j + 1];
+        c->sub_clens[j] = c->sub_clens[j + 1];
+      }
+      c->nsubs--;
+      if (c->nsubs == 0)
+        c->pubsub_mode = 0;
+      return c->nsubs;
+    }
+  }
+  return c->nsubs;
+}
+
+static int publish_local(ArCore* core, const char* chan, size_t clen,
+                         const char* msg, size_t mlen) {
+  int receivers = 0;
+  for (int i = 0; i < AR_MAX_CONN; ++i) {
+    ArConn* sub = &core->conns[i];
+    if (!sub->in_use || !sub->pubsub_mode)
+      continue;
+    if (!conn_subscribed(sub, chan, clen))
+      continue;
+    if (resp_append_array_hdr(sub, 3) < 0)
+      continue;
+    if (resp_append_bulk(sub, "message", 7) < 0)
+      continue;
+    if (resp_append_bulk(sub, chan, clen) < 0)
+      continue;
+    if (resp_append_bulk(sub, msg, mlen) < 0)
+      continue;
+    if (flush_writes(core, sub) < 0) {
+      /* keep message buffered; arm EPOLLOUT */
+      struct epoll_event ev;
+      ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+      ev.data.ptr = sub;
+      epoll_ctl(core->epfd, EPOLL_CTL_MOD, sub->fd, &ev);
+      sub->want_write = 1;
+    } else if (sub->wlen > sub->woff) {
+      struct epoll_event ev;
+      ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+      ev.data.ptr = sub;
+      epoll_ctl(core->epfd, EPOLL_CTL_MOD, sub->fd, &ev);
+      sub->want_write = 1;
+    }
+    receivers++;
+  }
+  return receivers;
+}
+
+
 static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (argc < 1)
     return reply_err(c, "ERR empty command");
@@ -616,6 +715,10 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (core->repl_readonly && !c->is_master_link && cmd_eq(cmd, clen, "config") &&
       argc >= 2 && cmd_eq(argv[1].p, argv[1].len, "set"))
     return reply_err(c, "READONLY You can't write against a read only replica.");
+
+  /* P3.17b — pubsub mode restricts commands */
+  if (c->pubsub_mode && !pubsub_is_allowed(cmd, clen))
+    return reply_err(c, "ERR only (P)SUBSCRIBE / (P)UNSUBSCRIBE / PING / QUIT allowed in this context");
 
   /* P3.17a — MULTI/EXEC/DISCARD */
   if (cmd_eq(cmd, clen, "multi")) {
@@ -1926,6 +2029,53 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     if (ni)
       return reply_err(c, "ERR hash value is not an integer");
     return reply_int(c, v);
+  }
+
+
+  /* ---- P3.17b Pub/Sub ---- */
+  if (cmd_eq(cmd, clen, "subscribe")) {
+    if (argc < 2)
+      return reply_err(c, "ERR wrong number of arguments for 'subscribe'");
+    for (int i = 1; i < argc; ++i) {
+      int n = conn_add_sub(c, argv[i].p, argv[i].len);
+      if (n < 0)
+        return reply_err(c, "ERR subscribe failed");
+      if (reply_pubsub_msg(c, "subscribe", 9, argv[i].p, argv[i].len, n) < 0)
+        return -1;
+    }
+    return 0;
+  }
+  if (cmd_eq(cmd, clen, "unsubscribe")) {
+    if (argc == 1) {
+      /* unsubscribe all */
+      while (c->nsubs > 0) {
+        char* ch = c->sub_channels[0];
+        size_t cl = c->sub_clens[0];
+        /* copy name before delete */
+        char* keep = ar_xmemdup(ch, cl);
+        size_t kl = cl;
+        int n = conn_del_sub(c, ch, cl);
+        if (reply_pubsub_msg(c, "unsubscribe", 11, keep ? keep : "", keep ? kl : 0,
+                             n) < 0) {
+          free(keep);
+          return -1;
+        }
+        free(keep);
+      }
+      return 0;
+    }
+    for (int i = 1; i < argc; ++i) {
+      int n = conn_del_sub(c, argv[i].p, argv[i].len);
+      if (reply_pubsub_msg(c, "unsubscribe", 11, argv[i].p, argv[i].len, n) < 0)
+        return -1;
+    }
+    return 0;
+  }
+  if (cmd_eq(cmd, clen, "publish")) {
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'publish'");
+    int n = publish_local(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len);
+    return reply_int(c, n);
   }
 
   return reply_err(c, "ERR unknown command");
