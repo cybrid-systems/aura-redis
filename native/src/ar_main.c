@@ -17,6 +17,8 @@ int main(int argc, char** argv) {
   int timeout_sec = -1;
   int tcp_backlog = -1;
   uint64_t maxmem = 0;
+  const char* rdb_dir = NULL;
+  const char* rdb_filename = NULL;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
       port = atoi(argv[++i]);
@@ -44,6 +46,10 @@ int main(int argc, char** argv) {
       timeout_sec = atoi(argv[++i]);
     else if (strcmp(argv[i], "--tcp-backlog") == 0 && i + 1 < argc)
       tcp_backlog = atoi(argv[++i]);
+    else if (strcmp(argv[i], "--dir") == 0 && i + 1 < argc)
+      rdb_dir = argv[++i];
+    else if (strcmp(argv[i], "--dbfilename") == 0 && i + 1 < argc)
+      rdb_filename = argv[++i];
   }
   /* Env fallbacks (Iteration 8 layout + existing eviction) */
   if (!layout || !layout[0]) {
@@ -100,6 +106,14 @@ int main(int argc, char** argv) {
     const char* e = getenv("AURA_REDIS_TCP_BACKLOG");
     if (e && e[0]) tcp_backlog = atoi(e);
   }
+  if (!rdb_dir || !rdb_dir[0]) {
+    const char* e = getenv("AURA_REDIS_DIR");
+    if (e && e[0]) rdb_dir = e;
+  }
+  if (!rdb_filename || !rdb_filename[0]) {
+    const char* e = getenv("AURA_REDIS_DBFILENAME");
+    if (e && e[0]) rdb_filename = e;
+  }
 
   ArCore* core = ar_core_create();
   if (!core) {
@@ -136,6 +150,26 @@ int main(int argc, char** argv) {
     ar_core_set_evict_by_name(core, evict);
   if (maxmem)
     ar_core_set_maxmemory(core, maxmem);
+  if (rdb_dir && rdb_dir[0]) {
+    if (!ar_core_set_rdb_dir(core, rdb_dir)) {
+      fprintf(stderr, "ar_main: bad --dir %s\n", rdb_dir);
+      ar_core_destroy(core);
+      return 1;
+    }
+  }
+  if (rdb_filename && rdb_filename[0]) {
+    if (!ar_core_set_rdb_filename(core, rdb_filename)) {
+      fprintf(stderr, "ar_main: bad --dbfilename %s\n", rdb_filename);
+      ar_core_destroy(core);
+      return 1;
+    }
+  }
+  if (!ar_rdb_load(core)) {
+    fprintf(stderr, "ar_main: aura-rdb load failed (dir=%s file=%s)\n",
+            ar_core_rdb_dir(core), ar_core_rdb_filename(core));
+    ar_core_destroy(core);
+    return 1;
+  }
   ar_core_install_signal_handlers(core);
   if (ar_core_listen(core, port) != 1) {
     fprintf(stderr, "ar_main: listen %d failed\n", port);

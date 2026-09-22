@@ -787,12 +787,19 @@ ArCore* ar_core_create(void) {
   c->tcp_backlog = 512;
   c->slowlog_slower_than_us = 10000;
   c->shutting_down = 0;
+  snprintf(c->rdb_dir, sizeof(c->rdb_dir), ".");
+  snprintf(c->rdb_filename, sizeof(c->rdb_filename), "dump.aura-rdb");
+  c->rdb_last_save_time = 0;
+  c->rdb_bgsave_pid = 0;
+  c->rdb_loading = 0;
+  c->rdb_last_bgsave_ok = 1;
   return c;
 }
 
 void ar_core_destroy(ArCore* core) {
   if (!core)
     return;
+  ar_rdb_wait_bgsave(core);
   if (core->listen_fd >= 0 || core->epfd >= 0) {
     extern void ar_net_shutdown(ArCore* core);
     ar_net_shutdown(core);

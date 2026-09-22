@@ -150,6 +150,15 @@ int ar_core_policy_set(ArCore* core, const char* prefix, const char* profile);
 /* Write "pfx:=prof;..." into buf; returns length (excl NUL). */
 int ar_core_policy_hints(ArCore* core, char* buf, size_t buflen);
 
+/* P2.13 — optional aura-rdb snapshot (string keys + TTL) */
+int ar_core_set_rdb_dir(ArCore* core, const char* dir);
+const char* ar_core_rdb_dir(ArCore* core);
+int ar_core_set_rdb_filename(ArCore* core, const char* name);
+const char* ar_core_rdb_filename(ArCore* core);
+int ar_rdb_save(ArCore* core);   /* SAVE — sync write; 1 ok */
+int ar_rdb_bgsave(ArCore* core); /* BGSAVE — fork child or sync fallback */
+int ar_rdb_load(ArCore* core);   /* load on startup; missing file = ok */
+
 #ifdef __cplusplus
 }
 #endif

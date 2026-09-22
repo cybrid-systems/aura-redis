@@ -61,7 +61,7 @@
 
 | # | Item | Goal | Exit criteria | Test | Risk |
 |---|------|------|---------------|------|------|
-| **P2.13** | AOF or RDB | Durable snapshot/log for cache warm-start | Reload after kill restores keys | persistence smoke | Perf / fsync policy |
+| **P2.13** | aura-rdb snapshot | Durable string+TTL warm-start (`SAVE`/`BGSAVE`) | Reload after kill restores GET/TTL | `tests/test_prod_rdb.py` | Perf / fsync policy |
 | **P2.14** | Replication `REPLICAOF` | Async replica | Replica converges under SET load | repl smoke | Split brain without cluster story |
 | **P2.15** | TLS | Encrypted client path | stunnel or native TLS accept | TLS client smoke | Cert ops; Aura agent TLS |
 
@@ -86,9 +86,10 @@
 | **P1.1 / P1.8 CONFIG** | **DONE** (runtime; no persist) |
 | **P1.9 policy_agent HA** | **DONE** — reconnect/backoff, re-apply last EVICT/LAYOUT, policy-pin log, heartbeat; fail-safe documented |
 | **P1.12 client limits** | **DONE** — maxclients / timeout / tcp-backlog (CONFIG + CLI); `tests/test_prod_clients.py` |
-| **P1.11 cache-only restart** | **DONE** — README + `docs/persistence.md` (no RDB/AOF in v1) |
+| **P1.11 cache-only restart** | **DONE** — README + `docs/persistence.md` (cache-only default; optional P2.13) |
 | **P1.10 latency/slowlog** | **DONE** — INFO cmd_* histogram + slowlog_count; CONFIG slowlog-log-slower-than |
-| **Production P1–P3** | **ACTIVE** ← remaining P1 polish / P2 stretch |
+| **P2.13 aura-rdb** | **DONE** — SAVE/BGSAVE + startup load; `tests/test_prod_rdb.py` |
+| **Production P1–P3** | **ACTIVE** ← P2.14 REPLICAOF next |
 
 MVP/explore remains valuable demos; **ship bar moves to this document.**
 
@@ -145,3 +146,4 @@ Production does **not** mean “C-only Redis clone.”
 | 2026-09-23 | **P1.12** | maxclients / idle timeout / tcp-backlog; CONFIG GET/SET; `tests/test_prod_clients.py` |
 | 2026-09-23 | **P1.11** | Document cache-only restart (README + docs/persistence.md) |
 | 2026-09-23 | **P1.10** | INFO latency histogram + slowlog_count; CONFIG slowlog-log-slower-than; `tests/test_prod_slowlog.py` |
+| 2026-09-23 | **P2.13** | Optional `aura-rdb` SAVE/BGSAVE + `--dir`/`--dbfilename` load; `docs/persistence.md`; `tests/test_prod_rdb.py` |

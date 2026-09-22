@@ -15,7 +15,9 @@ Last audited: 2026-09-22 (CST) for P0.4 AUTH / protected-mode.
 | `PING` | 1 or 2 | `+PONG` or bulk | Extra args → wrong-arity error; allowed pre-AUTH |
 | `AUTH` | 2 or 3 | `+OK` / WRONGPASS | `AUTH <pass>` or `AUTH <user> <pass>` (user ignored); need `--requirepass` / `AURA_REDIS_REQUIREPASS` |
 | `HELLO` | 1+ | array map | Minimal stub; optional `AUTH` inline; allowed pre-AUTH |
-| `CONFIG` | GET 3 / SET 4 | array / `+OK` | P1.1+P1.12: `maxmemory`, `requirepass`, `protected-mode`, `evict-samples`, `bind`, `maxclients`, `timeout`, `tcp-backlog`, `slowlog-log-slower-than` |
+| `CONFIG` | GET 3 / SET 4 | array / `+OK` | P1.1+P1.12+P2.13: `maxmemory`, `requirepass`, `protected-mode`, `evict-samples`, `bind`, `maxclients`, `timeout`, `tcp-backlog`, `slowlog-log-slower-than`, `dir`, `dbfilename` |
+| `SAVE` | 1 | `+OK` | P2.13 sync `aura-rdb` snapshot |
+| `BGSAVE` | 1 | `+OK` | P2.13 fork child (or sync fallback) |
 | `QUIT` | any | `+OK` then close | Allowed pre-AUTH |
 | `GET` | 2 | bulk / null | |
 | `SET` | ≥3 | `+OK` / `ERR OOM` | Optional `EX <sec>` only (no PX/NX/XX on C path) |
@@ -56,7 +58,7 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 | Area | Examples |
 |------|----------|
 | Auth / admin | `SHUTDOWN`, `CLIENT`, `SLOWLOG`, `MONITOR` (AUTH/HELLO done in P0.4) |
-| Persistence / repl | `SAVE`, `BGSAVE`, `BGREWRITEAOF`, `REPLICAOF`, `PSYNC` |
+| Persistence / repl | `BGREWRITEAOF`, `REPLICAOF`, `PSYNC` (SAVE/BGSAVE done in P2.13) |
 | Strings extras | `APPEND`, `STRLEN`, `GETSET`, `SETEX`, `PSETEX`, `SET` NX/XX/PX |
 | Keys extras | `KEYS`, `DBSIZE`, `RENAME`, `TYPE`, `UNLINK` (≠ DEL alias) |
 | Lists / hashes | `LPUSH`, `HSET`, … |
@@ -86,4 +88,4 @@ Production profile: `AURA_REDIS_DENY_PLUGIN=1`.
 - When `requirepass` is set, unauthenticated clients may only run `AUTH` / `PING` / `QUIT` / `HELLO`; others → `-NOAUTH Authentication required.`
 - **Protected-mode** (Redis spirit): if enabled **and** no password, non-loopback peers are refused with `-DENIED …` even when `--bind 0.0.0.0`. Loopback always allowed. Password **or** `--protected-mode no` permits remote.
 - Default bind remains loopback — safest deploy default; use `--bind 0.0.0.0` + `requirepass` for remote + Aura policy_agent on another host.
-- `CONFIG SET/GET` knobs at runtime (not persisted): maxmemory, requirepass, protected-mode, evict-samples, maxclients, timeout, tcp-backlog.
+- `CONFIG SET/GET` knobs at runtime (not persisted across restart except via CLI/env): maxmemory, requirepass, protected-mode, evict-samples, maxclients, timeout, tcp-backlog, dir, dbfilename.

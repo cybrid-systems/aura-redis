@@ -417,6 +417,24 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     c->should_close = 1;
     return 0;
   }
+  /* P2.13 — SAVE / BGSAVE (aura-rdb snapshot) */
+  if (cmd_eq(cmd, clen, "save")) {
+    if (argc != 1)
+      return reply_err(c, "ERR wrong number of arguments for 'save'");
+    if (!ar_rdb_save(core))
+      return reply_err(c, "ERR save failed");
+    return reply_ok(c);
+  }
+  if (cmd_eq(cmd, clen, "bgsave")) {
+    if (argc != 1)
+      return reply_err(c, "ERR wrong number of arguments for 'bgsave'");
+    int rc = ar_rdb_bgsave(core);
+    if (rc < 0)
+      return reply_err(c, "ERR Background save already in progress");
+    if (rc == 0)
+      return reply_err(c, "ERR bgsave failed");
+    return reply_ok(c);
+  }
   if (cmd_eq(cmd, clen, "get")) {
     if (argc != 2)
       return reply_err(c, "ERR wrong number of arguments for 'get'");
@@ -662,6 +680,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         snprintf(vbuf, sizeof(vbuf), "%d", core->slowlog_slower_than_us);
         AR_CFG_ADD("slowlog-log-slower-than", "%s", vbuf);
       }
+      AR_CFG_ADD("dir", "%s", ar_core_rdb_dir(core));
+      AR_CFG_ADD("dbfilename", "%s", ar_core_rdb_filename(core));
 #undef AR_CFG_ADD
       char hdr[32];
       int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", nitems);
@@ -730,6 +750,16 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
           return reply_err(c, "ERR config set slowlog-log-slower-than");
         return reply_ok(c);
       }
+      if (cmd_eq(argv[2].p, argv[2].len, "dir")) {
+        if (!ar_core_set_rdb_dir(core, val))
+          return reply_err(c, "ERR config set dir");
+        return reply_ok(c);
+      }
+      if (cmd_eq(argv[2].p, argv[2].len, "dbfilename")) {
+        if (!ar_core_set_rdb_filename(core, val))
+          return reply_err(c, "ERR config set dbfilename");
+        return reply_ok(c);
+      }
       return reply_err(c, "ERR Unknown option or number of arguments for CONFIG "
                           "SET");
     }
@@ -740,7 +770,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (cmd_eq(cmd, clen, "info")) {
     char hints[160];
     ar_core_policy_hints(core, hints, sizeof(hints));
-    char buf[2048];
+    char buf[4096];
     int n = snprintf(
         buf, sizeof(buf),
         "# Server\n"
@@ -777,9 +807,14 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         "keys_with_ttl:%llu\n"
         "avg_ttl_ms:%llu\n"
         "# Persistence\n"
-        "loading:0\n"
+        "loading:%d\n"
         "aof_enabled:0\n"
-        "rdb_bgsave_in_progress:0\n"
+        "rdb_bgsave_in_progress:%d\n"
+        "rdb_last_save_time:%llu\n"
+        "rdb_last_bgsave_status:%s\n"
+        "dir:%s\n"
+        "dbfilename:%s\n"
+        "aura_rdb:1\n"
         "# Aura\n"
         "evict:%s\n"
         "layout:%s\n"
@@ -820,6 +855,12 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         (unsigned long long)ar_core_nkeys(core),
         (unsigned long long)ar_core_keys_with_ttl(core),
         (unsigned long long)ar_core_avg_ttl_ms(core),
+        core->rdb_loading ? 1 : 0,
+        core->rdb_bgsave_pid > 0 ? 1 : 0,
+        (unsigned long long)core->rdb_last_save_time,
+        core->rdb_last_bgsave_ok ? "ok" : "err",
+        ar_core_rdb_dir(core),
+        ar_core_rdb_filename(core),
         ar_core_evict_name(core),
         ar_core_layout_name(core),
         ar_core_evict_samples(core),
@@ -1220,6 +1261,7 @@ static int serve_once(ArCore* core, int timeout_ms) {
   /* P0.3: active expire between epoll wakes (also on idle timeout). */
   if (core->keys_with_ttl)
     ar_core_active_expire(core, 16);
+  ar_rdb_poll_bgsave(core);
   close_idle_clients(core);
   struct epoll_event events[AR_MAX_EVENTS];
   int n = epoll_wait(core->epfd, events, AR_MAX_EVENTS, timeout_ms);

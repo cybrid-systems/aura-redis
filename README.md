@@ -100,7 +100,7 @@ Loopback bind **127.0.0.1** for both engines (documented).
 
 1. **Loopback only** — Aura `tcp-listen` binds **`127.0.0.1` only**. Remote clients cannot connect.
 2. **Shared in-memory store** — all clients share one hash; no mutex (cooperative / coarse correctness for demo). Prefer `AURA_REDIS_SYNC=1` if `fiber:spawn` misbehaves in a sandbox.
-3. **No persistence** — no RDB/AOF, no AUTH, no pub/sub, no cluster.
+3. **Persistence optional** — default cache-only; P2.13 `aura-rdb` SAVE/BGSAVE for warm-start (not full Redis RDB/AOF).
 4. **KEYS** — supports `*` (all) and prefix globs like `foo*`; other patterns are exact match only.
 
 ---
@@ -285,12 +285,12 @@ Apache License 2.0 (same as Aura).
 
 **aura-redis is a cache/KV data plane by default — not a durable store.**
 
-On process restart (clean or crash):
+On process restart (clean or crash) **without** a prior `SAVE`/`BGSAVE`:
 
-- All keys are **gone** (no RDB/AOF in v1).
+- All keys are **gone**.
 - Runtime `CONFIG SET` knobs reset to CLI/env/defaults.
 - The last `EVICT` / `LAYOUT` kernel also resets to server startup flags (`--evict`, `--layout`).
 - Aura `policy_agent` will reconnect and re-choose policy from live `INFO` (see P1.9 HA).
 
-If you need warm-start durability, that is a **P2** item (optional RDB/AOF). Do not assume Redis-compatible persistence.
+**Optional warm-start (P2.13):** `SAVE` / `BGSAVE` write a custom **`aura-rdb`** dump (string keys + TTL). Restart with `--dir` / `--dbfilename` (or env) reloads it. Not Redis-RDB compatible — see [`docs/persistence.md`](docs/persistence.md).
 

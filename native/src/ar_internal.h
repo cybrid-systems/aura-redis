@@ -100,7 +100,27 @@ struct ArCore {
   char policy_pfx[4][16];
   char policy_prof[4][32];
   int policy_n;
+
+  /* P2.13 — aura-rdb snapshot */
+  char rdb_dir[256];
+  char rdb_filename[128];
+  uint64_t rdb_last_save_time; /* unix seconds; 0 = never */
+  int rdb_bgsave_pid;          /* >0 while BGSAVE child runs */
+  int rdb_loading;
+  int rdb_last_bgsave_ok; /* 1 ok / 0 fail */
 };
+
+/* P2.13 RDB (implemented in ar_rdb.c) */
+int ar_rdb_build_path(ArCore* core, char* out, size_t outsz);
+int ar_rdb_save(ArCore* core);
+int ar_rdb_bgsave(ArCore* core); /* 1 started/ok, 0 fail, -1 already in progress */
+int ar_rdb_load(ArCore* core);   /* 1 ok (incl missing file), 0 corrupt/error */
+void ar_rdb_poll_bgsave(ArCore* core);
+void ar_rdb_wait_bgsave(ArCore* core);
+int ar_core_set_rdb_dir(ArCore* core, const char* dir);
+const char* ar_core_rdb_dir(ArCore* core);
+int ar_core_set_rdb_filename(ArCore* core, const char* name);
+const char* ar_core_rdb_filename(ArCore* core);
 
 /* dict helpers used by server */
 /* tier_out: 0=hot/flat, 1=cold (only meaningful for hot_cold) */

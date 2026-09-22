@@ -3,7 +3,8 @@ project(aura_redis_core C)
 set(CMAKE_C_STANDARD 11)
 add_library(aura_redis_core SHARED
   src/ar_core.c
-  src/ar_server.c)
+  src/ar_server.c
+  src/ar_rdb.c)
 target_include_directories(aura_redis_core PUBLIC include)
 target_include_directories(aura_redis_core PRIVATE src)
 set_target_properties(aura_redis_core PROPERTIES
