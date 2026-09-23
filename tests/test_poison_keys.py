@@ -21,6 +21,7 @@ from _agentutil import (  # noqa: E402
     agent_logs as _agent_logs,
     start_agent as _start_agent,
     stop_agent as _stop_agent,
+    wait_log as _wait_log,
 )
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26995"))
@@ -105,13 +106,13 @@ def test_poison_defense_mutates() -> None:
                 "AURA_REDIS_POLICY_AUDIT": AUDIT,
             },
         )
-        t0 = time.time()
-        last = ""
-        while time.time() - t0 < 15:
-            last = _agent_logs(cid, AGENT_LOG)
-            if "PING" in last or "policy_agent:" in last:
-                break
-            time.sleep(0.15)
+        _wait_log(
+            cid,
+            ["PING", "policy_agent:"],
+            timeout=30,
+            log_path=AGENT_LOG,
+            match_any=True,
+        )
 
         with socket.create_connection(("127.0.0.1", PORT), timeout=5) as s:
             for i in range(20):

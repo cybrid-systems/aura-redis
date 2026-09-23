@@ -81,15 +81,9 @@ def start_agent() -> str:
             "AURA_REDIS_POLICY_AUDIT": AUDIT,
         },
     )
-    # Either needle is enough for boot; wait_log needs all — poll manually.
-    t0 = time.time()
-    last = ""
-    while time.time() - t0 < 30:
-        last = _agent_logs(cid, AGENT_LOG)
-        if "PING" in last or "PONG" in last:
-            return cid
-        time.sleep(0.15)
-    raise TimeoutError(f"agent did not PING; log:\n{last}")
+    # PING or PONG; fail-fast if native agent dies (empty log ≠ still starting).
+    _wait_log(cid, ["PING", "PONG"], timeout=30, log_path=AGENT_LOG, match_any=True)
+    return cid
 
 
 def drive_miss_spike(rounds: int = 50) -> None:

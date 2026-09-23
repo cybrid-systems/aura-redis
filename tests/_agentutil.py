@@ -86,9 +86,16 @@ def start_agent(
         for k, v in list(full.items()):
             if isinstance(v, str) and v.startswith("/work/"):
                 full[k] = str(ROOT / v[len("/work/") :])
+        # Line-buffer child stdout when redirected to a file. Without this,
+        # libc fully buffers and wait loops see an EMPTY log until exit/fill
+        # (CI A3 TimeoutError "agent did not PING" with empty log).
+        argv = [str(AURA_BIN), str(AGENT_AURA)]
+        if shutil.which("stdbuf"):
+            argv = ["stdbuf", "-oL", "-eL", *argv]
+        log_f = log_path.open("w")
         proc = subprocess.Popen(
-            [str(AURA_BIN), str(AGENT_AURA)],
-            stdout=log_path.open("w"),
+            argv,
+            stdout=log_f,
             stderr=subprocess.STDOUT,
             env=full,
             cwd=str(ROOT),
@@ -184,15 +191,27 @@ def wait_log(
     timeout: float = 20.0,
     log_path: Path | None = None,
     poll: float = 0.15,
+    match_any: bool = False,
 ) -> str:
+    """Wait until log contains needles (all, or any if match_any).
+
+    Fails fast with RuntimeError if the agent process/container has died,
+    so empty-log timeouts are not confused with a crashed spawn.
+    """
     t0 = time.time()
     last = ""
+
+    def _matched(body: str) -> bool:
+        if match_any:
+            return any(n in body for n in needles)
+        return all(n in body for n in needles)
+
     while time.time() - t0 < timeout:
         last = agent_logs(handle, log_path)
-        if all(n in last for n in needles):
+        if _matched(last):
             return last
         if not agent_running(handle):
-            if all(n in last for n in needles):
+            if _matched(last):
                 return last
             raise RuntimeError(f"agent not running:\n{last[-3000:]}")
         time.sleep(poll)
