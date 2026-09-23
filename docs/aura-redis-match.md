@@ -3,7 +3,9 @@
 **Status:** authoritative matching companion (broader than demand mining)  
 **Date:** 2026-09-23 CST  
 **Scope:** Match **Aura-differentiating** language/runtime **native** + stdlib capabilities to **industry-realistic** Redis operator/app pains. Honest WEAK / NONE / anti-matches required.  
-**Companions:** [`aura-demand.md`](aura-demand.md) · [`aura-native-control.md`](aura-native-control.md) · [`mutation-gains.md`](mutation-gains.md) · [`architecture.md`](architecture.md) · [`workloads.md`](workloads.md) · [`production-plan.md`](production-plan.md) · [`perf-eval.md`](perf-eval.md)
+**Companions:** [`aura-pain-scenarios.md`](aura-pain-scenarios.md) · [`aura-demand.md`](aura-demand.md) · [`aura-native-control.md`](aura-native-control.md) · [`mutation-gains.md`](mutation-gains.md) · [`architecture.md`](architecture.md) · [`workloads.md`](workloads.md) · [`production-plan.md`](production-plan.md) · [`perf-eval.md`](perf-eval.md)
+
+**Scenario deep-dive:** [`aura-pain-scenarios.md`](aura-pain-scenarios.md) — expands STRONG/MEDIUM matrix rows into ops narratives, layered Aura A/B/C solution paths, tick loops, verify exits, and gaps vs `policy_agent`.
 
 **Read sources (this pass, read-only):**  
 - **Native:** `/workspace/aura-grok/docs/generated/{primitives,modules,primitives-registry}.md`, `docs/agent-orchestration-status.md`, `src/core/{sandbox,capability_model,mutation,workspace_isolation,provenance_tracker,resource_quota,security_event,mutation_audit_wal}.*`, `src/compiler/{typed_mutation_audit,lowering_linear_types,dirty_propagation,aot_hot_update_health,aura_jit}.*`, `src/serve/{fiber,scheduler}.*`, `src/orch/*` (+ pinned `.deps/aura` mirrors).  
@@ -269,4 +271,5 @@ Cluster reshard; connection storms; RDB/AOF; bigkey discovery; ops/s parity; rep
 
 | Date (CST) | Notes |
 |------------|-------|
+| 2026-09-23 | Link [`aura-pain-scenarios.md`](aura-pain-scenarios.md) scenario deep-dive.
 | 2026-09-23 | Initial matrix; expanded §2 into **Layer A native** (sandbox/capability/typed-mutate/provenance/JIT-dirty/fiber/orch/GC) + **Layer B stdlib**; matrix prefers native trusted-live-change over Lua-like scripting claims. |
