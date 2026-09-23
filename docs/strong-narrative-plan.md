@@ -2,7 +2,7 @@
 
 **Status:** authoritative execution plan for the citeable Aura moat  
 **Date:** 2026-09-23 CST  
-**Tip baseline:** post A7/A9 on main (see changelog)  
+**Tip baseline:** post A7/A9 + coverage/bench gate on main (see changelog)  
 **Scope:** Guard-bounded live `choose-fn` mutation under sandbox + C dumb kernels + multi-phase regret evidence — **not** Redis P3 parity.  
 **Companions:** [`aura-demand.md`](aura-demand.md) · [`aura-pain-scenarios.md`](aura-pain-scenarios.md) · [`aura-redis-match.md`](aura-redis-match.md) · [`aura-native-control.md`](aura-native-control.md) · [`mutation-gains.md`](mutation-gains.md) · [`perf-eval.md`](perf-eval.md) · [`production-plan.md`](production-plan.md) · [`architecture.md`](architecture.md) · [`high-roi-iterations.md`](high-roi-iterations.md)
 
@@ -193,11 +193,23 @@ If blocked: document blocker here, push PARTIAL, continue what is possible.
 
 ---
 
+
+
+---
+
+## Coverage / bench (2026-09-23)
+
+- **CI:** `scripts/ci-prod.sh` now chains `scripts/ci-strong.sh` (P1/P2 + A3–A13 unit/integration + `tests/test_strong_edges.py`). Long regret stays in `scripts/ci-bench.sh` / `scripts/bench-vs-redis.sh`.
+- **Edges:** slru/tinylfu WRONGTYPE + SHADOW/HOTCOLD bounds + POLICY smoke + canary default-off fitness path.
+- **Dual scoreboard:** throughput (memtier) vs hit-quality (useful-GET) never collapsed — see [`redis-compare.md`](redis-compare.md) / [`perf-eval.md`](perf-eval.md).
+- **Redis hit-quality:** fixed `allkeys-lru` / `allkeys-lfu` only; Aura adaptive is Aura-only (`policy_agent` live EVICT/PIN).
+
 ## Changelog
 
 | Date (CST) | Notes |
 |------------|-------|
 | 2026-09-23 | Initial native-first strong-narrative plan (SN0–SN3 / A1–A16). |
+| 2026-09-23 | Coverage/bench: `ci-strong` wired into `ci-prod`; dual scoreboard vs Redis (`redis-compare.md`); edge tests. |
 | 2026-09-23 | A1 +27.9pp, A2 +57.1pp, A3 audit ring + test green on main. |
 | 2026-09-23 | A4 canary choose-fn (auto-heal / commit) + test green on main. |
 | 2026-09-23 | A11 Restricted sandbox profile PARTIAL (TA blocker); smoke + docs. |

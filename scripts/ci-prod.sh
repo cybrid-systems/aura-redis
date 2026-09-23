@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Production gate: native C server tests + Aura FFI/TCP typed suites.
+# Production gate: native C server tests + Aura FFI/TCP typed suites +
+# strong-narrative / P1–P2 via scripts/ci-strong.sh.
 # Skip long CI wait preference: soak defaults to 30s via AURA_REDIS_SOAK_SEC.
+# Long regret benches: scripts/ci-bench.sh or scripts/bench-vs-redis.sh.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -35,5 +37,8 @@ run P3.16c tests/test_prod_zset.py
 run P3.16-edge tests/test_prod_types_edge.py
 run P3.17a tests/test_prod_multi.py
 run P3.17b tests/test_prod_pubsub.py
+
+# P1/P2 + strong-narrative (config/clients/rdb/replica/tls/policy_ha + A3–A13)
+AURA_REDIS_SKIP_BUILD=1 ./scripts/ci-strong.sh
 
 echo "=== ci-prod: ALL PASSED ==="

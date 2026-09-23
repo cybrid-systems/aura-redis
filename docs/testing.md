@@ -7,6 +7,7 @@
 | **Aura FFI** (`tests/test_ffi_iter1.aura`, `tests/test_types_ffi.aura`) | Aura + `std/ffi` | In-process unit/FFI: core create, string KV, typed ops (`ar_hset` / `ar_lpush` / `ar_zadd` / `ar_type`), WRONGTYPE flags |
 | **Aura TCP** (`tests/test_prod_types.aura`) | Aura + `std/socket` + `src/redis/resp` | Product-surface RESP smoke on one connection: HASH/LIST/ZSET/TYPE/MULTI+EXEC |
 | **Python prod** (`tests/test_prod_*.py`) | Python | Process lifecycle, TLS, replica, soak, full command coverage, pub/sub, multi-client edges |
+| **Python strong-narrative** (`tests/test_policy_*.py`, `test_evict_slru.py`, `test_shadow_ab.py`, `test_typed_pressure.py`, `test_hot_cold_knobs.py`, `test_strong_edges.py`) | Python + Docker agent | Audit/canary/autofreeze/weight-evolve/shadow/typed-pressure/slru/hot_cold edges |
 
 **Not all tests can be written in Aura.** Keep Python for process/TLS/replica/soak and dense edge matrices. Prefer Aura where FFI or a thin RESP client is enough. **Do not delete existing Python prod tests.**
 
@@ -23,13 +24,37 @@
 # Aura TCP product types (starts/kills aura_redis_server)
 ./scripts/run-aura-tcp-tests.sh
 
-# Python edges + full prod gate
+# Python edges + full prod gate (P0 + P3 + P1/P2 + strong-narrative)
 python3 tests/test_prod_types_edge.py
-./scripts/ci-prod.sh   # includes Aura FFI, Aura TCP, edge + existing prod_*.py
+./scripts/ci-prod.sh
+# ci-prod includes ./scripts/ci-strong.sh
+
+# Strong-narrative / P1–P2 only
+./scripts/ci-strong.sh
+AURA_REDIS_STRONG_SKIP_AGENT=1 ./scripts/ci-strong.sh   # C-only + edges, no Docker agent
+
+# Long regret benches (NOT in ci-prod wall-time gate)
+./scripts/ci-bench.sh
+AURA_REDIS_CI_BENCH_FULL=1 ./scripts/ci-bench.sh
+
+# Dual scoreboard vs Redis (throughput + hit quality) → docs/redis-compare.md
+./scripts/bench-vs-redis.sh
+BENCH_QUICK=1 ./scripts/bench-vs-redis.sh
+python3 scripts/bench_hit_vs_redis.py
+./scripts/memtier-cmp.sh
 ```
 
 Test servers set `AURA_REDIS_DENY_PLUGIN=1`. Host Aura may need GLIBCXX from the
 dev image; runners fall back to `ghcr.io/cybrid-systems/dev:v1.0.7` when needed.
+
+### CI layout
+
+| Script | Contents | In `ci-prod`? |
+|--------|----------|---------------|
+| `ci-prod.sh` | Aura FFI/TCP + P0 + P3 + calls `ci-strong.sh` | — (top gate) |
+| `ci-strong.sh` | P1 config/clients/slowlog + P2 rdb/replica/tls/policy_ha + A3–A13 strong suites + `test_strong_edges.py` | yes |
+| `ci-bench.sh` | Regret packs (`phase_marathon`, zipf, hot_protect, poison_heal; full via env) | **no** |
+| `bench-vs-redis.sh` | Memtier ops/s + hit-quality vs `redis:7-alpine` dual scoreboard | **no** |
 
 ## Sandbox profile (A11)
 
@@ -41,3 +66,11 @@ AURA_REDIS_SANDBOX_PROFILE=restricted source scripts/sandbox-policy-profile.sh
 
 Live `policy_agent` demos still use `AURA_SANDBOX=off` until Tenant Admin unlocks Restricted grants.
 
+## Edge coverage (`test_strong_edges.py`)
+
+- EVICT `slru` / `tinylfu` name round-trip + WRONGTYPE under slru
+- SHADOW CONFIG/INFO fields + sample-pct clamp 0..100
+- HOTCOLD bounds (pct clamp 1..100) + WRONGTYPE under `LAYOUT hot_cold`
+- POLICY prefix smoke
+- Typed-pressure INFO keys parseable over TCP
+- Canary **default-off** does not break fitness mutate path
