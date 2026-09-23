@@ -45,6 +45,9 @@ That combination is the product story—not “another C Redis with an Aura logo
 
 ---
 
+
+**Aura differentiation (post production P0–P3):** Redis-compatible data plane is table stakes; the moat is sandbox + mutate + hot-strategy policy (`policy_agent.aura`). Demand map and backlog: [`aura-demand.md`](aura-demand.md).
+
 ## 2. Design principles
 
 1. **Aura owns the process and policy.** The server entry remains an Aura program (or Aura-launched). C is a library, not a fork that abandons Aura.

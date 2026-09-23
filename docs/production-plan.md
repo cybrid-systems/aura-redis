@@ -141,6 +141,19 @@ Production does **not** mean “C-only Redis clone.”
 
 ---
 
+
+---
+
+## Aura differentiation track
+
+Production P0–P3 (single-node RESP cache/KV) is **complete**. Compatibility work is no longer the primary differentiator.
+
+**Next active track:** Aura-unique closed-loop policy — sandbox + `hot-strategy` mutate/heal + fitness/evolve against live INFO — scored by multi-phase regret / hit quality (`phase_marathon`), **not** memtier ops/s.
+
+→ **[`aura-demand.md`](aura-demand.md)** — authoritative demand map, capability status (SHIPPED / PARTIAL / GAP), mined demands A–I, ranked backlog **A1–A14** (start next: A1 mutation_gain Δ>0, A2 evolve_gain Δ>0, A3 mutation audit/explain).
+
+Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/.so as the moat. Redis-shaped Aura core patches stay out of scope.
+
 ## Changelog (production track)
 
 | Date (CST) | Item | Notes |
@@ -167,3 +180,4 @@ Production does **not** mean “C-only Redis clone.”
 | 2026-09-23 | **P3.17a** | MULTI/EXEC/DISCARD (+QUEUED); no WATCH; `tests/test_prod_multi.py` |
 | 2026-09-23 | **P3.17b** | SUBSCRIBE/UNSUBSCRIBE/PUBLISH; no PSUBSCRIBE; `tests/test_prod_pubsub.py` |
 | 2026-09-23 | **P3 COMPLETE** | HASH+LIST+ZSET+MULTI+Pub/Sub on main |
+| 2026-09-23 | **Aura demand map** | [`docs/aura-demand.md`](aura-demand.md) — Aura differentiation track after P0–P3; mutation/evolve Δ=0 as open demand |

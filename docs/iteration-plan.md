@@ -120,7 +120,9 @@ Aura core changes: **out of scope** unless separately approved as generic; this 
 
 **High-ROI M6–M12 done.** Fitness mutate/heal, threshold mutation, TTL-aware kernel, soft-goal choose, online evolve, per-prefix `POLICY` — see [`high-roi-iterations.md`](high-roi-iterations.md) · [`mutation-gains.md`](mutation-gains.md).
 
-**Active track: Production P0–P3** (single-node RESP cache/KV ship bar — not full Redis Cluster).
+**Production P0–P3 COMPLETE** (single-node RESP cache/KV ship bar — not full Redis Cluster).
+
+**Active track: Aura differentiation** — [`aura-demand.md`](aura-demand.md) (A1–A14; start A1/A2/A3).
 
 → [`production-plan.md`](production-plan.md) — authoritative production roadmap  
 → [`commands.md`](commands.md) — C data-plane command contract (P0.1)
