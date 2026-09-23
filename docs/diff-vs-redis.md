@@ -1,7 +1,7 @@
 # Aura differentiation vs Redis (A17 / A18 / A19 + adaptive moat)
 
-**Date:** 2026-09-23 13:11:41 CST  
-**Tip:** `32b1000` (`32b1000f603b8ee11b7c9575da07bde2896fb5fe`)  
+**Date:** 2026-09-23 13:11:48 CST  
+**Tip:** `4ec9f75` (`4ec9f7588d856b3f21fb333193ee913b37d642f3`)  
 **Discipline:** `AURA_REDIS_DENY_PLUGIN=1`; dual scoreboard (hit-quality ≠ memtier).  
 **Redis baseline:** `redis:7-alpine` fixed `allkeys-lru` / `allkeys-lfu` only.  
 **Aura control plane:** `policy_agent.aura` (Soft sandbox OK for this experiment).
