@@ -1,4 +1,4 @@
-# aura-redis CI — build pinned Aura in official container, then smoke-test Redis subset
+# aura-redis CI — build pinned Aura in official container, then smoke + ci-prod
 name: CI
 
 on:
@@ -21,6 +21,8 @@ env:
   AURA_PIPELINE_STRICT: "0"
   CCACHE_DISABLE: "1"
   NINJA_STATUS: "[%f/%t %es] "
+  AURA_REDIS_DENY_PLUGIN: "1"
+  AURA_REDIS_SOAK_SEC: "30"
 
 jobs:
   build-aura-and-smoke:
@@ -47,3 +49,25 @@ jobs:
 
       - name: aura-redis smoke (PING/SET/GET/DEL/INCR/EXISTS/FLUSHDB)
         run: ./scripts/smoke-test.sh
+
+  ci-prod:
+    name: ci-prod (P0–P3 + strong)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    needs: build-aura-and-smoke
+    container:
+      image: ghcr.io/cybrid-systems/dev:v1.0.7
+    steps:
+      - name: Checkout aura-redis
+        uses: actions/checkout@v4
+
+      - name: Fetch pinned Aura
+        run: ./scripts/fetch-aura.sh
+
+      - name: Build Aura
+        run: ./scripts/build-aura.sh
+
+      - name: ci-prod gate
+        run: |
+          export AURA_REDIS_SOAK_SEC="${AURA_REDIS_SOAK_SEC:-30}"
+          ./scripts/ci-prod.sh

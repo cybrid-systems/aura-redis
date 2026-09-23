@@ -1,0 +1,66 @@
+# Long regret / dual-scoreboard + hour soak — NOT on the PR wall-time path.
+name: CI Bench (nightly)
+
+on:
+  schedule:
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "AURA_REDIS_CI_BENCH_FULL=1 mutation packs"
+        required: false
+        default: "0"
+      soak_sec:
+        description: "soak-prod seconds (default 3600; 120 for smoke)"
+        required: false
+        default: "3600"
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  AURA_BUILD_TYPE: RelWithDebInfo
+  AURA_BUILD_JOBS: "0"
+  AURA_CI: "1"
+  AURA_USE_MOLD: "1"
+  AURA_LINK_JOBS: "2"
+  AURA_PIPELINE_STRICT: "0"
+  CCACHE_DISABLE: "1"
+  AURA_REDIS_DENY_PLUGIN: "1"
+
+jobs:
+  ci-bench:
+    name: regret packs
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    container:
+      image: ghcr.io/cybrid-systems/dev:v1.0.7
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch + build Aura
+        run: |
+          ./scripts/fetch-aura.sh
+          ./scripts/build-aura.sh
+      - name: ci-bench
+        env:
+          AURA_REDIS_CI_BENCH_FULL: ${{ github.event.inputs.full || '0' }}
+        run: ./scripts/ci-bench.sh
+
+  soak-prod:
+    name: hour-scale soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 400
+    container:
+      image: ghcr.io/cybrid-systems/dev:v1.0.7
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch + build Aura
+        run: |
+          ./scripts/fetch-aura.sh
+          ./scripts/build-aura.sh
+      - name: soak-prod
+        env:
+          AURA_REDIS_SOAK_SEC: ${{ github.event.inputs.soak_sec || '3600' }}
+          AURA_REDIS_SOAK_WITH_AGENT: "1"
+        run: ./scripts/soak-prod.sh
