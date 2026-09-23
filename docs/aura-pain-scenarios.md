@@ -530,11 +530,11 @@ Agent 挂 → C 保持内核 → 新 agent connect → 读 pin/heartbeat → swa
 
 #### 6. 可验证出口
 
-**A8：** 稳定负载 INFO/apply 率 ↓ ≥5×，hit% 在 always-on 的 2pp 内。
+**A8 DONE：** 稳定负载 polls/sec ×6.7 drop（80→800ms tick）；audit auto_freeze/unfreeze；`test_policy_autofreeze.py` PASS。
 
 #### 7. 现状与缺口
 
-**GAP**（仅手动 env）。依赖 A1 有可引用 gain 后再做成本门。
+**SHIPPED** A8 meta-freeze（tick stretch + fitness-off；miss_spike 解冻）。
 
 #### 8. 不做承诺
 

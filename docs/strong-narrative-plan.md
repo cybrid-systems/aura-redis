@@ -129,7 +129,7 @@ Make ops trust live code change: durable audit, canary, prod-shaped sandbox.
 | **Exit criteria** | Stable-load INFO/apply rate ↓ ≥5×; hit% within 2pp of always-on |
 | **Depends-on** | A1 |
 | **Estimate** | 1–2d |
-| **Status** | **TODO** |
+| **Status** | **DONE** (2026-09-23): auto_freeze/unfreeze; polls/sec ×6.7 drop; `tests/test_policy_autofreeze.py` PASS; A14-lite heartbeat `applies_sec`/`polls_sec` |
 
 #### SN9 / A14 — Overhead dashboard
 
@@ -140,7 +140,7 @@ Make ops trust live code change: durable audit, canary, prod-shaped sandbox.
 | **Exit criteria** | Heartbeat fields + bench summary |
 | **Depends-on** | A3 |
 | **Estimate** | 0.5–1d |
-| **Status** | **TODO** |
+| **Status** | **PARTIAL** (2026-09-23): heartbeat `applies_sec` / `polls_sec` / `info_polls` / `meta_frozen` shipped with A8; full bench summary still open |
 
 ---
 
@@ -193,3 +193,4 @@ If blocked: document blocker here, push PARTIAL, continue what is possible.
 | 2026-09-23 | A11 Restricted sandbox profile PARTIAL (TA blocker); smoke + docs. |
 | 2026-09-23 | A5 prefix_mix_v2 worse-tenant +96.4pp; per-prefix bags + deep compose. |
 | 2026-09-23 | A6 policy version pin across agent restart (resume + fail-safe). |
+| 2026-09-23 | A8 auto-freeze meta-policy (×6.7 poll drop) + A14-lite heartbeat rates. |

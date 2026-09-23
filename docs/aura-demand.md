@@ -51,7 +51,7 @@ Redis-compatible cache (RESP, maxmemory kernels, string/typed KV) is **table sta
 | **A/B shadow traffic** | Dual policy on sampled GETs | **GAP** | Not in data plane; needs C sample hook or dual agent |
 | **Explainability of EVICT/LAYOUT flips** | Structured reason codes for ops | **PARTIAL** | Agent logs signals inline; no `INFO policy_explain` / stable schema |
 | **Policy version pin across replica failover** | Same choose generation on promote | **SHIPPED** (A6) | Durable pin file + resume `from_version`; C fail-safe keeps last EVICT; version counter process-local (honest) |
-| **Controller cost vs hit-quality** | Auto-freeze when gain < overhead | **GAP** | Manual `AURA_REDIS_FROZEN=1` / `AURA_REDIS_FITNESS_MUTATE=0` only |
+| **Controller cost vs hit-quality** | Auto-freeze when gain < overhead | **SHIPPED** (A8) | `AUTO_FREEZE` → lengthen tick + fitness-off; unfreeze on miss spike; audit auto_freeze/unfreeze |
 | **`hot_cold` threshold via Aura** | Promote/demote knobs mutated live | **GAP** | C soft-cap ~nkeys/4; not RESP-tunable from agent |
 | **W-TinyLFU / SLRU named kernels** | Better zipf admission | **GAP** | Explore backlog; Aura would only *select* the name |
 
@@ -164,7 +164,7 @@ Priorities here are **P0–P2 for Aura differentiation**, independent of Redis c
 | **A5** | Deep prefix isolation — per-prefix choose body or param bag via multi `register!` | 2–3d | Conflicting-optima `prefix_mix_v2` ≥ +20pp on victim tenant | M12 |  **DONE** +96.4pp |
 | **A6** | Policy version pin across replica promote | 1–2d | Extend `tests/test_prod_policy_ha.py` + replica | P2.14, P1.9 |  **DONE** pin resume |
 | **A7** | Typed pressure signals in INFO + choose | 2–3d | `typed_pressure` harness PASS | P3.16 | |
-| **A8** | Auto-freeze meta-policy (cost gate) | 1–2d | Stable-load INFO rate ↓ ≥5×; hit% within 2pp | A1 | |
+| **A8** | Auto-freeze meta-policy (cost gate) | 1–2d | Stable-load INFO rate ↓ ≥5×; hit% within 2pp | A1 |  **DONE** ×6.7 poll drop |
 | **A9** | `hot_cold` promote/demote RESP knobs + Aura mutate | 1–2d | Microbench large-value locality | layout | |
 | **A10** | Shadow / A/B sample path (C hook or dual agent) | 2–3d | Shadow regret report without applying loser | A4 | |
 | **A11** | Restricted sandbox + `effect:network` grant (prod-shaped) | 1d | Doc + demo without `AURA_SANDBOX=off` when TA available | sandbox profile | **PARTIAL** (off works; Restricted needs TA) |

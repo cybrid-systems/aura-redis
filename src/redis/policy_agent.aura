@@ -30,6 +30,11 @@
 ;   AURA_REDIS_PASSWORD / REQUIREPASS  AUTH to C server when requirepass set
 ;   AURA_REDIS_POLICY_HEARTBEAT     optional file rewritten each tick (HA probe)
 ;   AURA_REDIS_POLICY_PIN          durable pin (profile/version/hash) for HA resume
+;   AURA_REDIS_AUTO_FREEZE=0|1       A8: meta-freeze when EWMA stable (default 0)
+;   AURA_REDIS_AUTO_FREEZE_STABLE_TICKS  ticks of high EWMA before freeze (default 12)
+;   AURA_REDIS_AUTO_FREEZE_EWMA_MIN hit-EWMA floor for "stable" (default 80)
+;   AURA_REDIS_AUTO_FREEZE_TICK_MS  tick ms while meta-frozen (default 5× POLICY_MS)
+;   AURA_REDIS_AUTO_UNFREEZE_MISS_PP  window miss% to unfreeze (default 35)
 ;   AURA_REDIS_POLICY_FORCE_RECONNECT_AFTER  test hook: drop TCP after N ticks
 ;   AURA_REDIS_POLICY_BACKOFF_CAP_MS  reconnect backoff cap (default 4000)
 ;   AURA_REDIS_CANARY=0|1            A4: trial choose-fn N ticks then commit/heal
@@ -176,6 +181,20 @@
 (define *pin-resumed* #f)
 (define *pin-bootstrapped* #f)
 (define *pin-last-payload* "")
+; A8: auto-freeze meta-policy (cost gate) — still heal-able / unfreeze on miss spike
+(define *auto-freeze-enabled* #f)
+(define *meta-frozen* #f)
+(define *tick-ms-base* 200)
+(define *auto-freeze-stable-ticks* 12)
+(define *auto-freeze-ewma-min* 80)
+(define *auto-freeze-tick-ms* 0) ; 0 → 5× base
+(define *auto-unfreeze-miss-pp* 35)
+(define *stable-ticks* 0)
+(define *info-polls* 0)
+(define *freeze-count* 0)
+(define *unfreeze-count* 0)
+(define *fitness-before-freeze* #t)
+(define *tick-wall0-ms* 0) ; for applies/sec in heartbeat
 ; A3: durable mutation audit ring (file) + last explain fields for heartbeat/INFO
 (define *audit-file* "")
 (define *audit-ring-max* 64)
@@ -224,6 +243,8 @@
   (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
     (set! *tick-ms* (string->number e))
     #t))
+(set! *tick-ms-base* *tick-ms*)
+(set! *auto-freeze-tick-ms* (* *tick-ms-base* 5))
 (let ((e (getenv "AURA_REDIS_POLICY_DEMO")))
   (set! *demo*
     (and (string? e)
@@ -241,6 +262,38 @@
            (or (string=? e "1") (string=? e "true") (string=? e "yes")))
     (set! *fitness-on* #f)
     #t))
+(let ((e (getenv "AURA_REDIS_AUTO_FREEZE")))
+  (set! *auto-freeze-enabled*
+    (and (string? e)
+         (or (string=? e "1") (string=? e "true") (string=? e "yes")))))
+(let ((e (getenv "AURA_REDIS_AUTO_FREEZE_STABLE_TICKS")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *auto-freeze-stable-ticks* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_AUTO_FREEZE_EWMA_MIN")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *auto-freeze-ewma-min* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_AUTO_FREEZE_TICK_MS")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *auto-freeze-tick-ms* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_AUTO_UNFREEZE_MISS_PP")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *auto-unfreeze-miss-pp* (string->number e))
+    #t))
+(if *auto-freeze-enabled*
+  (begin
+    (display "policy_agent: auto-freeze enabled stable_ticks=")
+    (display *auto-freeze-stable-ticks*)
+    (display " ewma_min=")
+    (display *auto-freeze-ewma-min*)
+    (display " freeze_tick_ms=")
+    (display *auto-freeze-tick-ms*)
+    (newline))
+  (begin
+    (display "policy_agent: auto-freeze off")
+    (newline)))
 (let ((e (getenv "AURA_REDIS_FITNESS_MUTATE")))
   (if (and (string? e) (> (string-length e) 0))
     (set! *fitness-on*
@@ -1014,6 +1067,78 @@
   (set! *ticks-bad* 0)
   #t)
 
+;; A8 — auto-freeze meta-policy: when EWMA stable, lengthen tick + fitness-off
+;; (still unfreeze / heal-able on miss spike). Cost gate for controller overhead.
+(define (enter-auto-freeze! reason)
+  ; Meta-freeze without mutate:rebind / eval-current (A1 stall). Tick stretch +
+  ; fitness-off is the cost gate; still heal-able / unfreeze on miss spike.
+  (if *meta-frozen*
+    #f
+    (begin
+      (set! *meta-frozen* #t)
+      (set! *fitness-before-freeze* *fitness-on*)
+      (set! *fitness-on* #f)
+      (set! *tick-ms* *auto-freeze-tick-ms*)
+      (set! *freeze-count* (+ *freeze-count* 1))
+      (set! *stable-ticks* 0)
+      (display "policy_agent: auto_freeze reason=")
+      (display reason)
+      (display " tick_ms=")
+      (display *tick-ms*)
+      (display " ewma=")
+      (display *hit-ewma*)
+      (display " profile=")
+      (display *profile-name*)
+      (newline)
+      (audit-append! "auto_freeze" "active" "frozen" reason)
+      (write-heartbeat!)
+      #t)))
+
+(define (exit-auto-freeze! reason)
+  (if (not *meta-frozen*)
+    #f
+    (begin
+      (set! *meta-frozen* #f)
+      (set! *fitness-on* *fitness-before-freeze*)
+      (set! *tick-ms* *tick-ms-base*)
+      (set! *unfreeze-count* (+ *unfreeze-count* 1))
+      (set! *stable-ticks* 0)
+      (display "policy_agent: auto_unfreeze reason=")
+      (display reason)
+      (display " tick_ms=")
+      (display *tick-ms*)
+      (display " ewma=")
+      (display *hit-ewma*)
+      (newline)
+      (audit-append! "auto_unfreeze" "frozen" "active" reason)
+      (write-heartbeat!)
+      #t)))
+
+(define (maybe-auto-freeze! dgets dsets dhits dmisses)
+  (if (not *auto-freeze-enabled*)
+    #f
+    (let ((ops (+ dgets dsets))
+          (win (+ dhits dmisses))
+          (miss-pct (if (> (+ dhits dmisses) 0)
+                      (quotient (* 100 dmisses) (+ dhits dmisses))
+                      0)))
+      (cond
+        (*meta-frozen*
+         (if (and (> win 8) (>= miss-pct *auto-unfreeze-miss-pp*))
+           (exit-auto-freeze! "miss_spike")
+           (if (and (> win 8) (< *hit-ewma* (- *auto-freeze-ewma-min* 25)))
+             (exit-auto-freeze! "ewma_drop")
+             #f)))
+        (else
+         (if (and (>= *hit-ewma* *auto-freeze-ewma-min*)
+                  (>= ops 5)
+                  (< miss-pct 20))
+           (set! *stable-ticks* (+ *stable-ticks* 1))
+           (set! *stable-ticks* 0))
+         (if (>= *stable-ticks* *auto-freeze-stable-ticks*)
+           (enter-auto-freeze! "ewma_stable")
+           #f))))))
+
 ;; Fitness-driven mutation: hit-EWMA drop / miss spike / stuck →
 ;; hot-strategy:swap! profile; if still bad → heal! to last-good.
 (define (maybe-fitness-mutate! dgets dsets dhits dmisses devicted)
@@ -1499,7 +1624,22 @@
                        "prefix_bag_version=" (number->string *prefix-bag-version*) "\n"
                        "profile_hash=" *profile-hash* "\n"
                        "from_version=" (number->string *pin-from-version*) "\n"
-                       "pin_resumed=" (if *pin-resumed* "1" "0") "\n")))
+                       "pin_resumed=" (if *pin-resumed* "1" "0") "\n"
+                       "meta_frozen=" (if *meta-frozen* "1" "0") "\n"
+                       "tick_ms=" (number->string *tick-ms*) "\n"
+                       "info_polls=" (number->string *info-polls*) "\n"
+                       "freeze_count=" (number->string *freeze-count*) "\n"
+                       "unfreeze_count=" (number->string *unfreeze-count*) "\n"
+                       "applies_sec=" (number->string
+                         (let ((dt (- (monotonic-ms) *tick-wall0-ms*)))
+                           (if (> dt 0)
+                             (quotient (* *applies* 1000) dt)
+                             0))) "\n"
+                       "polls_sec=" (number->string
+                         (let ((dt (- (monotonic-ms) *tick-wall0-ms*)))
+                           (if (> dt 0)
+                             (quotient (* *info-polls* 1000) dt)
+                             0))) "\n")))
         (write-file *heartbeat-file* payload)
         (display "policy_agent: heartbeat wrote path=")
         (display *heartbeat-file*)
@@ -1813,6 +1953,7 @@
 
 ; A6: resume profile/version pin (or explicit bootstrap) before first connect
 (resume-from-pin!)
+(set! *tick-wall0-ms* (monotonic-ms))
 
 (if (not (ensure-connected!))
   (begin
@@ -2090,10 +2231,14 @@
                               #t)
                             #t))))
                     #t))
+                (set! *info-polls* (+ *info-polls* 1))
+                (maybe-auto-freeze! dgets dsets dhits dmisses)
                 (maybe-canary-inject!)
                 (if (canary-active?)
                   (canary-tick! dhits dmisses)
-                  (maybe-fitness-mutate! dgets dsets dhits dmisses devicted))
+                  (if *meta-frozen*
+                    #f
+                    (maybe-fitness-mutate! dgets dsets dhits dmisses devicted)))
                 (if *force-rechoose*
                   (begin
                     (set! *force-rechoose* #f)
