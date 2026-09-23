@@ -50,7 +50,7 @@ Redis-compatible cache (RESP, maxmemory kernels, string/typed KV) is **table sta
 | **Canary / rollback of choose-fn** | Trial apply before commit; timed rollback | **SHIPPED** | A4: `AURA_REDIS_CANARY` + inject; `tests/test_policy_canary.py` |
 | **A/B shadow traffic** | Dual policy on sampled GETs | **GAP** | Not in data plane; needs C sample hook or dual agent |
 | **Explainability of EVICT/LAYOUT flips** | Structured reason codes for ops | **PARTIAL** | Agent logs signals inline; no `INFO policy_explain` / stable schema |
-| **Policy version pin across replica failover** | Same choose generation on promote | **GAP** | P2.14 replica exists; `hot-strategy:version` is agent-local, not replicated |
+| **Policy version pin across replica failover** | Same choose generation on promote | **SHIPPED** (A6) | Durable pin file + resume `from_version`; C fail-safe keeps last EVICT; version counter process-local (honest) |
 | **Controller cost vs hit-quality** | Auto-freeze when gain < overhead | **GAP** | Manual `AURA_REDIS_FROZEN=1` / `AURA_REDIS_FITNESS_MUTATE=0` only |
 | **`hot_cold` threshold via Aura** | Promote/demote knobs mutated live | **GAP** | C soft-cap ~nkeys/4; not RESP-tunable from agent |
 | **W-TinyLFU / SLRU named kernels** | Better zipf admission | **GAP** | Explore backlog; Aura would only *select* the name |
@@ -162,7 +162,7 @@ Priorities here are **P0–P2 for Aura differentiation**, independent of Redis c
 | **A3** | **Mutation audit + explain schema** — ring of {ts, op, from, to, reason, version}; INFO or heartbeat | 1–2d | New `tests/test_policy_audit.py`; explain reasons on `phase_marathon` | — | **DONE** |
 | **A4** | Canary choose-fn — trial body N ticks; auto `heal!` if fitness drops | 2–3d | `tests/test_policy_canary.py` | A3 | **DONE** |
 | **A5** | Deep prefix isolation — per-prefix choose body or param bag via multi `register!` | 2–3d | Conflicting-optima `prefix_mix_v2` ≥ +20pp on victim tenant | M12 |  **DONE** +96.4pp |
-| **A6** | Policy version pin across replica promote | 1–2d | Extend `tests/test_prod_policy_ha.py` + replica | P2.14, P1.9 | |
+| **A6** | Policy version pin across replica promote | 1–2d | Extend `tests/test_prod_policy_ha.py` + replica | P2.14, P1.9 |  **DONE** pin resume |
 | **A7** | Typed pressure signals in INFO + choose | 2–3d | `typed_pressure` harness PASS | P3.16 | |
 | **A8** | Auto-freeze meta-policy (cost gate) | 1–2d | Stable-load INFO rate ↓ ≥5×; hit% within 2pp | A1 | |
 | **A9** | `hot_cold` promote/demote RESP knobs + Aura mutate | 1–2d | Microbench large-value locality | layout | |

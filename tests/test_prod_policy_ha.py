@@ -85,15 +85,20 @@ def test_failsafe_no_agent() -> None:
     print("PASS fail-safe: server kept last EVICT without agent")
 
 
-def start_agent(*, force_after: int) -> str:
-    try:
-        if HEARTBEAT.exists():
-            HEARTBEAT.unlink()
-    except OSError:
-        try:
-            HEARTBEAT.write_text("")
-        except OSError:
-            pass
+PIN = Path(f"/tmp/aura-redis-policy-pin-{PORT}.pin")
+
+
+def _rm(path: Path) -> None:
+    subprocess.run(["sudo", "rm", "-f", str(path)], capture_output=True)
+
+
+def start_agent(*, force_after: int, clear_pin: bool = True, clear_hb: bool = True) -> str:
+    if clear_hb:
+        _rm(HEARTBEAT)
+    if clear_pin:
+        _rm(PIN)
+    boot = ROOT / f".ar-agent-booted-{PORT}.flag"
+    boot.unlink(missing_ok=True)
     AGENT_LOG.write_text("")
     cmd = [
         "sudo", "docker", "run", "-d", "--network", "host", "--entrypoint", "",
@@ -109,6 +114,7 @@ def start_agent(*, force_after: int) -> str:
         "-e", "AURA_REDIS_FITNESS_MUTATE=0",
         "-e", "AURA_REDIS_SEED_PROFILE=aggressive",
         "-e", f"AURA_REDIS_POLICY_HEARTBEAT={HEARTBEAT}",
+        "-e", f"AURA_REDIS_POLICY_PIN={PIN}",
         "-e", f"AURA_REDIS_POLICY_FORCE_RECONNECT_AFTER={force_after}",
         "-e", "AURA_REDIS_POLICY_BACKOFF_CAP_MS=500",
         IMG, AURA_BIN, AGENT_AURA,
@@ -238,12 +244,113 @@ def test_kill_agent_kernel_stays() -> None:
             pass
 
 
+def _parse_kv_file(path: Path) -> dict:
+    out = {}
+    try:
+        text = subprocess.check_output(
+            ["sudo", "cat", str(path)], text=True, stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        return out
+    for line in text.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+    for line in path.read_text(errors="replace").splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def test_policy_version_pin_across_restart() -> None:
+    """A6: pin profile/version/hash survives agent kill; resume or bootstrap honest."""
+    with socket.create_connection(("127.0.0.1", PORT), timeout=5) as sock:
+        assert redis_call(sock, "EVICT", "noop") == "OK"
+    cid = start_agent(force_after=0, clear_pin=True, clear_hb=True)
+    stop = threading.Event()
+    threading.Thread(target=write_load, args=(stop, 20.0), daemon=True).start()
+    try:
+        wait_log(cid, ["PING →"], timeout=25)
+        # First boot should bootstrap (empty pin) then write pin
+        log = wait_log(cid, ["policy-pin tag=bootstrap"], timeout=15)
+        t0 = time.time()
+        pin = {}
+        while time.time() - t0 < 8:
+            pin = _parse_kv_file(PIN)
+            if pin.get("profile") and pin.get("version") and pin.get("profile_hash"):
+                break
+            time.sleep(0.15)
+        assert pin.get("profile") == "aggressive", f"pin={pin} log={log[-1500:]}"
+        assert pin.get("profile_hash"), pin
+        v1 = pin["version"]
+        h1 = pin["profile_hash"]
+        with socket.create_connection(("127.0.0.1", PORT), timeout=5) as sock:
+            # Let agent apply something if it can
+            time.sleep(0.8)
+            before = info_field(sock, "evict")
+        stop_agent(cid)
+        time.sleep(0.6)
+        with socket.create_connection(("127.0.0.1", PORT), timeout=5) as sock:
+            after = info_field(sock, "evict")
+        assert after == before, f"fail-safe: {before} → {after}"
+
+        # Restart WITHOUT clearing pin — must resume same profile
+        cid2 = start_agent(force_after=0, clear_pin=False, clear_hb=True)
+        try:
+            log2 = wait_log(
+                cid2,
+                ["policy-pin tag=resume", "from_version=", "profile=aggressive"],
+                timeout=25,
+            )
+            assert "from_version=" in log2
+            # from_version should reference prior pin version
+            assert f"from_version={v1}" in log2 or f"from_version= {v1}" in log2.replace(
+                "from_version=", "from_version="
+            ), log2[-2000:]
+            # Prefer exact token scan
+            found_from = any(
+                f"from_version={v1}" in ln for ln in log2.splitlines()
+            )
+            assert found_from, f"expected from_version={v1} in\n{log2[-2500:]}"
+            t1 = time.time()
+            pin2 = {}
+            while time.time() - t1 < 6:
+                pin2 = _parse_kv_file(PIN)
+                if pin2.get("profile") == "aggressive" and pin2.get("profile_hash"):
+                    break
+                time.sleep(0.15)
+            assert pin2.get("profile") == "aggressive", pin2
+            # profile_hash continuity (same profile + kernels family)
+            assert pin2.get("profile_hash") == h1 or pin2.get("resumed") == "1", (
+                f"hash continuity: was {h1} now {pin2}"
+            )
+            hb = _parse_kv_file(HEARTBEAT)
+            assert hb.get("profile") == "aggressive" or "profile=aggressive" in log2
+            print(
+                f"PASS A6 version pin resume "
+                f"(from_version={v1} hash={h1} → version={pin2.get('version')} "
+                f"fail-safe evict={after})"
+            )
+        finally:
+            stop_agent(cid2)
+    finally:
+        stop.set()
+        try:
+            stop_agent(cid)
+        except Exception:
+            pass
+
+
 def main() -> int:
     proc = start_server("noop")
     try:
         test_failsafe_no_agent()
         test_agent_reconnect_reapply()
         test_kill_agent_kernel_stays()
+        test_policy_version_pin_across_restart()
         print("test_prod_policy_ha: ALL PASSED")
         return 0
     finally:

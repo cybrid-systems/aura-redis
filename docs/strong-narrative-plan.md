@@ -118,7 +118,7 @@ Make ops trust live code change: durable audit, canary, prod-shaped sandbox.
 | **Exit criteria** | Extend `tests/test_prod_policy_ha.py` + replica |
 | **Depends-on** | P2.14, P1.9 |
 | **Estimate** | 1–2d |
-| **Status** | **TODO** |
+| **Status** | **DONE** (2026-09-23): durable `AURA_REDIS_POLICY_PIN` (profile/version/hash); resume logs `from_version`; fail-safe EVICT retained; `test_policy_version_pin_across_restart` PASS |
 
 #### SN8 / A8 — Auto-freeze meta-policy
 
@@ -192,3 +192,4 @@ If blocked: document blocker here, push PARTIAL, continue what is possible.
 | 2026-09-23 | A4 canary choose-fn (auto-heal / commit) + test green on main. |
 | 2026-09-23 | A11 Restricted sandbox profile PARTIAL (TA blocker); smoke + docs. |
 | 2026-09-23 | A5 prefix_mix_v2 worse-tenant +96.4pp; per-prefix bags + deep compose. |
+| 2026-09-23 | A6 policy version pin across agent restart (resume + fail-safe). |

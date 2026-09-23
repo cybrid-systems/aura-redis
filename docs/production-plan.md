@@ -84,7 +84,7 @@
 | High-ROI M6–M12 (mutation, TTL kernel, soft-goal, evolve, prefix POLICY) | **DONE** |
 | **Production P0** | **P0.1–P0.7 DONE** |
 | **P1.1 / P1.8 CONFIG** | **DONE** (runtime; no persist) |
-| **P1.9 policy_agent HA** | **DONE** — reconnect/backoff, re-apply last EVICT/LAYOUT, policy-pin log, heartbeat; fail-safe documented |
+| **P1.9 policy_agent HA** | **DONE** — reconnect/backoff, re-apply last EVICT/LAYOUT, policy-pin log, heartbeat; fail-safe documented; **A6** durable pin resume |
 | **P1.12 client limits** | **DONE** — maxclients / timeout / tcp-backlog (CONFIG + CLI); `tests/test_prod_clients.py` |
 | **P1.11 cache-only restart** | **DONE** — README + `docs/persistence.md` (cache-only default; optional P2.13) |
 | **P1.10 latency/slowlog** | **DONE** — INFO cmd_* histogram + slowlog_count; CONFIG slowlog-log-slower-than |

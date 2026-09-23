@@ -29,6 +29,7 @@
 ;   AURA_REDIS_EVOLVE_WINDOW        ticks per fitness window (default 8)
 ;   AURA_REDIS_PASSWORD / REQUIREPASS  AUTH to C server when requirepass set
 ;   AURA_REDIS_POLICY_HEARTBEAT     optional file rewritten each tick (HA probe)
+;   AURA_REDIS_POLICY_PIN          durable pin (profile/version/hash) for HA resume
 ;   AURA_REDIS_POLICY_FORCE_RECONNECT_AFTER  test hook: drop TCP after N ticks
 ;   AURA_REDIS_POLICY_BACKOFF_CAP_MS  reconnect backoff cap (default 4000)
 ;   AURA_REDIS_CANARY=0|1            A4: trial choose-fn N ticks then commit/heal
@@ -169,6 +170,12 @@
 (define *backoff-cap* 4000)
 (define *conn-alive* #f)
 (define *heartbeat-file* "")
+(define *pin-file* "") ; A6: durable policy pin across agent restart / promote
+(define *profile-hash* "")
+(define *pin-from-version* 0) ; prior process version recorded in pin
+(define *pin-resumed* #f)
+(define *pin-bootstrapped* #f)
+(define *pin-last-payload* "")
 ; A3: durable mutation audit ring (file) + last explain fields for heartbeat/INFO
 (define *audit-file* "")
 (define *audit-ring-max* 64)
@@ -278,6 +285,22 @@
       (newline))
     (begin
       (display "policy_agent: heartbeat-file=(none)")
+      (newline))))
+(let ((e (getenv "AURA_REDIS_POLICY_PIN")))
+  (if (and (string? e) (> (string-length e) 0))
+    (begin
+      (set! *pin-file* e)
+      (display "policy_agent: pin-file=")
+      (display *pin-file*)
+      (newline))
+    (begin
+      ; default beside heartbeat or under /work
+      (set! *pin-file*
+        (if (and (string? *heartbeat-file*) (> (string-length *heartbeat-file*) 0))
+          (string-append *heartbeat-file* ".pin")
+          (string-append "/work/.ar-policy-pin-" (number->string *port*) ".pin")))
+      (display "policy_agent: pin-file=")
+      (display *pin-file*)
       (newline))))
 (let ((e (getenv "AURA_REDIS_POLICY_AUDIT")))
   (if (and (string? e) (> (string-length e) 0))
@@ -1226,14 +1249,158 @@
       (set! *conn-alive* #f))
     (set! *conn-alive* #f)))
 
+;; A6 — durable policy pin (version / profile hash across restart)
+(define (compute-profile-hash)
+  ; Stable weak hash without char ops (profile + kernel names)
+  (number->string
+    (+ (* 100000 (string-length *profile-name*))
+       (* 1000 (string-length *last-evict*))
+       (* 10 (string-length *last-layout*))
+       (string-length *bag0*)
+       (string-length *bag1*))))
+
+(define (pin-get text key)
+  (if (or (not (string? text)) (= (string-length text) 0))
+    ""
+    (let ((pat (string-append key "="))
+          (start 0)
+          (n (string-length text))
+          (i 0)
+          (found ""))
+      (while (<= i n)
+        (if (or (= i n)
+                (and (< i n) (string=? (substring text i (+ i 1)) "\n")))
+          (begin
+            (if (> i start)
+              (let ((line (substring text start i)))
+                (if (and (>= (string-length line) (string-length pat))
+                         (string=? (substring line 0 (string-length pat)) pat))
+                  (set! found (substring line (string-length pat)
+                                         (string-length line)))
+                  #t))
+              #t)
+            (set! start (+ i 1))
+            (set! i (+ i 1)))
+          (set! i (+ i 1))))
+      found)))
+
+(define (write-policy-pin!)
+  (if (or (not (string? *pin-file*)) (= (string-length *pin-file*) 0))
+    #f
+    (begin
+      (set! *policy-version* (try (hot-strategy:version) (catch (e) *policy-version*)))
+      (set! *profile-hash* (compute-profile-hash))
+      (let ((payload (string-append
+                       "profile=" *profile-name* "\n"
+                       "version=" (number->string *policy-version*) "\n"
+                       "profile_hash=" *profile-hash* "\n"
+                       "last_evict=" *last-evict* "\n"
+                       "last_layout=" *last-layout* "\n"
+                       "from_version=" (number->string *pin-from-version*) "\n"
+                       "resumed=" (if *pin-resumed* "1" "0") "\n")))
+        (if (string=? payload *pin-last-payload*)
+          #f
+          (begin
+            (set! *pin-last-payload* payload)
+            (write-file *pin-file* payload)
+            (display "policy_agent: pin wrote path=")
+            (display *pin-file*)
+            (display " profile=")
+            (display *profile-name*)
+            (display " version=")
+            (display *policy-version*)
+            (display " hash=")
+            (display *profile-hash*)
+            (newline)
+            #t))))))
+
+(define (resume-from-pin!)
+  (if (or (not (string? *pin-file*)) (= (string-length *pin-file*) 0))
+    (begin
+      (set! *pin-bootstrapped* #t)
+      (log-policy-pin! "bootstrap")
+      #f)
+    (let ((raw (try (read-file *pin-file*) (catch (e) ""))))
+      (if (or (not (string? raw)) (= (string-length raw) 0))
+        (begin
+          (set! *pin-bootstrapped* #t)
+          (display "policy_agent: pin empty → bootstrap\n")
+          (log-policy-pin! "bootstrap")
+          (write-policy-pin!)
+          #f)
+        (let ((prof (pin-get raw "profile"))
+              (ver-s (pin-get raw "version"))
+              (hash (pin-get raw "profile_hash"))
+              (ev (pin-get raw "last_evict"))
+              (ly (pin-get raw "last_layout")))
+          (if (and (string? prof) (> (string-length prof) 0))
+            (begin
+              (set! *pin-from-version*
+                (if (and (string? ver-s) (> (string-length ver-s) 0)
+                         (number? (string->number ver-s)))
+                  (string->number ver-s)
+                  0))
+              (if (and (string? ev) (> (string-length ev) 0))
+                (set! *last-evict* ev) #t)
+              (if (and (string? ly) (> (string-length ly) 0))
+                (set! *last-layout* ly) #t)
+              (if (not (string=? prof *profile-name*))
+                (begin
+                  (mutate:safety-snapshot)
+                  (let ((body (body-for-profile prof))
+                        (tag (string-append "resume-" prof)))
+                    (let ((r (hot-strategy:swap! "choose-fn" body tag)))
+                      (display "policy_agent: resume-profile → ")
+                      (display prof)
+                      (display " result=")
+                      (display r)
+                      (newline)
+                      (set! *profile-name* prof)
+                      (set! *last-good-profile* prof)
+                      (set! *swaps* (+ *swaps* 1)))))
+                #t)
+              (set! *pin-resumed* #t)
+              (set! *policy-version* (try (hot-strategy:version) (catch (e) 0)))
+              (set! *profile-hash* (compute-profile-hash))
+              (display "policy_agent: policy-pin tag=resume profile=")
+              (display *profile-name*)
+              (display " from_version=")
+              (display *pin-from-version*)
+              (display " version=")
+              (display *policy-version*)
+              (display " profile_hash=")
+              (display *profile-hash*)
+              (display " prior_hash=")
+              (display hash)
+              (display " last-evict=")
+              (display *last-evict*)
+              (newline)
+              (audit-append! "policy_pin"
+                             (number->string *pin-from-version*)
+                             (number->string *policy-version*)
+                             "resume")
+              (write-policy-pin!)
+              #t)
+            (begin
+              (set! *pin-bootstrapped* #t)
+              (display "policy_agent: pin missing profile → bootstrap\n")
+              (log-policy-pin! "bootstrap")
+              (write-policy-pin!)
+              #f)))))))
+
 (define (log-policy-pin! tag)
   (set! *policy-version* (hot-strategy:version))
+  (set! *profile-hash* (compute-profile-hash))
   (display "policy_agent: policy-pin tag=")
   (display tag)
   (display " profile=")
   (display *profile-name*)
   (display " version=")
   (display *policy-version*)
+  (display " profile_hash=")
+  (display *profile-hash*)
+  (display " from_version=")
+  (display *pin-from-version*)
   (display " last-evict=")
   (display *last-evict*)
   (display " last-layout=")
@@ -1241,6 +1408,7 @@
   (display " reconnects=")
   (display *reconnects*)
   (newline)
+  (write-policy-pin!)
   #t)
 
 
@@ -1328,13 +1496,17 @@
                        "canary_heals=" (number->string *canary-heals*) "\n"
                        "prefix_deep=" (if *prefix-deep* "1" "0") "\n"
                        "prefix_bags=" *bag0* ";" *bag1* "\n"
-                       "prefix_bag_version=" (number->string *prefix-bag-version*) "\n")))
+                       "prefix_bag_version=" (number->string *prefix-bag-version*) "\n"
+                       "profile_hash=" *profile-hash* "\n"
+                       "from_version=" (number->string *pin-from-version*) "\n"
+                       "pin_resumed=" (if *pin-resumed* "1" "0") "\n")))
         (write-file *heartbeat-file* payload)
         (display "policy_agent: heartbeat wrote path=")
         (display *heartbeat-file*)
         (display " bytes=")
         (display (string-length payload))
         (newline)
+        (write-policy-pin!)
         #t))))
 
 ;; A4 — canary choose-fn: trial body N ticks → commit or heal!
@@ -1638,6 +1810,9 @@
 (display ":")
 (display *port*)
 (newline)
+
+; A6: resume profile/version pin (or explicit bootstrap) before first connect
+(resume-from-pin!)
 
 (if (not (ensure-connected!))
   (begin
