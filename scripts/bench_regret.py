@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Headline regret + mutation_gain harness.
 
-DEFAULT adaptive control plane = Aura policy_agent.aura (Docker).
+DEFAULT adaptive control plane = Aura policy_agent.aura (native in GHA jobs / docker locally).
 Pass --python-ctl for the host-only Python mirror of choose_*.aura.
 
   python3 scripts/bench_regret.py

@@ -60,10 +60,10 @@ Policies: lru | lfu | ttl_aware | adaptive (=adaptive_soft) | adaptive_soft |
           adaptive_nosoft | adaptive_frozen | adaptive_mutate |
           poison_frozen | poison_mutate | adaptive_evolve | adaptive_evolve_frozen
 
-Adaptive path (DEFAULT): Aura policy_agent.aura in Docker writes EVICT /
-LAYOUT / PIN decisions (choose_normal.aura: min-ops=40, miss-spike→lfu|flat|pin,
-WS→lru|flat + UNPIN). Python choose_policy() is a host-only mirror for CI /
---python-ctl / AURA_AGENT=0 — not the product control plane.
+Adaptive path (DEFAULT): Aura policy_agent.aura (native in GHA container jobs,
+docker on laptops) writes EVICT / LAYOUT / PIN decisions (choose_normal.aura:
+min-ops=40, miss-spike→lfu|flat|pin, WS→lru|flat + UNPIN). Python choose_policy()
+is a host-only mirror for --python-ctl / AURA_AGENT=0 — not the product control plane.
 
 Usage
 -----
@@ -88,10 +88,15 @@ from typing import Callable, Dict, List, Optional, Tuple
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
+from _agentutil import (  # noqa: E402
+    agent_logs as _agent_logs,
+    start_agent as _start_agent,
+    stop_agent as _stop_agent,
+    wait_log as _wait_log,
+)
 
 DEFAULT_PORT = 26730
 _ACTIVE_CONTROLLER = None  # set by run_one for marathon pin retarget
-IMG = os.environ.get("AURA_DEV_IMAGE", "ghcr.io/cybrid-systems/dev:v1.0.7")
 
 
 ADAPTIVE_POLICIES = {
@@ -441,7 +446,11 @@ class PythonAdaptiveController(threading.Thread):
 
 
 class AuraAgentController:
-    """Spawn policy_agent.aura (non-demo) against C server."""
+    """Spawn policy_agent.aura (non-demo) against C server.
+
+    Uses tests/_agentutil: native subprocess inside GHA container: jobs
+    (no docker CLI), sudo docker on laptops when the CLI is present.
+    """
 
     def __init__(
         self,
@@ -472,7 +481,6 @@ class AuraAgentController:
     def start(self) -> None:
         self.log.write_text("")
         # A1: clear boot-guard so agent does a real boot (not skip-reentry)
-        # Agent (docker -v ROOT:/work) writes /work/.ar-agent-booted-PORT.flag
         Path(ROOT / f".ar-agent-booted-{self.port}.flag").unlink(missing_ok=True)
         # A6/A13: clear durable pin so a prior evolve/threshold seed cannot
         # resume over mutate seed (conservative→aggressive). Stale pin made
@@ -481,67 +489,49 @@ class AuraAgentController:
         for p in ROOT.glob(f".ar-policy-hb*{self.port}*"):
             p.unlink(missing_ok=True)
         profile = os.environ.get("AURA_REDIS_POLICY_PROFILE_FILE", "")
-        cmd = [
-            "sudo", "docker", "run", "-d", "--network", "host", "--entrypoint", "",
-            "-v", f"{ROOT}:/work", "-v", "/tmp:/tmp", "-w", "/work",
-            "-e", "AURA_SANDBOX=off",
-            "-e", "AURA_PIPELINE_STRICT=0",
-            "-e", "AURA_PATH=/work/.deps/aura/lib",
-            "-e", f"AURA_REDIS_PORT={self.port}",
-            "-e", "AURA_REDIS_HOST=127.0.0.1",
-            "-e", f"AURA_REDIS_POLICY_MS={self.tick_ms}",
-            "-e", "AURA_REDIS_DENY_PLUGIN=1",
-            "-e", f"AURA_REDIS_FITNESS_MUTATE={'1' if self.fitness_mutate else '0'}",
-            "-e", f"AURA_REDIS_SEED_PROFILE={self.seed_profile}",
+        env = {
+            "AURA_REDIS_PORT": str(self.port),
+            "AURA_REDIS_HOST": "127.0.0.1",
+            "AURA_REDIS_POLICY_MS": str(self.tick_ms),
+            "AURA_REDIS_DENY_PLUGIN": "1",
+            "AURA_REDIS_FITNESS_MUTATE": "1" if self.fitness_mutate else "0",
+            "AURA_REDIS_SEED_PROFILE": self.seed_profile,
             # no AURA_REDIS_POLICY_DEMO → run forever
-        ]
+        }
         if not self.fitness_mutate and not self.evolve:
-            cmd.extend(["-e", "AURA_REDIS_FROZEN=1"])
+            env["AURA_REDIS_FROZEN"] = "1"
         if self.evolve:
-            cmd.extend([
-                "-e", "AURA_REDIS_EVOLVE=1",
-                "-e", f"AURA_REDIS_EVOLVE_MAX_GENS={self.evolve_max_gens}",
-                "-e", f"AURA_REDIS_EVOLVE_WINDOW={self.evolve_window}",
-                "-e", f"AURA_REDIS_EVOLVE_BACKEND={os.environ.get('AURA_REDIS_EVOLVE_BACKEND', 'hand')}",
-                "-e", f"AURA_REDIS_WEIGHT_EVOLVE={os.environ.get('AURA_REDIS_WEIGHT_EVOLVE', '1')}",
-            ])
-            if os.environ.get("AURA_REDIS_FIBER_SHADOW", "0") in ("1", "true", "on", "yes"):
-                cmd.extend(["-e", "AURA_REDIS_FIBER_SHADOW=1"])
+            env.update({
+                "AURA_REDIS_EVOLVE": "1",
+                "AURA_REDIS_EVOLVE_MAX_GENS": str(self.evolve_max_gens),
+                "AURA_REDIS_EVOLVE_WINDOW": str(self.evolve_window),
+                "AURA_REDIS_EVOLVE_BACKEND": os.environ.get(
+                    "AURA_REDIS_EVOLVE_BACKEND", "hand"
+                ),
+                "AURA_REDIS_WEIGHT_EVOLVE": os.environ.get(
+                    "AURA_REDIS_WEIGHT_EVOLVE", "1"
+                ),
+            })
+            if os.environ.get("AURA_REDIS_FIBER_SHADOW", "0") in (
+                "1", "true", "on", "yes",
+            ):
+                env["AURA_REDIS_FIBER_SHADOW"] = "1"
             for k in ("AURA_REDIS_W_MISS", "AURA_REDIS_W_WRITE", "AURA_REDIS_W_EVICT"):
                 if os.environ.get(k):
-                    cmd.extend(["-e", f"{k}={os.environ[k]}"])
+                    env[k] = os.environ[k]
         if self.thresh_min_ops is not None:
-            cmd.extend(["-e", f"AURA_REDIS_THRESH_MIN_OPS={self.thresh_min_ops}"])
+            env["AURA_REDIS_THRESH_MIN_OPS"] = str(self.thresh_min_ops)
         if self.thresh_miss_pin is not None:
-            cmd.extend(["-e", f"AURA_REDIS_THRESH_MISS_PIN={self.thresh_miss_pin}"])
+            env["AURA_REDIS_THRESH_MISS_PIN"] = str(self.thresh_miss_pin)
         if profile:
-            cmd.extend(["-e", f"AURA_REDIS_POLICY_PROFILE_FILE={profile}"])
-        cmd.extend([
-            IMG,
-            "/work/.deps/aura/build/aura",
-            "/work/src/redis/policy_agent.aura",
-        ])
-        self.cid = subprocess.check_output(cmd, text=True).strip()
-        # wait for PING
-        for _ in range(80):
-            subprocess.run(
-                ["sudo", "docker", "logs", self.cid],
-                stdout=self.log.open("w"), stderr=subprocess.STDOUT, check=False,
-            )
-            text = self.log.read_text(errors="replace")
-            if "PING" in text:
-                return
-            time.sleep(0.15)
-        raise TimeoutError(f"policy_agent did not PING; log:\n{self.log.read_text(errors='replace')}")
+            env["AURA_REDIS_POLICY_PROFILE_FILE"] = profile
+        self.cid = _start_agent(env=env, log_path=self.log)
+        _wait_log(self.cid, ["PING"], timeout=12.0, log_path=self.log, poll=0.15)
 
     def harvest_swaps(self) -> None:
         if not self.cid:
             return
-        subprocess.run(
-            ["sudo", "docker", "logs", self.cid],
-            stdout=self.log.open("w"), stderr=subprocess.STDOUT, check=False,
-        )
-        text = self.log.read_text(errors="replace")
+        text = _agent_logs(self.cid, self.log)
         self.swaps = []
         self.fitness_events = []
         for ln in text.splitlines():
@@ -566,9 +556,9 @@ class AuraAgentController:
     def stop(self) -> None:
         self.harvest_swaps()
         if self.cid:
-            subprocess.run(["sudo", "docker", "rm", "-f", self.cid],
-                           capture_output=True)
+            _stop_agent(self.cid)
             self.cid = None
+
 
 
 # ── server lifecycle ──────────────────────────────────────────────────
