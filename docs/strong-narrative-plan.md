@@ -151,7 +151,7 @@ Make ops trust live code change: durable audit, canary, prod-shaped sandbox.
 | **A13** | Signal-weight evolve (not only min-ops) | rebind body weights | weight path in evolve logs; `evolve_gain` ≥ +8pp | A1–A2 | 1–2d | **DONE** (+55.7pp; w-miss/w-write/w-evict mutate) |
 | **A15** | Swarm/FSS/PSO evolve backend | Guard+rebind per trial; `std/swarm` surface | `evolve_gain` ≥ +8pp + swarm gen logs | A2 | 2–3d | **DONE** (`AURA_REDIS_EVOLVE_BACKEND=pso|fss|grid`; lazy `std/swarm`) |
 | **A16** | Fiber parallel trial fitness | `fiber:spawn` / join (原生); score without C hook | Dual-body score in logs; no apply of loser | A4, A10 | 1–2d | **DONE** (fiber proxy dual-score; no apply loser; `FIBER_SHADOW=1`) |
-| **A10** | Shadow / A/B sample | C sample hook or dual agent | Shadow regret without applying loser | A4 | 2–3d | TODO (C sample hooks land with A12 native; agent dry-run next) |
+| **A10** | Shadow / A/B sample | C sample hook or dual agent | Shadow regret without applying loser | A4 | 2–3d | **DONE** (C `SHADOW`/INFO sample + agent dry-run never EVICT loser; `tests/test_shadow_ab.py`) |
 | **A12** | Named C kernel `slru` / TinyLFU — Aura select only | C `ArEvictOps`; Aura name pick | zipf regret ≤ LFU | explore | 2–3d | **DONE** (sample SLRU; `tinylfu` alias/approx; zipf hot-retention = LFU; `tests/test_evict_slru.py`) |
 
 Also backlog (demand map, not SN-gated): **A7** typed pressure INFO+choose; **A9** `hot_cold` RESP knobs; **A11** Restricted sandbox remains PARTIAL.
@@ -202,3 +202,4 @@ If blocked: document blocker here, push PARTIAL, continue what is possible.
 | 2026-09-23 | A8 auto-freeze meta-policy (×6.7 poll drop) + A14-lite heartbeat rates. |
 | 2026-09-23 | SN3 explore: A13 weight evolve (+55.7pp evolve_gain), A15 PSO/`std/swarm` propose, A16 fiber-shadow, A14 overhead bench summary. |
 | 2026-09-23 | A12 `slru`/`tinylfu` named C kernels (approx TinyLFU doc); zipf retention = LFU. |
+| 2026-09-23 | A10 shadow sample path: C `SHADOW`+INFO + agent dual dry-run (never EVICT loser). |

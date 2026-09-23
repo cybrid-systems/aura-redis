@@ -48,7 +48,7 @@ Redis-compatible cache (RESP, maxmemory kernels, string/typed KV) is **table sta
 | **Multi-tenant policy isolation** | Per-prefix choose-fn / pin budget / sandbox | **GAP** | `POLICY` is hint-level override, shared global choose-fn |
 | **Mutation audit trail** | Ops-visible why/when body changed | **SHIPPED** | A3: audit file ring + heartbeat last_audit_*; `tests/test_policy_audit.py` |
 | **Canary / rollback of choose-fn** | Trial apply before commit; timed rollback | **SHIPPED** | A4: `AURA_REDIS_CANARY` + inject; `tests/test_policy_canary.py` |
-| **A/B shadow traffic** | Dual policy on sampled GETs | **PARTIAL** | C sample hooks in native (A12); agent dry-run next (A10) |
+| **A/B shadow traffic** | Dual policy on sampled GETs | **SHIPPED** (A10) | C `SHADOW` sample + agent dry-run; never apply loser |
 | **Explainability of EVICT/LAYOUT flips** | Structured reason codes for ops | **PARTIAL** | Agent logs signals inline; no `INFO policy_explain` / stable schema |
 | **Policy version pin across replica failover** | Same choose generation on promote | **SHIPPED** (A6) | Durable pin file + resume `from_version`; C fail-safe keeps last EVICT; version counter process-local (honest) |
 | **Controller cost vs hit-quality** | Auto-freeze when gain < overhead | **SHIPPED** (A8) | `AUTO_FREEZE` → lengthen tick + fitness-off; unfreeze on miss spike; audit auto_freeze/unfreeze |
@@ -166,7 +166,7 @@ Priorities here are **P0–P2 for Aura differentiation**, independent of Redis c
 | **A7** | Typed pressure signals in INFO + choose | 2–3d | `typed_pressure` harness PASS | P3.16 | |
 | **A8** | Auto-freeze meta-policy (cost gate) | 1–2d | Stable-load INFO rate ↓ ≥5×; hit% within 2pp | A1 |  **DONE** ×6.7 poll drop |
 | **A9** | `hot_cold` promote/demote RESP knobs + Aura mutate | 1–2d | Microbench large-value locality | layout | |
-| **A10** | Shadow / A/B sample path (C hook or dual agent) | 2–3d | Shadow regret report without applying loser | A4 | |
+| **A10** | Shadow / A/B sample path (C hook or dual agent) | 2–3d | Shadow regret report without applying loser | A4 | **DONE** |
 | **A11** | Restricted sandbox + `effect:network` grant (prod-shaped) | 1d | Doc + demo without `AURA_SANDBOX=off` when TA available | sandbox profile | **PARTIAL** (off works; Restricted needs TA) |
 | **A12** | Named kernel `slru` or approx TinyLFU (C) — Aura select only | 2–3d | zipf regret ≤ LFU | explore | **DONE** |
 | **A13** | Signal-weight evolve (not only min-ops) | 1–2d | weight path in evolve logs; evolve_gain ≥ +8pp | A1–A2 | **DONE** +55.7pp |
@@ -174,7 +174,7 @@ Priorities here are **P0–P2 for Aura differentiation**, independent of Redis c
 | **A15** | **Swarm/FSS/PSO evolve backend** — replace/augment hand threshold walk with `std/swarm` | 2–3d | `evolve_gain` ≥ +8pp + swarm gen logs | A2 | **DONE** |
 | **A16** | Agent-side fiber parallel trial fitness (canary/shadow score without C hook) | 1–2d | Dual-body score in logs; no apply of loser | A4, A10 | **DONE** |
 
-**Top 3 start next:** **A10** (agent shadow dry-run), **A7** (typed pressure), **A9** (`hot_cold`). A12 DONE.
+**Top 3 start next:** **A7** (typed pressure), **A9** (`hot_cold` knobs), **A11** (Restricted TA). A10/A12 DONE.
 
 Do **not** implement A1 in this doc-only change set unless trivially documentation.
 
