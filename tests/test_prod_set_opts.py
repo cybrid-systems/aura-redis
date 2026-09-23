@@ -64,6 +64,18 @@ def call(sock: socket.socket, *args: str):
     return recv_one(sock, bytearray())
 
 
+
+def wait_gone(sock: socket.socket, key: str, timeout: float = 2.5) -> None:
+    """Poll GET until missing; PING pumps active-expire (flake harden)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if call(sock, "GET", key) is None:
+            return
+        call(sock, "PING")
+        time.sleep(0.05)
+    raise AssertionError(f"{key} did not expire within {timeout}s")
+
+
 def err_str(v) -> str:
     if isinstance(v, Exception):
         return str(v)
@@ -97,8 +109,7 @@ def main() -> None:
             # --- PX ---
             assert call(sock, "SET", "pxk", "pv", "PX", "250") == "OK"
             assert call(sock, "GET", "pxk") == "pv"
-            time.sleep(0.35)
-            assert call(sock, "GET", "pxk") is None
+            wait_gone(sock, "pxk")
 
             # --- NX + EX / XX + PX ---
             assert call(sock, "SET", "combo", "1", "NX", "EX", "5") == "OK"

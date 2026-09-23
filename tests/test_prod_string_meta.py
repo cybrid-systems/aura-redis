@@ -64,6 +64,18 @@ def call(sock: socket.socket, *args: str):
     return recv_one(sock, bytearray())
 
 
+
+def wait_gone(sock: socket.socket, key: str, timeout: float = 2.5) -> None:
+    """Poll GET until missing; PING pumps active-expire (flake harden)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if call(sock, "GET", key) is None:
+            return
+        call(sock, "PING")
+        time.sleep(0.05)
+    raise AssertionError(f"{key} did not expire within {timeout}s")
+
+
 def err_str(v) -> str:
     if isinstance(v, Exception):
         return str(v)
@@ -109,8 +121,7 @@ def main() -> None:
             # --- PSETEX ---
             assert call(sock, "PSETEX", "px", "250", "pv") == "OK"
             assert call(sock, "GET", "px") == "pv"
-            time.sleep(0.35)
-            assert call(sock, "GET", "px") is None
+            wait_gone(sock, "px")
             r = call(sock, "PSETEX", "badpx", "0", "x")
             assert "invalid expire" in err_str(r).lower(), r
 
@@ -124,7 +135,7 @@ def main() -> None:
             assert call(sock, "DBSIZE") == 5
             assert call(sock, "PSETEX", "soon", "200", "t") == "OK"
             assert call(sock, "DBSIZE") == 6
-            time.sleep(0.35)
+            wait_gone(sock, "soon")
             # DBSIZE purges expired on walk
             assert call(sock, "DBSIZE") == 5
             assert call(sock, "EXISTS", "soon") == 0

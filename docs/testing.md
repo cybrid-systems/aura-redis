@@ -92,3 +92,5 @@ Live `policy_agent` demos still use `AURA_SANDBOX=off` until Tenant Admin unlock
 - POLICY prefix smoke
 - Typed-pressure INFO keys parseable over TCP
 - Canary **default-off** does not break fitness mutate path
+
+Tier-2 harden edges: `tests/test_prod_tier2_edges.py` (wired in `ci-prod.sh`).

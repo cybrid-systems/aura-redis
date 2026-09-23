@@ -177,6 +177,7 @@ Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/
 | T2.9 | SET NX/XX/EX/PX (+ SETNX/GETSET) | **DONE** | `native/src/ar_server.c`; `tests/test_prod_set_opts.py` |
 | T2.10 | APPEND / RENAME / UNLINK (+ RENAMENX) | **DONE** | `ar_append`/`ar_rename`; `tests/test_prod_string_keys.py` |
 | T2.11 | STRLEN / SETEX / PSETEX / DBSIZE | **DONE** | `ar_strlen`/`ar_dbsize` + SETEX/PSETEX via `ar_set_bin_ex`/`px`; `tests/test_prod_string_meta.py` |
+| T2.harden | Edge/regression + flake polls for T2.9–T2.11/SCAN/RDB | **DONE** | `tests/test_prod_tier2_edges.py`; poll-until-expire in set_opts/string_meta |
 
 **Deferred / blocked:** A11 Restricted sandbox without Soft still needs Tenant Admin. Cluster/field-SCAN/Streams/Lua/ACL remain non-goals (keyspace SCAN/KEYS landed for Tier 2). Short `bench_hit_vs_redis` adaptive cites remain non-citeable.
 
@@ -186,6 +187,7 @@ Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/
 export AURA_REDIS_DENY_PLUGIN=1
 ./scripts/build-native.sh
 python3 tests/test_prod_rdb.py          # typed RDB
+python3 tests/test_prod_tier2_edges.py  # T2 harden edges
 AURA_REDIS_SOAK_SEC=60 ./scripts/soak-prod.sh
 ./scripts/ci-prod.sh                    # wall-time gate (short soak)
 # long (optional): ./scripts/ci-bench.sh
@@ -226,3 +228,4 @@ AURA_REDIS_SOAK_SEC=60 ./scripts/soak-prod.sh
 | 2026-09-23 | **T2.9** | SET NX/XX/EX/PX + SETNX/GETSET; `tests/test_prod_set_opts.py`; docs + ci-prod |
 | 2026-09-23 | **T2.10** | APPEND/RENAME/UNLINK (+RENAMENX); `tests/test_prod_string_keys.py`; docs + ci-prod |
 | 2026-09-23 | **T2.11** | STRLEN/SETEX/PSETEX/DBSIZE; `tests/test_prod_string_meta.py`; docs + ci-prod |
+| 2026-09-23 | **T2.harden** | Edge suite SCAN/SETNX/RENAME-across-types/RDB-large + expire poll harden; ci-prod wire |
