@@ -25,7 +25,7 @@ Caveats: approximate LFU sampling (default 16, adaptive bumps to 64 under pin); 
 | **Zipf adaptive ≈ LFU (0pp regret)** | `zipf_hotkey`: adaptive **100%** = LFU **100%** |
 | **Aura C ≥ Redis ops/s (throughput ≠ adaptive story)** | Frozen p=1 **~1.07–1.13×**; p=16 **~1.02–1.11×** vs `redis:7-alpine` — do **not** cite adaptive for throughput wins |
 | **Expanded matrix still ≥ Redis** | Long N=100k lru **~1.08–1.14×**; pipeline=8 **~1.12×**; 4c×4t **~1.12×** |
-| **Mutation / industry packs** | `poison_heal` mutate **+100pp** vs frozen; `ttl_wave` / `flash_churn` / `prefix_mix` adaptive paths PASS; `mutation_gain` mutate−frozen **+27.9pp** (A1 PASS); `evolve_gain` evolve=frozen (assert FAIL, Δ=0) |
+| **Mutation / industry packs** | `poison_heal` mutate **+100pp** vs frozen; `ttl_wave` / `flash_churn` / `prefix_mix` adaptive paths PASS; `mutation_gain` mutate−frozen **+27.9pp** (A1 PASS); `evolve_gain` evolve−frozen **+57.1pp** (A2 PASS) |
 
 Primary scoreboard = **multi-phase cumulative useful-GET hit% + regret vs per-phase oracle**, not single-phase hit% and not memtier ops/s.
 
@@ -109,9 +109,9 @@ One server lifetime: `zipf_hotkey` → bridge/UNPIN → `ws_shift` → bridge �
 | `flash_churn` | adaptive_soft / nosoft **100%** / 400 useful vs lfu **5%** / lru **0%** | PASS |
 | `prefix_mix` | adaptive_prefix **100%** vs global adaptive **28.6%** / lru **1.8%** (Δ=+71.4pp) | PASS |
 | `mutation_gain` | mutate **100%** vs frozen **72.1%** (Δ=**+27.9pp**); LFU **100%**; fitness-swap + inline EVICT/PIN | **PASS** (A1 restore) |
-| `evolve_gain` | evolve=frozen **10.0%**; LFU **100%**; evolve Δ=+0.0pp (need ≥8pp) | FAIL assert |
+| `evolve_gain` | evolve **61.4%** vs frozen **4.3%** (Δ=**+57.1pp**); ≥2 gens; LFU **100%** | **PASS** (A2 restore) |
 
-Note: `evolve_gain` still stretch (Δ=0) — A2 next. `mutation_gain` restored A1 (+27.9pp).
+Note: A1/A2 stretch packs restored 2026-09-23 (`mutation_gain` +27.9pp, `evolve_gain` +57.1pp).
 
 Also: `./scripts/demo-mvp.sh` Phase A smoke flaked this run (`policy_agent: PING → ERR closed`); harness benches above used the same Aura agent path successfully.
 

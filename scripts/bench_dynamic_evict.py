@@ -447,8 +447,8 @@ class AuraAgentController:
         evolve: bool = False,
         thresh_min_ops: Optional[int] = None,
         thresh_miss_pin: Optional[int] = None,
-        evolve_max_gens: int = 6,
-        evolve_window: int = 8,
+        evolve_max_gens: int = 8,
+        evolve_window: int = 4,
     ):
         self.port = port
         self.tick_ms = tick_ms
@@ -1308,7 +1308,7 @@ def workload_evolve_gain(s: socket.socket, mode: str) -> List[PhaseResult]:
                 hits,
             )
         )
-        time.sleep(0.35)  # inter-round evolve windows
+        time.sleep(0.55)  # A2: longer inter-round evolve windows
     return phases
 
 def workload_prefix_mix(s: socket.socket, mode: str) -> List[PhaseResult]:

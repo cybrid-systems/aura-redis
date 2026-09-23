@@ -43,7 +43,7 @@ Redis-compatible cache (RESP, maxmemory kernels, string/typed KV) is **table sta
 | **In-process Aura server as data plane** | Pure Lisp RESP path | **GAP** (intentional) | ~70–110× slower than C (`architecture.md`); C data plane is product |
 | **FFI + closure co-location** | hot-strategy in same process as `(c-func)` soup | **GAP** (Aura rev) | Closures inert after many `c-func` → **split process** required (`aura-native-control.md`) |
 | **`mutation_gain` non-zero under harder oracle** | Mutate ≫ frozen on diurnal flash | **SHIPPED** | A1: mutate 100% vs frozen 72.1% (**+27.9pp**) |
-| **`evolve_gain` non-zero** | Evolve ≫ frozen bad thresholds | **GAP** | `perf-eval.md`: evolve=frozen 10%, Δ=0 (need ≥8pp) |
+| **`evolve_gain` non-zero** | Evolve ≫ frozen bad thresholds | **SHIPPED** | A2: evolve 61.4% vs frozen 4.3% (**+57.1pp**) |
 | **Typed (HASH/LIST/ZSET) in policy** | Type-aware eviction/layout pressure | **GAP** | P3.16 types in C; choose-fn / INFO have **no** type-mix signals |
 | **Multi-tenant policy isolation** | Per-prefix choose-fn / pin budget / sandbox | **GAP** | `POLICY` is hint-level override, shared global choose-fn |
 | **Mutation audit trail** | Ops-visible why/when body changed | **GAP** | Logs exist ad-hoc; no durable audit ring / RESP query |
@@ -158,7 +158,7 @@ Priorities here are **P0–P2 for Aura differentiation**, independent of Redis c
 | ID | Item | Scale | Exit test | Depends | Start? |
 |----|------|-------|-----------|---------|--------|
 | **A1** | **Close `mutation_gain` Δ>0** — longer flash phase / colder conservative seed / require fitness-swap log | 1–2d | `python3 scripts/bench_regret.py mutation_gain` mutate−frozen ≥ +8pp + fitness-swap log | — | **DONE** (+27.9pp) |
-| **A2** | **Close `evolve_gain` Δ>0** — window/gen tuning; keep≥1 gen; assert evolve logs | 1–2d | `python3 scripts/bench_regret.py evolve_gain` ≥ +8pp + ≥2 evolve gens | — | **START NEXT** |
+| **A2** | **Close `evolve_gain` Δ>0** — window/gen tuning; keep≥1 gen; assert evolve logs | 1–2d | `python3 scripts/bench_regret.py evolve_gain` ≥ +8pp + ≥2 evolve gens | — | **DONE** (+57.1pp) |
 | **A3** | **Mutation audit + explain schema** — ring of {ts, op, from, to, reason, version}; INFO or heartbeat | 1–2d | New `tests/test_policy_audit.py`; explain reasons on `phase_marathon` | — | **START NEXT** |
 | **A4** | Canary choose-fn — trial body N ticks; auto `heal!` if fitness drops | 2–3d | `tests/test_policy_canary.py` | A3 | |
 | **A5** | Deep prefix isolation — per-prefix choose body or param bag via multi `register!` | 2–3d | Conflicting-optima `prefix_mix_v2` ≥ +20pp on victim tenant | M12 | |

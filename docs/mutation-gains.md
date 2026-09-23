@@ -109,3 +109,17 @@ Multi-generation threshold mutate with window fitness + keep/revert (not M7
 one-shot). See [`high-roi-iterations.md`](high-roi-iterations.md) M11.
 `std/evolve` in pinned Aura is intend-analytics only — Redis fitness loop lives
 in `policy_agent.aura`.
+
+
+### A2 restore (2026-09-23) — `evolve_gain` evolve−frozen ≥ +8pp
+
+Root cause: evolve step −140 left min-ops ≫ per-tick ops; `hot-strategy:swap!`
+re-eval stalled PIN. Fix: halve thresholds each gen (floor 24/12); `mutate:rebind`
++ inline EVICT/PIN when min-ops≤80; shorter evolve window.
+
+| policy | cum hit% | useful | notes |
+|--------|----------|--------|-------|
+| adaptive_evolve_frozen | 4.3% | 6 | bad seed frozen |
+| **adaptive_evolve** | **61.4%** | **86** | ≥2 gens + inline PIN |
+
+**Evolve-attributable Δ = +57.1pp**. Exit: `python3 scripts/bench_regret.py evolve_gain`.

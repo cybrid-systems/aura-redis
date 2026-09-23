@@ -53,7 +53,7 @@ Restore mutate−frozen / evolve−frozen deltas so the moat is measurable again
 | **Exit criteria** | `python3 scripts/bench_regret.py evolve_gain` → evolve−frozen ≥ **+8pp** + ≥2 evolve gens in log; keep A1 green |
 | **Depends-on** | Prefer after A1 (same harness family); can parallel if careful |
 | **Estimate** | 1–2d |
-| **Status** | **TODO** (recent: evolve=frozen 10%, Δ=0) |
+| **Status** | **DONE** (2026-09-23): evolve 61.4% vs frozen 4.3%, **Δ=+57.1pp**; ≥2 gens + inline EVICT/PIN |
 
 ---
 

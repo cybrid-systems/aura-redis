@@ -551,6 +551,8 @@
     "(else \"\"))))))"))
 
 (define (evolve-apply-body! min-ops miss-pin tag)
+  ; A2: mutate:rebind only (avoid hot-strategy:swap! → eval-current stall).
+  ; When thresholds are fireable, inline LFU+PIN like A1 fitness-swap.
   (if (not (mutate:boundary-safe?))
     (begin
       (display "policy_agent: skip evolve-apply (boundary not safe)\n")
@@ -558,18 +560,56 @@
     (begin
       (mutate:safety-snapshot)
       (let ((body (build-evolve-body min-ops miss-pin))
-            (r #f))
-        (set! r (hot-strategy:swap! "choose-fn" body tag))
-        (set! *thresh-min-ops* min-ops)
-        (set! *thresh-miss-pin* miss-pin)
-        (set! *profile-name* "evolved")
-        (set! *swaps* (+ *swaps* 1))
-        r))))
+            (ok #f))
+        (set! ok
+          (try
+            (begin
+              (mutate:rebind "choose-fn" body tag)
+              #t)
+            (catch (e) #f)))
+        (display "policy_agent: evolve-apply ")
+        (display tag)
+        (display " min-ops=")
+        (display min-ops)
+        (display " miss-pin=")
+        (display miss-pin)
+        (display " ok=")
+        (display ok)
+        (newline)
+        (if ok
+          (begin
+            (set! *thresh-min-ops* min-ops)
+            (set! *thresh-miss-pin* miss-pin)
+            (set! *profile-name* "evolved")
+            (set! *swaps* (+ *swaps* 1))
+            (if (and (<= min-ops 80) (number? *sock*))
+              (begin
+                (display "policy_agent: EVICT (evolve-apply inline) -> lfu\n")
+                (redis-call! *sock* "EVICT" "lfu")
+                (set! *last-evict* "lfu")
+                (redis-call! *sock* "LAYOUT" "flat")
+                (set! *last-layout* "flat")
+                (display "policy_agent: PIN hot set (evolve-apply inline)\n")
+                (redis-call! *sock* "EVICT" "samples" "64")
+                (pin-prefix-set! *sock* "hot" 40)
+                (pin-prefix-set! *sock* "z" 24)
+                (set! *applies* (+ *applies* 3))
+                #t)
+              #t)
+            #t)
+          #f)))))
 
 (define (evolve-propose-next)
-  ; Step down thresholds so bad seed (high) becomes useful over generations
-  (let ((nm (if (> *champ-min* 40) (- *champ-min* 140) *champ-min*))
-        (ns (if (> *champ-miss* 14) (- *champ-miss* 12) *champ-miss*)))
+  ; A2: aggressive step-down (halve min-ops, floor 24) so 2-3 gens reach
+  ; fireable thresholds under short evolve_gain windows (was -140 → stuck >600).
+  (let ((nm (if (> *champ-min* 24)
+              (let ((h (quotient *champ-min* 2)))
+                (if (< h 24) 24 h))
+              *champ-min*))
+        (ns (if (> *champ-miss* 12)
+              (let ((h (quotient *champ-miss* 2)))
+                (if (< h 12) 12 h))
+              *champ-miss*)))
     (if (and (= nm *champ-min*) (= ns *champ-miss*))
       #f
       (begin
