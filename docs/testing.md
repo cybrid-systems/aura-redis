@@ -94,3 +94,14 @@ Live `policy_agent` demos still use `AURA_SANDBOX=off` until Tenant Admin unlock
 - Canary **default-off** does not break fitness mutate path
 
 Tier-2 harden edges: `tests/test_prod_tier2_edges.py` (wired in `ci-prod.sh`).
+
+## Staging packaging smoke (T2.16)
+
+```bash
+./scripts/smoke-staging.sh          # native build + healthcheck (no compose)
+./scripts/healthcheck.sh -p 6379    # against a running server
+# Human staging: docker compose up -d --build  (see docs/runbook.md §11)
+```
+
+`ci-prod.sh` runs `smoke-staging.sh` after strong suites. Full image/compose builds stay out of the cheap PR wall.
+

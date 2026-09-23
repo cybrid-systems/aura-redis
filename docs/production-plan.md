@@ -182,8 +182,9 @@ Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/
 | T2.13 | Typed REPLICAOF full-sync + live feed (HASH/LIST/ZSET) | **DONE** | `repl_sync_{hash,list,zset}` + propagate; `tests/test_prod_replica.py` |
 | T2.14 | CONFIG persist across restart | **DONE** | `ar_config.c`; `--config`/`AURA_REDIS_CONFIG`; auto-rewrite on SET + `CONFIG REWRITE`; `tests/test_prod_config_persist.py` |
 | T2.15 | CLIENT LIST (+ ID/SETNAME/KILL) | **DONE** | `CLIENT LIST` id/addr/fd/name/age/idle/flags/db/cmd; `tests/test_prod_client_list.py` |
+| T2.16 | Staging packaging (compose + healthcheck + runbook §11) | **DONE** | `docker-compose.yml`; `deploy/Dockerfile`; `scripts/healthcheck.sh`; `scripts/smoke-staging.sh`; `deploy/staging/aura-redis.conf.example` |
 
-**Deferred / blocked:** A11 Restricted sandbox without Soft still needs Tenant Admin. Cluster/field-SCAN/Streams/Lua/ACL remain non-goals (keyspace SCAN/KEYS landed for Tier 2). Short `bench_hit_vs_redis` adaptive cites remain non-citeable. CONFIG persist + CLIENT LIST landed (T2.14–T2.15).
+**Deferred / blocked:** A11 Restricted sandbox without Soft still needs Tenant Admin. Cluster/field-SCAN/Streams/Lua/ACL remain non-goals (keyspace SCAN/KEYS landed for Tier 2). Short `bench_hit_vs_redis` adaptive cites remain non-citeable. CONFIG persist + CLIENT LIST + staging packaging landed (T2.14–T2.16).
 
 **How to run Tier 2 gates locally:**
 
@@ -195,6 +196,8 @@ python3 tests/test_prod_tier2_edges.py  # T2 harden edges
 python3 tests/test_prod_watch.py       # T2.12 WATCH/UNWATCH
 python3 tests/test_prod_config_persist.py  # T2.14 CONFIG persist
 python3 tests/test_prod_client_list.py     # T2.15 CLIENT LIST
+./scripts/smoke-staging.sh              # T2.16 packaging smoke (no compose)
+# human staging: docker compose up -d --build
 AURA_REDIS_SOAK_SEC=60 ./scripts/soak-prod.sh
 ./scripts/ci-prod.sh                    # wall-time gate (short soak)
 # long (optional): ./scripts/ci-bench.sh
@@ -240,3 +243,4 @@ AURA_REDIS_SOAK_SEC=60 ./scripts/soak-prod.sh
 | 2026-09-23 | **T2.13** | Typed REPLICAOF full-sync + live HSET/LPUSH/ZADD/… propagate; replica tests |
 | 2026-09-23 | **T2.14** | CONFIG persist (`aura-redis.conf` via `--config`/`AURA_REDIS_CONFIG`); auto-save on durable SET + REWRITE; `tests/test_prod_config_persist.py` |
 | 2026-09-23 | **T2.15** | CLIENT LIST/ID/SETNAME/KILL; `tests/test_prod_client_list.py`; docs + ci-prod |
+| 2026-09-23 | **T2.16** | Staging packaging: compose + Dockerfile + healthcheck + smoke-staging; runbook §11; ci-prod wire |

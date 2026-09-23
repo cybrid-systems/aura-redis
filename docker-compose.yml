@@ -1,0 +1,70 @@
+# Staging one-shot for aura-redis (C data plane + optional policy_agent).
+# NOT a Redis Cluster / drop-in claim — see docs/runbook.md §11.
+#
+#   cp deploy/staging/.env.example deploy/staging/.env   # set requirepass
+#   docker compose up -d --build
+#   docker compose --profile agent up -d --build          # + policy_agent
+#   docker compose down
+#
+# Prefer reuse of ghcr.io/cybrid-systems/dev for the Aura agent (same as CI/demos).
+
+name: aura-redis-staging
+
+services:
+  aura-redis:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    image: aura-redis:staging
+    restart: unless-stopped
+    ports:
+      - "${AURA_REDIS_HOST_PORT:-6379}:6379"
+    environment:
+      AURA_REDIS_DENY_PLUGIN: "${AURA_REDIS_DENY_PLUGIN:-1}"
+      AURA_REDIS_CONFIG: /data/aura-redis.conf
+      AURA_REDIS_DIR: /data
+      AURA_REDIS_DBFILENAME: dump.rdb
+      AURA_REDIS_REQUIREPASS: "${AURA_REDIS_REQUIREPASS:-}"
+      AURA_REDIS_BIND: "0.0.0.0"
+    volumes:
+      - aura-data:/data
+    healthcheck:
+      test: ["CMD", "aura-redis-healthcheck", "-h", "127.0.0.1", "-p", "6379"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # Optional Aura control plane. Needs a prebuilt Aura binary under .deps/aura
+  # (./scripts/fetch-aura.sh && ./scripts/build-aura.sh — typically in the
+  # ghcr.io/cybrid-systems/dev:v1.0.7 container). Soft sandbox until TA unlocks
+  # Restricted (docs/prod-profile.md). A11 Restricted remains PARTIAL.
+  policy_agent:
+    profiles: ["agent"]
+    image: ${AURA_DEV_IMAGE:-ghcr.io/cybrid-systems/dev:v1.0.7}
+    depends_on:
+      aura-redis:
+        condition: service_healthy
+    network_mode: "service:aura-redis"
+    working_dir: /work
+    volumes:
+      - ./:/work
+    environment:
+      AURA_SANDBOX: "off"
+      AURA_PIPELINE_STRICT: "0"
+      AURA_PATH: /work/.deps/aura/lib
+      AURA_REDIS_HOST: "127.0.0.1"
+      AURA_REDIS_PORT: "6379"
+      AURA_REDIS_DENY_PLUGIN: "1"
+      AURA_REDIS_REQUIREPASS: "${AURA_REDIS_REQUIREPASS:-}"
+      AURA_REDIS_PASSWORD: "${AURA_REDIS_REQUIREPASS:-}"
+      AURA_REDIS_POLICY_MS: "${AURA_REDIS_POLICY_MS:-200}"
+    entrypoint: [""]
+    command:
+      - /work/.deps/aura/build/aura
+      - /work/src/redis/policy_agent.aura
+    restart: unless-stopped
+
+volumes:
+  aura-data:
+    name: aura-redis-staging-data

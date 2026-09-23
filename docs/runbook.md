@@ -148,3 +148,65 @@ redis-cli -p 6379 INFO | egrep 'used_memory|evicted|keys_|aura_rdb|role|evict|la
 
 Verify: `python3 tests/test_prod_config_persist.py` · `python3 tests/test_prod_client_list.py`.
 
+
+## 11. Staging one-shot (Docker Compose)
+
+**Goal:** bring up a single-node canary with a data volume + healthcheck. Optional Aura `policy_agent` via compose profile. **Not** Redis Cluster / drop-in.
+
+### Up / down
+
+```bash
+export AURA_REDIS_DENY_PLUGIN=1
+# Optional secret (injected into /data/aura-redis.conf on first boot):
+export AURA_REDIS_REQUIREPASS='your-staging-secret'
+
+# Needs Docker Compose v2 (`docker compose`) or compatible `docker-compose`.
+docker compose up -d --build          # C server only
+docker compose ps
+./scripts/healthcheck.sh -h 127.0.0.1 -p 6379 -a "$AURA_REDIS_REQUIREPASS"
+
+# Optional control plane (needs .deps/aura built — same as CI/demos):
+#   docker run --rm -v "$PWD:/work" -w /work ghcr.io/cybrid-systems/dev:v1.0.7 \
+#     ./scripts/fetch-aura.sh && ./scripts/build-aura.sh
+docker compose --profile agent up -d --build
+
+docker compose down                   # keep volume
+docker compose down -v                # wipe aura-redis-staging-data
+```
+
+| Piece | Path / note |
+|-------|-------------|
+| Compose | `docker-compose.yml` (service `aura-redis`, profile `agent` → `policy_agent`) |
+| Image | `deploy/Dockerfile` → `aura-redis:staging` (C binary + healthcheck) |
+| Config example | `deploy/staging/aura-redis.conf.example` (seeded to `/data/aura-redis.conf`) |
+| Persist volume | named volume `aura-redis-staging-data` → `/data` (conf + `dump.rdb`) |
+| Env | `AURA_REDIS_CONFIG=/data/aura-redis.conf`, `DENY_PLUGIN=1`, `AURA_REDIS_REQUIREPASS` |
+| Health | compose `healthcheck` → `aura-redis-healthcheck` (= `scripts/healthcheck.sh`) |
+
+### Config file example
+
+See `deploy/staging/aura-redis.conf.example`: `bind 0.0.0.0`, `protected-mode yes`, `maxmemory 268435456`, `dir`/`dbfilename` under `/data`, commented `requirepass` placeholder. Live `CONFIG SET` / `CONFIG REWRITE` rewrite the volume file (cleartext secrets — restrict volume access).
+
+### Persist volume
+
+- RDB: `SAVE` / `BGSAVE` → `/data/dump.rdb` (aura-rdb, **not** Redis RDB).
+- Config: durable knobs land in `/data/aura-redis.conf` when `AURA_REDIS_CONFIG` is set.
+- `docker compose down` keeps the volume; `-v` deletes it.
+
+### Fail-safe when agent dies
+
+Same as §3: data plane keeps last `EVICT`/`LAYOUT`/PIN. Compose `policy_agent` uses `restart: unless-stopped` + Soft sandbox (`AURA_SANDBOX=off`) until Restricted/TA (A11 PARTIAL). Killing the agent container does **not** reset kernels on `aura-redis`.
+
+### Promote replica (brief)
+
+1. On replica: `REPLICAOF NO ONE` (becomes writable primary).
+2. Point clients / `policy_agent` (`AURA_REDIS_HOST`/`PORT`) at the new primary; durable policy-pin resumes when configured.
+3. Old primary: stop writes or `REPLICAOF <new> <port>` if re-attaching as replica.
+4. Details: §4 · `tests/test_prod_replica.py`. Typed keys: prefer SAVE warm-start; live feed is best-effort async.
+
+### CI without Compose
+
+```bash
+./scripts/smoke-staging.sh    # build native + healthcheck (wired in ci-prod)
+# Full compose image build is for human staging — not required on every PR.
+```

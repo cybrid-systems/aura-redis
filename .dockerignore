@@ -1,0 +1,15 @@
+.git
+.deps
+.github
+**/__pycache__
+**/*.pyc
+native/build
+*.log
+.ar-agent-booted-*.flag
+.ar-policy-audit-*.log
+.ar-policy-pin-*.pin
+.env
+deploy/staging/.env
+docs
+tests
+scripts/__pycache__

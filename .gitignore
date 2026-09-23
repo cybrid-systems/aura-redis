@@ -19,3 +19,7 @@ native/build/
 .ar-policy-audit-*.log
 # Local CONFIG rewrite drops (ops path override)
 aura-redis.conf
+
+# Compose local secrets
+.env
+deploy/staging/.env

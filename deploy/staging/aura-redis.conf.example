@@ -1,0 +1,27 @@
+# Minimal staging config for aura-redis (aura-redis.conf format).
+# Copy into the data volume or set AURA_REDIS_CONFIG.
+# Prefer AURA_REDIS_REQUIREPASS env (compose entrypoint injects requirepass).
+# Values are bytes / key-value lines (see docs/runbook.md §11). Not redis.conf.
+
+# Listen inside containers / behind network policy (not loopback-only).
+bind 0.0.0.0
+protected-mode yes
+
+# AUTH — uncomment or set via AURA_REDIS_REQUIREPASS (cleartext; mode 0600 + restricted volume).
+# requirepass CHANGE_ME
+
+# Memory ceiling (256 MiB). Eviction kernel via --evict / RESP EVICT (compose default: lru).
+maxmemory 268435456
+
+# Client limits
+maxclients 128
+timeout 300
+tcp-backlog 128
+
+# aura-rdb warm-start paths (volume-mounted /data in compose)
+dir /data
+dbfilename dump.rdb
+
+# Ops knobs
+evict-samples 16
+slowlog-log-slower-than 10000

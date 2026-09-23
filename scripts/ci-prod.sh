@@ -49,4 +49,7 @@ run T2.15-client-list tests/test_prod_client_list.py
 # P1/P2 + strong-narrative (config/clients/rdb/replica/tls/policy_ha + A3–A13)
 AURA_REDIS_SKIP_BUILD=1 ./scripts/ci-strong.sh
 
+echo "=== ci-prod: staging packaging smoke ==="
+AURA_REDIS_SKIP_BUILD=1 ./scripts/smoke-staging.sh
+
 echo "=== ci-prod: ALL PASSED ==="
