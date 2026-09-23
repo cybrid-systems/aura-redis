@@ -19,6 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
+from _portutil import kill_tcp_port  # noqa: E402
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26984"))
 SERVER = ROOT / "native/build/aura_redis_server"
@@ -35,7 +36,7 @@ def info_map(raw: str) -> dict[str, str]:
 
 
 def start_server() -> subprocess.Popen:
-    subprocess.run(["fuser", "-k", f"{PORT}/tcp"], capture_output=True)
+    kill_tcp_port(PORT)
     time.sleep(0.05)
     if BUILD.exists():
         subprocess.check_call(
@@ -138,7 +139,7 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=2)
-        subprocess.run(["fuser", "-k", f"{PORT}/tcp"], capture_output=True)
+        kill_tcp_port(PORT)
     print("test_hot_cold_knobs: ALL PASSED")
     return 0
 

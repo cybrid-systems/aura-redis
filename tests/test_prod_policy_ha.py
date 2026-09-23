@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
+from _portutil import kill_tcp_port  # noqa: E402
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26919"))
 IMG = os.environ.get("AURA_DEV_IMAGE", "ghcr.io/cybrid-systems/dev:v1.0.7")
@@ -36,7 +37,7 @@ def info_field(sock: socket.socket, key: str) -> str:
 
 
 def start_server(evict: str = "noop") -> subprocess.Popen:
-    subprocess.run(["fuser", "-k", f"{PORT}/tcp"], capture_output=True)
+    kill_tcp_port(PORT)
     time.sleep(0.05)
     if BUILD.exists():
         subprocess.check_call([str(BUILD)], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
@@ -360,7 +361,7 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=2)
-        subprocess.run(["fuser", "-k", f"{PORT}/tcp"], capture_output=True)
+        kill_tcp_port(PORT)
 
 
 if __name__ == "__main__":

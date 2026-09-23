@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
+from _portutil import kill_tcp_port  # noqa: E402
 
 PORT_M = int(os.environ.get("AURA_REDIS_TEST_PORT", "26914"))
 PORT_R = PORT_M + 1
@@ -28,7 +29,7 @@ def build() -> None:
 
 
 def start(port: int, tag: str) -> tuple[subprocess.Popen, Path]:
-    subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True)
+    kill_tcp_port(port)
     time.sleep(0.05)
     env = os.environ.copy()
     env["AURA_REDIS_DENY_PLUGIN"] = "1"
@@ -151,8 +152,8 @@ def main() -> int:
         print(logm.read_text(errors="replace")[-800:])
         print("--- replica log ---")
         print(logr.read_text(errors="replace")[-800:])
-        subprocess.run(["fuser", "-k", f"{PORT_M}/tcp"], capture_output=True)
-        subprocess.run(["fuser", "-k", f"{PORT_R}/tcp"], capture_output=True)
+        kill_tcp_port(PORT_M)
+        kill_tcp_port(PORT_R)
 
 
 if __name__ == "__main__":

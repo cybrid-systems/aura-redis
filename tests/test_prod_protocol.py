@@ -12,12 +12,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import Incomplete, decode_one, encode_array  # noqa: E402
+from _portutil import kill_tcp_port  # noqa: E402
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26901"))
 
 
 def start_server() -> subprocess.Popen:
-    subprocess.run(["fuser", "-k", f"{PORT}/tcp"], capture_output=True)
+    kill_tcp_port(PORT)
     time.sleep(0.05)
     bin_path = ROOT / "native/build/aura_redis_server"
     if not bin_path.exists():

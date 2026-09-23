@@ -23,6 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
+from _portutil import kill_tcp_port  # noqa: E402
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26990"))
 SERVER = ROOT / "native/build/aura_redis_server"
@@ -53,7 +54,7 @@ def info_map(raw: str) -> dict[str, str]:
 
 
 def start_server(evict: str = "lru", maxmemory: int = 0) -> subprocess.Popen:
-    subprocess.run(["fuser", "-k", f"{PORT}/tcp"], capture_output=True)
+    kill_tcp_port(PORT)
     time.sleep(0.05)
     if BUILD.exists() and not SERVER.exists():
         subprocess.check_call(
@@ -88,7 +89,7 @@ def stop(proc: subprocess.Popen | None) -> None:
         proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
         proc.kill()
-    subprocess.run(["fuser", "-k", f"{PORT}/tcp"], capture_output=True)
+    kill_tcp_port(PORT)
 
 
 def test_evict_slru_tinylfu_roundtrip_wrongtype(proc: subprocess.Popen) -> None:

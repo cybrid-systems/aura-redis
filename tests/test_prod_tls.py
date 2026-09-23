@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
+from _portutil import kill_tcp_port  # noqa: E402
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26915"))
 TLS_PORT = PORT + 1
@@ -56,8 +57,8 @@ def gen_certs(td: Path) -> tuple[Path, Path]:
 
 
 def start(port: int, tls_port: int, cert: Path, key: Path) -> tuple[subprocess.Popen, Path]:
-    subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True)
-    subprocess.run(["fuser", "-k", f"{tls_port}/tcp"], capture_output=True)
+    kill_tcp_port(port)
+    kill_tcp_port(tls_port)
     time.sleep(0.05)
     env = os.environ.copy()
     env["AURA_REDIS_DENY_PLUGIN"] = "1"

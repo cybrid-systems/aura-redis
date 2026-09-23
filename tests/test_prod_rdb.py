@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
+from _portutil import kill_tcp_port  # noqa: E402
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26913"))
 BIN = ROOT / "native/build/aura_redis_server"
@@ -29,7 +30,7 @@ def build() -> None:
 
 
 def start_server(datadir: Path, dbfilename: str = "dump.aura-rdb") -> tuple[subprocess.Popen, Path]:
-    subprocess.run(["fuser", "-k", f"{PORT}/tcp"], capture_output=True)
+    kill_tcp_port(PORT)
     time.sleep(0.05)
     env = os.environ.copy()
     env["AURA_REDIS_DENY_PLUGIN"] = "1"
@@ -216,4 +217,4 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     finally:
-        subprocess.run(["fuser", "-k", f"{PORT}/tcp"], capture_output=True)
+        kill_tcp_port(PORT)

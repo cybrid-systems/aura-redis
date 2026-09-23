@@ -51,7 +51,10 @@ class HitResult:
 
 
 def kill_port(port: int) -> None:
-    subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True)
+    try:
+        subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True)
+    except FileNotFoundError:
+        pass
     time.sleep(0.1)
 
 
