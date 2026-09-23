@@ -4,7 +4,7 @@
 (define *policy-choose-aggressive*
   "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl)
      (let ((ops (+ dgets dsets)))
-       (if (< ops 25)
+       (if (< ops 12)
          \"\"
          (let ((hit-pct (if (> (+ dhits dmisses) 0)
                           (quotient (* 100 dhits) (+ dhits dmisses))
@@ -27,9 +27,9 @@
              ((and (> keys_ttl 0) (< avg_ttl 12000)
                    (or (>= ttl-share 15) (> keys_ttl 10)))
               \"ttl_aware|flat\")
-             ((or (and (>= dsets dgets) (> miss-pct 20))
-                  (and (> miss-pct 25) (> nkeys 0)))
-              (if (or (> miss-pct 28) (> devicted 2))
+             ((or (and (>= dsets dgets) (> miss-pct 15))
+                  (and (> miss-pct 18) (> nkeys 0)))
+              (if (or (> miss-pct 20) (> devicted 1))
                 \"lfu|flat|pin\"
                 \"lfu|flat\"))
              ((> dsets (* dgets 1)) \"lfu|flat\")

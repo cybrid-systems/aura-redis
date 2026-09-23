@@ -13,3 +13,4 @@ server.pid
 
 # Native build
 native/build/
+.ar-agent-booted-*.flag

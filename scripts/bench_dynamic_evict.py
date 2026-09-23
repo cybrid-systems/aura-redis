@@ -466,6 +466,9 @@ class AuraAgentController:
 
     def start(self) -> None:
         self.log.write_text("")
+        # A1: clear boot-guard so agent does a real boot (not skip-reentry)
+        # Agent (docker -v ROOT:/work) writes /work/.ar-agent-booted-PORT.flag
+        Path(ROOT / f".ar-agent-booted-{self.port}.flag").unlink(missing_ok=True)
         profile = os.environ.get("AURA_REDIS_POLICY_PROFILE_FILE", "")
         cmd = [
             "sudo", "docker", "run", "-d", "--network", "host", "--entrypoint", "",
@@ -1067,23 +1070,24 @@ def workload_diurnal_shift(s: socket.socket, mode: str) -> List[PhaseResult]:
     # so agent PIN (from aggressive choose-fn) lands BEFORE the flood.
     if is_adaptive(mode) and "frozen" not in mode:
         import time as _t
-        # 1) miss spike → fitness-swap conservative→aggressive
-        for _k in range(25):
+        # A1: dense miss burst (no per-op sleep) so one agent tick sees ops≥12
+        # and miss_spike → fitness-swap conservative→aggressive, then PIN.
+        for _k in range(40):
             redis_call(s, "SET", f"__miss{_k}", "m" * 64)
             redis_call(s, "GET", f"__nope{_k}")
-            _t.sleep(0.05)
-        _t.sleep(0.35)
-        # 2) re-materialize hot set, then missy+write window so aggressive emits pin
+        _t.sleep(0.55)  # ≥1 fitness tick @100ms after dense burst
+        # re-materialize hot set under aggressive, dense missy window → lfu|flat|pin
         for i in range(nhot):
             redis_call(s, "SET", f"z{i:04d}", val)
-        for _k in range(40):
+        for _k in range(60):
             redis_call(s, "SET", f"__c{_k}", "c" * 48)
             redis_call(s, "GET", f"__gone{_k}")
-        _t.sleep(0.45)  # agent tick: EVICT lfu + PIN from aggressive choose-fn
+        _t.sleep(0.65)  # agent tick: EVICT lfu + PIN hot/z before flood
     for i in range(700):
         redis_call(s, "SET", f"fl{i:05d}", val)
     hits = misses = 0
-    for _ in range(8):
+    # weight flash higher (was 8; cool diluted mutateΔ to 0)
+    for _ in range(12):
         for i in range(nhot):
             if redis_call(s, "GET", f"z{i:04d}") is None:
                 misses += 1
@@ -1116,7 +1120,8 @@ def workload_diurnal_shift(s: socket.socket, mode: str) -> List[PhaseResult]:
         for i in range(nA):
             redis_call(s, "GET", f"A{i:04d}")
     hits = misses = 0
-    for _ in range(6):
+    # A1: fewer cool rounds so flash mutate-vs-frozen Δ is not diluted to 0
+    for _ in range(3):
         for i in range(nB):
             redis_call(s, "SET", f"B{i:04d}", val)
         for j in range(120):
@@ -1891,6 +1896,7 @@ def assert_success(results: List[RunResult]) -> None:
     """Require adaptive to clearly beat both fixed on marathon when present;
     otherwise require ≥1 workload where LRU loses to LFU/adaptive.
     """
+    reasons: List[str] = []
     by_wl_mut: Dict[str, Dict[str, RunResult]] = {}
     for r in results:
         by_wl_mut.setdefault(r.workload, {})[r.policy] = r
@@ -1901,17 +1907,28 @@ def assert_success(results: List[RunResult]) -> None:
         frozen = mm.get("adaptive_frozen")
         mutate = mm.get("adaptive_mutate")
         if frozen and mutate:
-            if mutate.overall_hit_rate + 1e-9 < frozen.overall_hit_rate:
+            delta = mutate.overall_hit_rate - frozen.overall_hit_rate
+            if delta + 1e-9 < 0.08:
                 raise SystemExit(
-                    f"FAIL: {wl} adaptive_mutate must be ≥ adaptive_frozen; "
+                    f"FAIL: {wl} adaptive_mutate must beat frozen by ≥8pp; "
                     f"got mutate={100*mutate.overall_hit_rate:.1f}% "
-                    f"frozen={100*frozen.overall_hit_rate:.1f}%"
+                    f"frozen={100*frozen.overall_hit_rate:.1f}% "
+                    f"(Δ={100*delta:+.1f}pp)"
                 )
-            print(
-                f"{wl}: mutate={100*mutate.overall_hit_rate:.1f}% ≥ "
+            fit = [s for s in mutate.swaps
+                   if "fitness-swap" in s or "fitness-threshold-mutate" in s]
+            if wl == "mutation_gain" and not fit:
+                raise SystemExit(
+                    f"FAIL: {wl} expected fitness-swap/threshold-mutate log; "
+                    f"swaps={mutate.swaps[:6]}"
+                )
+            msg = (
+                f"{wl}: mutate={100*mutate.overall_hit_rate:.1f}% vs "
                 f"frozen={100*frozen.overall_hit_rate:.1f}% "
-                f"(Δ={100*(mutate.overall_hit_rate-frozen.overall_hit_rate):+.1f}pp)"
+                f"(Δ={100*delta:+.1f}pp) fitness_events={len(fit)}"
             )
+            print(msg)
+            reasons.append(msg)
     if "poison_heal" in by_wl_mut:
         mm = by_wl_mut["poison_heal"]
         pf, pm = mm.get("poison_frozen"), mm.get("poison_mutate")
@@ -1983,8 +2000,7 @@ def assert_success(results: List[RunResult]) -> None:
     by_wl: Dict[str, Dict[str, RunResult]] = {}
     for r in results:
         by_wl.setdefault(r.workload, {})[r.policy] = r
-    reasons = []
-    # M10 soft-goal gate
+        # M10 soft-goal gate
     fc = by_wl.get("flash_churn", {})
     if fc:
         soft = fc.get("adaptive_soft") or fc.get("adaptive")

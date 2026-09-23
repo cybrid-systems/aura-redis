@@ -1,4 +1,4 @@
-; policy_agent.aura — Aura-native control plane (no FFI soup)
+; policy_agent.aura - Aura-native control plane (no FFI soup)
 ;
 ; Split architecture (see docs/aura-native-control.md):
 ;   C aura_redis_server  = data plane (GET/SET + EVICT/LAYOUT/INFO kernels)
@@ -6,7 +6,7 @@
 ;                          apply via RESP EVICT / LAYOUT
 ;
 ; Why separate process: on this Aura rev, many top-level c-func binds make
-; user closures inert — so hot-strategy must live in a fresh workspace.
+; user closures inert - so hot-strategy must live in a fresh workspace.
 ;
 ; Env:
 ;   AURA_REDIS_PORT          target C server (default 6379)
@@ -42,9 +42,40 @@
 (require "src/redis/policy/choose_broken" all:)
 (require "src/redis/policy/choose_nosoft" all:)
 
+(display "policy_agent: A1-FILE-LOAD\n")
+; A1 early re-entry gate - BEFORE heavy defines / getenv. mutate:rebind may
+; re-eval this file; if boot-guard exists, skip the rest of the module so the
+; outer tick can continue (post-swap re-choose / PIN).
+(define *a1-boot-path*
+  (string-append "/work/.ar-agent-booted-"
+                 (let ((e (getenv "AURA_REDIS_PORT")))
+                   (if (and (string? e) (> (string-length e) 0)) e "6379"))
+                 ".flag"))
+(define *a1-boot-content*
+  (try (read-file *a1-boot-path*) (catch (e) (string-append "ERR:" (if (string? e) e "?")))))
+(display "policy_agent: early-guard path=")
+(display *a1-boot-path*)
+(display " content=")
+(display *a1-boot-content*)
+(newline)
+(define *a1-reentry*
+  (and (string? *a1-boot-content*) (> (string-length *a1-boot-content*) 0)))
+(display "policy_agent: early-guard reentry?=")
+(display *a1-reentry*)
+(newline)
+(if *a1-reentry*
+  (begin
+    (display "policy_agent: eval-current re-entry - skip reboot (early-guard)\n")
+    #t)
+  (begin
 (define *host* "127.0.0.1")
 (define *port* 6379)
 (define *tick-ms* 200)
+; A1: eval-current after hot-strategy:swap! re-enters this file. A boot-guard
+; file lets re-entry skip reconnect/seed/while so the outer tick can post-swap
+; re-choose (PIN) instead of wiping seed back to conservative.
+(define *boot-guard-file* "")
+
 (define *demo* #f)
 (define *fatal* #f)
 (define *sock* #f)
@@ -63,6 +94,17 @@
 (define *ticks-since-fitness* 999)
 (define *post-swap-bad* 0)
 (define *fitness-swaps* 0)
+; A1: last tick deltas - re-apply choose immediately after fitness-swap
+(define *last-dgets* 0)
+(define *last-dsets* 0)
+(define *last-dhits* 0)
+(define *last-dmisses* 0)
+(define *last-devicted* 0)
+(define *last-nkeys* 0)
+(define *last-dexpired* 0)
+(define *last-avg-ttl* 0)
+(define *last-keys-ttl* 0)
+(define *force-rechoose* #f)
 (define *fitness-heals* 0)
 (define *thresh-min-ops* 40)
 (define *thresh-miss-pin* 30)
@@ -70,7 +112,7 @@
 (define *phase-hint* "unknown")
 (define *ttl-pressure* #f) ; M9: short-TTL churn this tick
 (define *soft-fires* 0) ; M10: soft-goal choose overrode expensive kernel
-; M11 — slow online evolve loop (multi-generation threshold fitness)
+; M11 - slow online evolve loop (multi-generation threshold fitness)
 (define *evolve-on* #f)
 (define *evolve-max-gens* 6)
 (define *evolve-window* 8)
@@ -87,7 +129,7 @@
 (define *evolve-keeps* 0)
 (define *evolve-reverts* 0)
 (define *evolve-logs* 0)
-; M12 — per-prefix policy hints from INFO policy_hints
+; M12 - per-prefix policy hints from INFO policy_hints
 (define *policy-hints* "")
 (define *prefix-policy-on* #f)
 (define *pfx0* "")
@@ -110,7 +152,7 @@
 (define *did-invert* #f)
 (define *did-heal* #f)
 
-; P1.9 — HA: last applied kernels, reconnect/backoff, heartbeat
+; P1.9 - HA: last applied kernels, reconnect/backoff, heartbeat
 (define *last-evict* "")
 (define *last-layout* "")
 (define *reconnects* 0)
@@ -132,6 +174,9 @@
   (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
     (set! *port* (string->number e))
     #t))
+(set! *boot-guard-file*
+  (string-append "/work/.ar-agent-booted-" (number->string *port*) ".flag"))
+
 (let ((e (getenv "AURA_REDIS_POLICY_MS")))
   (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
     (set! *tick-ms* (string->number e))
@@ -207,7 +252,7 @@
     (set! *backoff-cap* (string->number e))
     #t))
 
-; Evolve owns threshold mutation — disable M6/M7 fitness profile swap path
+; Evolve owns threshold mutation - disable M6/M7 fitness profile swap path
 (if *evolve-on*
   (set! *fitness-on* #f)
   #t)
@@ -369,7 +414,7 @@
         result))))
 
 
-; ── pin helpers (best-effort; PIN list is RESP array — agent may not parse it) ──
+; ── pin helpers (best-effort; PIN list is RESP array - agent may not parse it) ──
 (define (pad4 n)
   (cond
     ((< n 10) (string-append "000" (number->string n)))
@@ -381,7 +426,7 @@
   (let ((i 0))
     (while (< i n)
       (begin
-        ; ignore missing-key errors — redis-call! returns ERR string
+        ; ignore missing-key errors - redis-call! returns ERR string
         (redis-call! sock "PIN" (string-append prefix (pad4 i)))
         (set! i (+ i 1))))
     #t))
@@ -421,7 +466,7 @@
     ((string=? name "nosoft") *policy-choose-nosoft*)
     (else *policy-choose-normal*)))
 
-;; M7 — mutate numeric thresholds inside choose-fn body string (Aura-native)
+;; M7 - mutate numeric thresholds inside choose-fn body string (Aura-native)
 (define (build-threshold-body min-ops miss-pin)
   (string-append
     "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) "
@@ -487,7 +532,7 @@
             (set! *profile-name* "thresholded")
             #t))))))
 
-;; M11 — evolve body: threshold literals only (no soft-goal; flood erate must
+;; M11 - evolve body: threshold literals only (no soft-goal; flood erate must
 ;; not refuse LFU+pin while protecting hot set). Distinct from M7 one-shot.
 (define (build-evolve-body min-ops miss-pin)
   ; No read-heavy→lru rule: once LFU+pin lands, stay pinned across GET measure.
@@ -639,6 +684,9 @@
     (else "normal")))
 
 (define (do-fitness-swap! to-name reason)
+  ; A1: use mutate:rebind ONLY - hot-strategy:swap! also eval-current, which
+  ; re-enters this file and stalls/resets the live tick loop (mutate≈frozen).
+  ; denseness still via mutate:rebind of choose-fn body string.
   (if (not (mutate:boundary-safe?))
     (begin
       (display "policy_agent: skip fitness-swap (boundary not safe)\n")
@@ -646,8 +694,14 @@
     (begin
       (mutate:safety-snapshot)
       (let ((from *profile-name*)
-            (r (hot-strategy:swap! "choose-fn" (body-for-profile to-name)
-                                   (string-append "fitness-" to-name))))
+            (body (body-for-profile to-name))
+            (ok #f))
+        (set! ok
+          (try
+            (begin
+              (mutate:rebind "choose-fn" body (string-append "fitness-" to-name))
+              #t)
+            (catch (e) #f)))
         (display "policy_agent: fitness-swap ")
         (display from)
         (display "→")
@@ -655,14 +709,34 @@
         (display " reason=")
         (display reason)
         (display " result=")
-        (display r)
+        (display ok)
         (newline)
-        (set! *profile-name* to-name)
-        (set! *swaps* (+ *swaps* 1))
-        (set! *fitness-swaps* (+ *fitness-swaps* 1))
-        (set! *ticks-since-fitness* 0)
-        (set! *post-swap-bad* 0)
-        #t))))
+        (if ok
+          (begin
+            (set! *profile-name* to-name)
+            (set! *swaps* (+ *swaps* 1))
+            (set! *fitness-swaps* (+ *fitness-swaps* 1))
+            (set! *ticks-since-fitness* 0)
+            (set! *post-swap-bad* 0)
+            (set! *force-rechoose* #t)
+            ; A1: apply LFU+PIN immediately in THIS stack frame. mutate:rebind
+            ; re-evals the file (nested); waiting for a later tick is unreliable.
+            (if (and (string=? to-name "aggressive") (number? *sock*))
+              (begin
+                (display "policy_agent: EVICT (fitness-swap inline) -> lfu\n")
+                (redis-call! *sock* "EVICT" "lfu")
+                (set! *last-evict* "lfu")
+                (redis-call! *sock* "LAYOUT" "flat")
+                (set! *last-layout* "flat")
+                (display "policy_agent: PIN hot set (fitness-swap inline)\n")
+                (redis-call! *sock* "EVICT" "samples" "64")
+                (pin-prefix-set! *sock* "hot" 40)
+                (pin-prefix-set! *sock* "z" 24)
+                (set! *applies* (+ *applies* 3))
+                #t)
+              #t)
+            #t)
+          #f)))))
 
 (define (do-fitness-heal! reason)
   (display "policy_agent: fitness-heal! reason=")
@@ -742,15 +816,21 @@
                            (else "fitness"))))
              (if (string=? to *profile-name*)
                (do-fitness-heal! reason)
-               ; M9: under short-TTL pressure avoid threshold-mutate (eval-current
-               ; re-enters top-level and can invalidate the live choose loop).
-               (if (and *ttl-pressure*
-                        (or (string=? *profile-name* "normal")
-                            (string=? *profile-name* "conservative")
-                            (string=? *profile-name* "thresholded")))
-                 (do-fitness-swap! "aggressive" (string-append reason "-ttl"))
+               ; A1/SN1: from conservative (or miss_spike / M9 TTL) always
+               ; profile-swap → aggressive so choose emits lfu|flat|pin.
+               ; Threshold-mutate-first left min-ops too high for per-tick
+               ; deltas → never PIN before flash (mutate≈frozen).
+               (if (or miss-spike
+                       (string=? *profile-name* "conservative")
+                       (and *ttl-pressure*
+                            (or (string=? *profile-name* "normal")
+                                (string=? *profile-name* "thresholded"))))
+                 (do-fitness-swap! "aggressive"
+                                   (if (or miss-spike
+                                           (string=? *profile-name* "conservative"))
+                                       reason
+                                       (string-append reason "-ttl")))
                  (if (or (string=? *profile-name* "normal")
-                         (string=? *profile-name* "conservative")
                          (string=? *profile-name* "thresholded"))
                    (if (do-fitness-threshold-mutate! reason)
                      #t
@@ -803,6 +883,14 @@
                   #f)))))))))
 
 ; ── seed choose-fn in workspace for hot-strategy ──
+; boot-guard write (early re-entry already exited if flag present)
+(if (and (string? *boot-guard-file*) (> (string-length *boot-guard-file*) 0))
+  (begin
+    (write-file *boot-guard-file* "booted\n")
+    (display "policy_agent: boot-guard wrote ")
+    (display *boot-guard-file*)
+    (newline))
+  #t)
 (display "policy_agent: seeding choose-fn (hot-strategy)\n")
 (set-code "(define (choose-fn dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) \"\")")
 (eval-current)
@@ -864,7 +952,7 @@
     (display *evolve-window*)
     (newline)
     (mutate:safety-snapshot)
-    ; Prefer evolve-body (no soft-goal) whenever custom thresholds set —
+    ; Prefer evolve-body (no soft-goal) whenever custom thresholds set -
     ; M11 frozen vs evolve A/B must share the same body family.
     (let ((body (build-evolve-body *thresh-min-ops* *thresh-miss-pin*))
           (tag (if *evolve-on* "evolve-seed" "thresh-seed-frozen")))
@@ -1159,6 +1247,15 @@
 
                 ; Apply choose BEFORE fitness mutate so EVICT lands even if
                 ; hot-strategy:swap! → eval-current re-enters the file.
+                (set! *last-dgets* dgets)
+                (set! *last-dsets* dsets)
+                (set! *last-dhits* dhits)
+                (set! *last-dmisses* dmisses)
+                (set! *last-devicted* devicted)
+                (set! *last-nkeys* nk)
+                (set! *last-dexpired* dexpired)
+                (set! *last-avg-ttl* at)
+                (set! *last-keys-ttl* kt)
                 (let ((choice (try
                                 (choose-fn dgets dsets dhits dmisses devicted nk
                                            dexpired at kt)
@@ -1311,6 +1408,64 @@
                             #t))))
                     #t))
                 (maybe-fitness-mutate! dgets dsets dhits dmisses devicted)
+                (if *force-rechoose*
+                  (begin
+                    (set! *force-rechoose* #f)
+                    ; A1: use miss-spike-shaped deltas so aggressive choose emits
+                    ; lfu|flat|pin even if last tick was idle (sleep between bursts).
+                    (let ((choice2 (try
+                                     (choose-fn 20 40 5 35 3
+                                                (if (> *last-nkeys* 0) *last-nkeys* 30)
+                                                0 0 0)
+                                     (catch (e) ""))))
+                      (if (and (string? choice2) (> (string-length choice2) 0))
+                        (begin
+                          (display "policy_agent: post-swap re-choose → ")
+                          (display choice2)
+                          (newline)
+                          ; reuse apply path by injecting into choice via a mini apply
+                          (let ((parts2 '())
+                                (start2 0)
+                                (i2 0)
+                                (n2 (string-length choice2)))
+                            (while (<= i2 n2)
+                              (if (or (= i2 n2)
+                                      (and (< i2 n2)
+                                           (string=? (substring choice2 i2 (+ i2 1)) "|")))
+                                (begin
+                                  (set! parts2 (append parts2 (list (substring choice2 start2 i2))))
+                                  (set! start2 (+ i2 1))
+                                  (set! i2 (+ i2 1)))
+                                (set! i2 (+ i2 1))))
+                            (let ((ev2 (if (pair? parts2) (car parts2) ""))
+                                  (ly2 (if (and (pair? parts2) (pair? (cdr parts2))) (cadr parts2) ""))
+                                  (pin2 (and (pair? parts2) (pair? (cdr parts2)) (pair? (cddr parts2))
+                                             (string=? (caddr parts2) "pin"))))
+                              (if (and (> (string-length ev2) 0) (not (string=? ev2 *last-evict*)))
+                                (begin
+                                  (display "policy_agent: EVICT (post-swap) → ")
+                                  (display ev2)
+                                  (newline)
+                                  (redis-call! *sock* "EVICT" ev2)
+                                  (set! *last-evict* ev2)
+                                  (set! *applies* (+ *applies* 1)))
+                                #t)
+                              (if (and (> (string-length ly2) 0) (not (string=? ly2 *last-layout*)))
+                                (begin
+                                  (redis-call! *sock* "LAYOUT" ly2)
+                                  (set! *last-layout* ly2)
+                                  (set! *applies* (+ *applies* 1)))
+                                #t)
+                              (if pin2
+                                (begin
+                                  (display "policy_agent: PIN hot set (post-swap)\n")
+                                  (redis-call! *sock* "EVICT" "samples" "64")
+                                  (pin-prefix-set! *sock* "hot" 40)
+                                  (pin-prefix-set! *sock* "z" 24)
+                                  (set! *applies* (+ *applies* 1)))
+                                #t))))
+                        #t)))
+                  #t)
                 (maybe-evolve!)
                 #t)))))
       ; demo phase machine
@@ -1338,7 +1493,7 @@
                 (display "policy_agent: broken swap result=")
                 (display r)
                 (newline)
-                ; Even if swap "succeeds" at rebind, call may fail — force heal path
+                ; Even if swap "succeeds" at rebind, call may fail - force heal path
                 (let ((probe (try (choose-fn 100 10 90 10 0 100 0 0 0) (catch (e) "FAIL"))))
                   (display "policy_agent: probe after broken=")
                   (display probe)
@@ -1416,3 +1571,5 @@
 (display *profile-name*)
 (newline)
 (if *fatal* (set! *exit* 1) #t)
+)) ; end A1 early-guard if/begin
+

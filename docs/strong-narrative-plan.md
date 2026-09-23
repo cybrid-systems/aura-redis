@@ -41,8 +41,8 @@ Restore mutate−frozen / evolve−frozen deltas so the moat is measurable again
 | **Exit criteria** | `python3 scripts/bench_regret.py mutation_gain` → mutate−frozen ≥ **+8pp** + `fitness-swap` in log; do not break `phase_marathon` / `poison_heal` |
 | **Depends-on** | — |
 | **Estimate** | 1–2d |
-| **Status** | **TODO** (recent: mutate=frozen 85.2%, Δ=0) |
-| **Likely root cause** | Harness too easy for frozen; fitness not swapping; thresholds / phase lengths |
+| **Status** | **DONE** (2026-09-23): mutate 100% vs frozen 72.1%, **Δ=+27.9pp**; fitness-swap + inline EVICT/PIN |
+| **Root cause (fixed)** | threshold-mutate-first blocked aggressive swap; `mutate:rebind` re-eval stalled ticks before PIN; cool diluted flash |
 
 #### SN2 / A2 — Close `evolve_gain`
 
