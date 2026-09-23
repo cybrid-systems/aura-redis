@@ -1,4 +1,4 @@
-> **Differentiation (A17/A18/A19 + moat):** [`diff-vs-redis.md`](diff-vs-redis.md) (tip `5ff7e83`, 2026-09-23 CST) — marathon adaptive **100%**/1956 vs LRU **81.8%** / LFU **36.1%**; A19 poison keep*: aura LFU **100%** vs redis LRU/LFU **0%**; A17 `POLICY EXPLAIN` mid join; A18 shadow→canary EVICT lru→lfu without restart.
+> **Differentiation (A17/A18/A19 + moat):** [`diff-vs-redis.md`](diff-vs-redis.md) (A19 adaptive_poison_on keep* **100%** = aura LFU vs redis **0%**; A18 score-gated shadow→canary; Soft≠Restricted — see commercial-fit). Tip SHA in diff-vs-redis header.; A17 `POLICY EXPLAIN` mid join; A18 shadow→canary EVICT lru→lfu without restart.
 
 # aura-redis vs Redis — comprehensive comparison
 
@@ -17,7 +17,7 @@ Two independent scoreboards — **never collapse** ops/s and regret into one num
 
 ---
 
-> **Adaptive hit-quality SSOT:** `python3 scripts/bench_regret.py phase_marathon` (Aura `policy_agent`, long phases). Short `scripts/bench_hit_vs_redis.py` **adaptive** rows are **non-citeable** until harness parity — cite **§2A** for adaptive; **§2B** only for fixed-kernel vs Redis tables. Never claim memtier adaptive wins; keep dual scoreboards.
+> **Adaptive hit-quality SSOT:** `python3 scripts/bench_regret.py phase_marathon` (Aura `policy_agent`, long phases). Short `scripts/bench_hit_vs_redis.py` **adaptive** rows are **NON-CITE** (script prints banner; `--fail-on-adaptive-cite` / `AURA_REDIS_CI_STRICT_SSOT=1` exits 2) — cite **§2A** for adaptive; **§2B** only for fixed-kernel vs Redis tables. Never claim memtier adaptive wins; keep dual scoreboards. Commercial intake: [`commercial-fit.md`](commercial-fit.md).
 
 
 ## Scoreboard 1 — Throughput (ops/s)

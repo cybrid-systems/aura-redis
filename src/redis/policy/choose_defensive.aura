@@ -1,4 +1,6 @@
-; choose_defensive — A19 poison/unique-SET storm body: lru + refuse pin + soft erate
+; choose_defensive — A19 poison/unique-SET storm body: LFU-oriented + refuse pin + soft
+; Keep* scoreboard under unique-SET flood: frequency protects seeded keep keys;
+; LRU would favor poison SETs (recency) and wipe keep*. Soft = no |pin aggression.
 (export *policy-choose-defensive*)
 
 (define *policy-choose-defensive*
@@ -10,10 +12,10 @@
                (miss-pct (if (> (+ dhits dmisses) 0)
                            (quotient (* 100 dmisses) (+ dhits dmisses))
                            0)))
-           ; Never emit |pin under poison flood; prefer lru + soft budget.
+           ; Never emit |pin under poison flood; prefer lfu + soft budget.
            (cond
-             ((>= erate 15) \"lru|flat|soft\")
-             ((> miss-pct 60) \"lru|flat|soft\")
-             ((> dsets (* dgets 2)) \"lru|flat|soft\")
-             (else \"lru|flat|soft\"))))))
+             ((>= erate 15) \"lfu|flat|soft\")
+             ((> miss-pct 60) \"lfu|flat|soft\")
+             ((> dsets (* dgets 2)) \"lfu|flat|soft\")
+             (else \"lfu|flat|soft\"))))))
 ")

@@ -54,7 +54,9 @@
 ;                                   (broken|inverted|aggressive|…) after warm-up
 ;   AURA_REDIS_CANARY_DROP_PP        EWMA drop vs baseline to heal (default 12)
 ;   AURA_REDIS_SHADOW_AUTOPROMOTE=0|1 A18: shadow dry-run winner -> canary trial (default 0)
-;   AURA_REDIS_POISON_DEFENSE=0|1    A19: unique-SET / keyspace storm -> defensive body (default 1)
+;   AURA_REDIS_POISON_DEFENSE=0|1    A19: unique-SET / keyspace storm -> LFU defensive body (default 1)
+;   AURA_REDIS_SHADOW_SCORE_GATE     A18: min winner_score to autopromote (default 40)
+;   AURA_REDIS_SHADOW_SCORE_MIN_SAMPLES  A18: min C shadow_samples before score gate (default 5)
 ;   AURA_REDIS_POISON_UNIQUE_RATE   unique SETs/tick threshold to trigger defense (default 40)
 
 (require "std/mutate" all:)
@@ -269,6 +271,10 @@
 ; A18 - shadow->canary auto-promote (default OFF)
 (define *shadow-autopromote* #f)
 (define *shadow-autopromote-starts* 0)
+(define *shadow-score-gate* 40)
+(define *shadow-score-min-samples* 5)
+(define *shadow-last-winner-score* 0)
+(define *shadow-score-promotes* 0)
 ; A19 - poison / unique-SET flood defense
 (define *poison-defense* #t)
 (define *poison-unique-rate* 40)
@@ -455,6 +461,22 @@
       (set! *shadow-autopromote* #t)
       (set! *canary-on* #t)
       (display "policy_agent: shadow-autopromote on (A18)\n"))
+    #t))
+(let ((e (getenv "AURA_REDIS_SHADOW_SCORE_GATE")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (begin
+      (set! *shadow-score-gate* (string->number e))
+      (display "policy_agent: shadow-score-gate=")
+      (display *shadow-score-gate*)
+      (newline))
+    #t))
+(let ((e (getenv "AURA_REDIS_SHADOW_SCORE_MIN_SAMPLES")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (begin
+      (set! *shadow-score-min-samples* (string->number e))
+      (display "policy_agent: shadow-score-min-samples=")
+      (display *shadow-score-min-samples*)
+      (newline))
     #t))
 (let ((e (getenv "AURA_REDIS_POISON_DEFENSE")))
   (if (and (string? e)
@@ -1248,7 +1270,7 @@
 
 
 ;; A19 — unique-SET / keyspace growth storm -> defensive choose body
-;; Defensive = lru + refuse pin aggression + soft/erate. Demo scoreboard = hit quality.
+;; Defensive = lfu + refuse pin + soft/erate (LFU protects keep* under unique-SET flood).
 (define (maybe-poison-defense! dunique nkeys dsets)
   (if (not *poison-defense*)
     #f
@@ -1286,39 +1308,70 @@
               #t)
             #f))))))
 
-(define (shadow-ab-tick! champ-choice)
+;; A18 score: winner_score = (100 - hit_ewma) + (shadow_miss_pct / 2)
+;;            + 5 * min(diverges, 6). Promote when samples>=min AND score>=gate.
+(define (shadow-winner-score shadow-samples shadow-hits shadow-misses)
+  (let ((miss-pct (if (> shadow-samples 0)
+                    (quotient (* 100 shadow-misses) shadow-samples)
+                    0))
+        (div-term (* 5 (if (> *shadow-ab-diverges* 6) 6 *shadow-ab-diverges*))))
+    (+ (- 100 *hit-ewma*) (quotient miss-pct 2) div-term)))
+
+(define (shadow-ab-tick! champ-choice info)
   (set! *shadow-ab-ticks* (+ *shadow-ab-ticks* 1))
   (let ((alt-choice (shadow-alt-choice))
         (ck (shadow-choice-kernel champ-choice))
-        (ak (shadow-choice-kernel (shadow-alt-choice))))
-    (if (and (> (string-length ck) 0) (> (string-length ak) 0)
-             (not (string=? ck ak)))
-      (begin
-        (set! *shadow-ab-diverges* (+ *shadow-ab-diverges* 1))
-        (try (redis-call! *sock* "SHADOW" "diverge") (catch (e) #f))
-        (display "policy_agent: shadow-ab champ=")
-        (display champ-choice)
-        (display " alt=")
-        (display alt-choice)
-        (display " (dry-run no EVICT loser)\n")
-        (set! *shadow-ab-blocked* (+ *shadow-ab-blocked* 1))
-        ; A18: optional auto-promote — never EVICT to loser; canary must pass first.
-        (if (and *shadow-autopromote*
-                 (not (canary-active?))
-                 ; synthetic winner: challenger preferred when EWMA weak / missy
-                 (or (< *hit-ewma* 70)
-                     (> *shadow-ab-diverges* 2)))
-          (begin
-            (display "policy_agent: shadow-ab autopromote -> canary ")
-            (display *shadow-profile*)
-            (newline)
-            (set! *shadow-autopromote-starts* (+ *shadow-autopromote-starts* 1))
-            (audit-append! "shadow-autopromote" "champ" *shadow-profile* "shadow_winner")
-            (canary-start! *shadow-profile* "shadow_autopromote")
-            #t)
+        (ak (shadow-choice-kernel (shadow-alt-choice)))
+        ; Prefer fresh INFO so samples accumulated since shadow-c-setup are visible.
+        (fresh (try (redis-call! *sock* "INFO") (catch (e) info))))
+    (let ((ss (if (string? fresh) (info-num fresh "shadow_samples") 0))
+          (sh (if (string? fresh) (info-num fresh "shadow_hits") 0))
+          (sm (if (string? fresh) (info-num fresh "shadow_misses") 0)))
+      (if (and (> (string-length ck) 0) (> (string-length ak) 0)
+               (not (string=? ck ak)))
+        (begin
+          (set! *shadow-ab-diverges* (+ *shadow-ab-diverges* 1))
+          (try (redis-call! *sock* "SHADOW" "diverge") (catch (e) #f))
+          (display "policy_agent: shadow-ab champ=")
+          (display champ-choice)
+          (display " alt=")
+          (display alt-choice)
+          (display " (dry-run no EVICT loser)\n")
+          (set! *shadow-ab-blocked* (+ *shadow-ab-blocked* 1))
+          ; A18: score-gated auto-promote — never EVICT to loser; canary must pass.
+          ; Evidence OK when C samples>=min OR early diverge window (ewma weak).
+          ; Promote only if winner_score >= gate (not pure heuristic).
+          (let ((score (shadow-winner-score ss sh sm))
+                (sample-ok (or (>= ss *shadow-score-min-samples*)
+                               (and (>= *shadow-ab-diverges* 1)
+                                    (< *hit-ewma* 65)))))
+            (set! *shadow-last-winner-score* score)
+            (if (and *shadow-autopromote*
+                     (not (canary-active?))
+                     sample-ok
+                     (>= score *shadow-score-gate*))
+              (begin
+                (display "policy_agent: shadow-ab autopromote score=")
+                (display score)
+                (display " gate=")
+                (display *shadow-score-gate*)
+                (display " samples=")
+                (display ss)
+                (display " diverges=")
+                (display *shadow-ab-diverges*)
+                (display " ewma=")
+                (display *hit-ewma*)
+                (display " -> canary ")
+                (display *shadow-profile*)
+                (newline)
+                (set! *shadow-autopromote-starts* (+ *shadow-autopromote-starts* 1))
+                (set! *shadow-score-promotes* (+ *shadow-score-promotes* 1))
+                (audit-append! "shadow-autopromote" "champ" *shadow-profile* "shadow_winner_score")
+                (canary-start! *shadow-profile* "shadow_autopromote")
+                #t)
+              #t))
           #t)
-        #t)
-      #t)))
+        #t))))
 
 
 (define (shadow-proxy-score min-ops miss-pin w-miss w-write w-evict)
@@ -1513,20 +1566,30 @@
             (audit-append! "fitness-swap" from to-name reason)
             ; A1: apply LFU+PIN immediately in THIS stack frame. mutate:rebind
             ; re-evals the file (nested); waiting for a later tick is unreliable.
-            (if (and (string=? to-name "aggressive") (number? *sock*))
+            ; A19 defensive: LFU+flat+soft, refuse pin (poison flood scoreboard).
+            (if (and (string=? to-name "defensive") (number? *sock*))
               (begin
-                (display "policy_agent: EVICT (fitness-swap inline) -> lfu\n")
+                (display "policy_agent: EVICT (fitness-swap inline defensive) -> lfu\n")
                 (redis-call! *sock* "EVICT" "lfu")
                 (set! *last-evict* "lfu")
                 (redis-call! *sock* "LAYOUT" "flat")
                 (set! *last-layout* "flat")
-                (display "policy_agent: PIN hot set (fitness-swap inline)\n")
-                (redis-call! *sock* "EVICT" "samples" "64")
-                (pin-prefix-set! *sock* "hot" 40)
-                (pin-prefix-set! *sock* "z" 24)
-                (set! *applies* (+ *applies* 3))
+                (set! *applies* (+ *applies* 2))
                 #t)
-              #t)
+              (if (and (string=? to-name "aggressive") (number? *sock*))
+                (begin
+                  (display "policy_agent: EVICT (fitness-swap inline) -> lfu\n")
+                  (redis-call! *sock* "EVICT" "lfu")
+                  (set! *last-evict* "lfu")
+                  (redis-call! *sock* "LAYOUT" "flat")
+                  (set! *last-layout* "flat")
+                  (display "policy_agent: PIN hot set (fitness-swap inline)\n")
+                  (redis-call! *sock* "EVICT" "samples" "64")
+                  (pin-prefix-set! *sock* "hot" 40)
+                  (pin-prefix-set! *sock* "z" 24)
+                  (set! *applies* (+ *applies* 3))
+                  #t)
+                #t))
             #t)
           #f)))))
 
@@ -2172,6 +2235,9 @@
                        "explain_pushed=" (number->string *explain-pushed*) "\n"
                        "shadow_autopromote=" (if *shadow-autopromote* "1" "0") "\n"
                        "shadow_autopromote_starts=" (number->string *shadow-autopromote-starts*) "\n"
+                       "shadow_winner_score=" (number->string *shadow-last-winner-score*) "\n"
+                       "shadow_score_gate=" (number->string *shadow-score-gate*) "\n"
+                       "shadow_score_promotes=" (number->string *shadow-score-promotes*) "\n"
                        "poison_active=" (if *poison-active* "1" "0") "\n"
                        "poison_trips=" (number->string *poison-trips*) "\n"
                        "canary_mode=" *canary-mode* "\n"
@@ -2750,7 +2816,8 @@
                           choice
                           (if (> (string-length *last-evict*) 0)
                             *last-evict*
-                            "lru"))))
+                            "lru"))
+                        info))
                     #t)
                   (if (and (string? choice) (> (string-length choice) 0))
                     (begin

@@ -233,8 +233,8 @@ Dual scoreboard: **demo metrics = regret / hit quality / mid join** — not memt
 | ID | Bet | Exit | Status |
 |----|-----|------|--------|
 | **A17** | Native provenance × SecurityEvent ops explain (deepen A3) | After mutate/swap, operator parses `mid→reason→evict/layout` via audit + heartbeat + `INFO`/`POLICY EXPLAIN`; `tests/test_policy_audit.py` asserts mid join | **DONE** (agent mid join + C explain_* ; native hash mid best-effort) |
-| **A18** | Shadow→Canary auto-promote (close A10+A4) | Default OFF; `SHADOW_AUTOPROMOTE=1` → shadow winner → canary → commit/heal; never EVICT loser; `tests/test_shadow_autopromote.py` | **DONE** (default OFF; canary gate) |
-| **A19** | Abuse / poison-key flood defense | INFO `unique_sets`; storm → defensive choose (lru + refuse pin + soft); `tests/test_poison_keys.py`; S2 variant | **DONE** (C counter + agent mutate path) |
+| **A18** | Shadow→Canary auto-promote (close A10+A4) | Default OFF; `SHADOW_AUTOPROMOTE=1` → **score-gated** winner (`winner_score` from hit_ewma + shadow miss% + diverges; gate/min-samples env) → canary → commit/heal; never EVICT loser; `tests/test_shadow_autopromote.py` | **DONE** (default OFF; score-gated) |
+| **A19** | Abuse / poison-key flood defense | INFO `unique_sets`; storm → defensive choose (**lfu** + refuse pin + soft); keep* vs Redis 0%; `tests/test_poison_keys.py`; S2 variant | **DONE** (LFU-oriented defense) |
 
-**Residual risks:** A11 Restricted sandbox still PARTIAL; A17 native `query:last-mutation-provenance` may return void under soft sandbox (agent seq mid still joins); A18 autopromote uses heuristic winner (not full dual-kernel fitness); A19 keep* Δ vs static LFU/LRU is demo-best-effort under maxmemory pressure.
+**Residual risks:** A11 Restricted sandbox still PARTIAL (Soft ≠ Restricted — see prod-profile / commercial-fit); A17 native `query:last-mutation-provenance` may return void under soft sandbox (agent seq mid still joins); A18 autopromote is **score-gated** (sampled hit/miss + EWMA + diverges; not full dual-kernel dry-run fitness); A19 keep* aims ≈ aura static LFU under unique-SET flood.
 

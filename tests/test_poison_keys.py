@@ -2,7 +2,7 @@
 """A19 — unique-SET / poison-key flood defense (S2 variant).
 
 C INFO unique_sets advances; policy_agent mutates to defensive choose
-(lru + refuse pin + soft). Demo scoreboard = keep* hit quality, not ops/s.
+(lfu + refuse pin + soft). Demo scoreboard = keep* hit quality, not ops/s.
 """
 from __future__ import annotations
 
@@ -152,6 +152,11 @@ def test_poison_defense_mutates() -> None:
         assert defended, (
             f"A19 expected defensive mutate; evict={evict} hits={hits}/{hits+misses}\n"
             f"unique={info_field(info, 'unique_sets')}\n"
+            f"audit={audit[-800:]}\nlog={text[-1200:]}"
+        )
+        evict_s = str(evict).lower()
+        assert "lfu" in evict_s or "slru" in evict_s, (
+            f"A19 expected lfu-class EVICT after storm, got {evict!r}\n"
             f"audit={audit[-800:]}\nlog={text[-1200:]}"
         )
         keep_hit = hits / max(hits + misses, 1)

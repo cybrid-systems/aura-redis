@@ -251,21 +251,26 @@ def main() -> int:
                 f"redis allkeys-lru **{r_lru:.1f}%** / allkeys-lfu **{r_lfu if r_lfu is not None else float('nan'):.1f}%**."
             )
         if a_on is not None:
+            vs_redis = ""
+            if r_lru is not None:
+                vs_redis = f" vs redis LRU {r_lru:.1f}%"
+            vs_lfu = f" (aura static LFU {a_lfu:.1f}%)" if a_lfu is not None else ""
             lines.append(
-                f"**A19 control-plane:** adaptive_poison_on keep*={a_on:.1f}% with "
-                f"`defended=yes` + `INFO explain_*` mid join (Redis cannot mutate choose-fn)."
+                f"**A19 control-plane:** adaptive_poison_on keep*=**{a_on:.1f}%**{vs_redis}"
+                f"{vs_lfu} with `defended=yes` + `INFO explain_*` mid join "
+                f"(Redis cannot mutate choose-fn)."
             )
         lines.append(
-            "Caveat: A19 defensive body is `lru|flat|soft` (refuse pin); on this keep* "
-            "scoreboard the LFU kernel retains best. Cite A19 for live storm→mutate+explain, "
-            "cite aura LFU vs Redis 0% for hit-quality under the same flood."
+            "A19 defensive body is `lfu|flat|soft` (refuse pin; LFU-oriented keep* defense). "
+            "Cite adaptive_poison_on keep* vs Redis 0% (and ≈ aura static LFU when landed); "
+            "cite storm→mutate+explain for the control-plane moat."
         )
     else:
         lines.append("_E2 artifact missing._")
     lines.append("")
     lines.append(
         "Redis has no `unique_sets` storm detector and cannot mutate choose-fn to "
-        "`lru|flat|soft` (refuse pin) mid-process."
+        "`lfu|flat|soft` (refuse pin) mid-process."
     )
     lines.append("")
     lines.append("---")
@@ -275,7 +280,9 @@ def main() -> int:
     lines.append(
         "**What Redis cannot do:** in-process policy *code* generation / choose-fn canary. "
         "Redis only `CONFIG SET maxmemory-policy` (requires ops change; no shadow dry-run → "
-        "trial body → commit/heal)."
+        "trial body → commit/heal). Aura A18 winner selection is **score-gated** "
+        "(`winner_score` from hit_ewma + sampled shadow miss% + diverges; "
+        "default AUTOPROMOTE OFF)."
     )
     lines.append("")
     lines.append("| Signal | Value |")

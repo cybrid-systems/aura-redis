@@ -16,3 +16,16 @@
 | 10 | Secrets / bind? | loopback or AUTH+protected-mode; config file mode locked if `requirepass` persisted | open bind + empty pass + `protected-mode no` |
 
 **Quick reject phrases:** Streams · Cluster · Lua · ACL · SSCAN/ZSCAN · large ZSET · AOF · PSYNC · PLUGIN.
+
+---
+
+## Commercial fit pointer
+
+Full “who is a fit vs early-no” narrative (phase-shifting cache / poison risk / governed autopilot vs Cluster·Lua·Streams·Restricted): [`commercial-fit.md`](commercial-fit.md).
+
+| Extra | Pass | Reject |
+|-------|------|--------|
+| 11 | Soft sandbox + host isolation OK for this buyer | Requires Restricted / TA hard isolation (A11 Soft does **not** unlock Restricted) |
+| 12 | Hit-quality / regret story is the buying criteria | Needs memtier adaptive win claims (we do not claim these) |
+
+Cite data: [`diff-vs-redis.md`](diff-vs-redis.md) E1–E4.

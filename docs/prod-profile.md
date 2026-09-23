@@ -53,3 +53,25 @@ When TA is available: re-run smoke; demo agent without `AURA_SANDBOX=off`; updat
 - Not “Restricted production hardened.”  
 - Not multi-tenant isolation (A5 prefix bags ≠ full tenant sandbox).  
 - Not Redis security parity (no ACL users, no Redis AUTH variants beyond requirepass).
+
+---
+
+## Commercial / regulated buyers — Soft ≠ Restricted (A11)
+
+**Soft sandbox does NOT unlock Restricted / Tenant Admin isolation.**
+
+| Buyer need | Aura Tier 2 Soft today | Status |
+|------------|------------------------|--------|
+| Phase-shifting cache + governed autopilot | **Fit** (policy_agent Soft + DENY_PLUGIN) | OK |
+| Poison / unique-SET flood defense (A19) | **Fit** | OK |
+| Multi-tenant hard isolation (Restricted) | **Not claimed** — TA unavailable; grants fail | early-no → Redis / wait TA |
+| Redis ACL users / Cluster / Lua / Streams | **Not claimed** | early-no → see [`intake-reject-checklist.md`](intake-reject-checklist.md) / [`commercial-fit.md`](commercial-fit.md) |
+
+### Explicit non-claims (regulated / hard-isolation RFPs)
+
+- **Not** “Restricted production hardened.” Soft/`AURA_SANDBOX=off` is weaker isolation than Restricted.
+- **Not** a substitute for Tenant Admin–gated `grant-effect!` (network/mutate).
+- **Not** Redis ACL, Cluster slot redirects, or multi-tenant sandbox parity.
+- Customers who **require** Restricted/ACL/Cluster: **intake-reject** — do not sell Soft as Restricted.
+
+When TA lands: re-run `smoke-sandbox-profile.sh`, drop Soft requirement for agent demos, flip A11 → DONE.

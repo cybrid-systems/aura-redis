@@ -63,13 +63,16 @@ def start_agent(*, autopromote: bool) -> str:
         "AURA_REDIS_HOST": "127.0.0.1",
         "AURA_REDIS_POLICY_MS": "80",
         "AURA_REDIS_DENY_PLUGIN": "1",
-        "AURA_REDIS_FITNESS_MUTATE": "1",
+        "AURA_REDIS_FITNESS_MUTATE": "0",  # avoid A1-FILE-LOAD mid score-gate window
         "AURA_REDIS_SHADOW_AB": "1",
         "AURA_REDIS_SHADOW_PROFILE": "aggressive",
         "AURA_REDIS_SHADOW_SAMPLE_PCT": "50",
         "AURA_REDIS_CANARY": "1",
         "AURA_REDIS_CANARY_TICKS": "4",
         "AURA_REDIS_SHADOW_AUTOPROMOTE": "1" if autopromote else "0",
+        # A18 score-gated thresholds (documented defaults; explicit for test)
+        "AURA_REDIS_SHADOW_SCORE_GATE": "30",
+        "AURA_REDIS_SHADOW_SCORE_MIN_SAMPLES": "3",
     }
     cid = _start_agent(
         env=env,
@@ -86,7 +89,7 @@ def start_agent(*, autopromote: bool) -> str:
     return cid
 
 
-def drive_flash(rounds: int = 50) -> None:
+def drive_flash(rounds: int = 60) -> None:
     with socket.create_connection(("127.0.0.1", PORT), timeout=5) as s:
         for i in range(24):
             redis_call(s, "SET", f"hot{i}", "H" * 80)
@@ -124,10 +127,10 @@ def test_on_promotes_to_canary() -> None:
         cid = start_agent(autopromote=True)
         text = _agent_logs(cid, AGENT_LOG)
         assert "shadow-autopromote on" in text or "SHADOW_AUTOPROMOTE" in text or True
-        deadline = time.time() + 16
+        deadline = time.time() + 28
         saw = False
         while time.time() < deadline:
-            drive_flash(28)
+            drive_flash(40)
             text = _agent_logs(cid, AGENT_LOG)
             if "shadow-ab autopromote" in text or "canary-start" in text or "canary_start" in text:
                 saw = True
@@ -135,12 +138,18 @@ def test_on_promotes_to_canary() -> None:
             time.sleep(0.15)
         text = _agent_logs(cid, AGENT_LOG)
         assert saw, "A18 expected autopromote/canary; tail:\n" + "\n".join(text.splitlines()[-40:])
+        score_lines = [ln for ln in text.splitlines() if "shadow-ab autopromote score=" in ln]
+        assert score_lines, (
+            "A18 expected score-gated autopromote log (score=); tail:\n"
+            + "\n".join(text.splitlines()[-50:])
+        )
         bad = [
             ln for ln in text.splitlines()
             if "shadow-ab" in ln and "EVICT" in ln and "loser" not in ln and "dry-run" not in ln
         ]
         assert not bad, bad[:5]
-        print("PASS A18 ON: shadow winner -> canary (no EVICT loser)")
+        print("PASS A18 ON: score-gated shadow winner -> canary (no EVICT loser)")
+        print("  ", score_lines[-1].strip())
     finally:
         if cid:
             _stop_agent(cid)

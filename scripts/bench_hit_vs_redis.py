@@ -7,6 +7,11 @@ client-observed useful-GET workloads so tables stay comparable.
 
 Emits JSON to stdout (last object) and optional --md / --json paths.
 
+SSOT honesty: short-harness **adaptive** rows are NON-CITEABLE. Authoritative
+adaptive hit-quality = `scripts/bench_regret.py phase_marathon`. Set
+AURA_REDIS_ALLOW_SHORT_ADAPTIVE_CITE=1 only for local experiments (CI fails
+publish if adaptive rows are emitted without that override).
+
 Workloads (simplified marathon-family, client-side hit accounting):
   phase_marathon, zipf, hot_protect, ws_shift, oscillate
 """
@@ -419,6 +424,11 @@ def main() -> int:
     ap.add_argument("--json-out", type=str, default="")
     ap.add_argument("--md-out", type=str, default="")
     ap.add_argument("--skip-adaptive", action="store_true")
+    ap.add_argument(
+        "--fail-on-adaptive-cite",
+        action="store_true",
+        help="exit 2 if adaptive rows would be printed without AURA_REDIS_ALLOW_SHORT_ADAPTIVE_CITE=1",
+    )
     args = ap.parse_args()
 
     workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]
@@ -426,6 +436,18 @@ def main() -> int:
     if args.skip_adaptive:
         aura_pols = [p for p in aura_pols if p != "adaptive"]
     redis_pols = [p.strip() for p in args.redis_policies.split(",") if p.strip()]
+
+    allow_cite = os.environ.get("AURA_REDIS_ALLOW_SHORT_ADAPTIVE_CITE", "") == "1"
+    will_emit_adaptive = any(p == "adaptive" for p in aura_pols)
+    if will_emit_adaptive and (args.fail_on_adaptive_cite or os.environ.get("AURA_REDIS_CI_STRICT_SSOT") == "1"):
+        if not allow_cite:
+            print(
+                "ERROR: short harness adaptive rows are NON-CITEABLE (SSOT = "
+                "bench_regret.py phase_marathon). Pass --skip-adaptive, or set "
+                "AURA_REDIS_ALLOW_SHORT_ADAPTIVE_CITE=1 for local experiments only.",
+                file=sys.stderr,
+            )
+            return 2
 
     results: List[HitResult] = []
     for wl in workloads:
@@ -442,10 +464,22 @@ def main() -> int:
 
     md = print_md_table(results)
     print("\n# Hit-quality scoreboard (client useful-GET)\n")
+    if will_emit_adaptive:
+        banner = (
+            "!!! NON-CITE / NOT SSOT — short harness adaptive rows !!!\n"
+            "Authoritative adaptive hit-quality SSOT = "
+            "`python3 scripts/bench_regret.py phase_marathon`.\n"
+            "Fixed-kernel (lru/lfu/slru) vs Redis rows below remain OK to cite.\n"
+            "Override only with AURA_REDIS_ALLOW_SHORT_ADAPTIVE_CITE=1 (local).\n"
+        )
+        print(banner)
+        if not allow_cite:
+            print("(cite-guard: adaptive present; do not publish these adaptive numbers)\n")
     print(md)
     print(
         "\nNote: Redis baseline is **fixed-policy only** (allkeys-lru / allkeys-lfu). "
         "Aura adaptive uses policy_agent live EVICT/PIN — not available on Redis.\n"
+        "Short-harness adaptive = NON-CITE; marathon = SSOT.\n"
     )
 
     payload = {

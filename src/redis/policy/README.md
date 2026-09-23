@@ -53,3 +53,9 @@ window cache). Optional agent path: `AURA_REDIS_PREFER_SLRU=1`.
 `AURA_REDIS_SHADOW_AB=1` → dual dry-run vs `SHADOW_PROFILE` (default aggressive);
 never EVICT-switches to loser. C `SHADOW sample-pct` samples GET hit/miss under
 live champ; INFO `shadow_*` keys.
+
+## A19 `choose_defensive`
+
+Poison / unique-SET storm body: always emits `lfu|flat|soft` (LFU-oriented keep*
+defense; refuse `|pin`). See `tests/test_poison_keys.py` + `docs/diff-vs-redis.md` E2.
+

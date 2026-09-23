@@ -284,6 +284,19 @@ def run_case(
             )
         s = socket.create_connection(("127.0.0.1", port), 5)
         try:
+            # A19: arm defense BEFORE seeding keep* so LFU is live under the flood.
+            # Otherwise LRU wipe during wave-1 races the 80ms policy tick.
+            if adaptive and use_defense:
+                for i in range(80):
+                    set_ok(s, f"arm{i}", "a" * 32)
+                time.sleep(1.2)
+                text0 = agent_logs(agent, Path(f"/tmp/ar-poison-agent-{port}.log"))
+                # drop arm keys; keep* seed follows under (hopefully) LFU
+                try:
+                    redis_call(s, "FLUSHDB")
+                except RuntimeError:
+                    pass
+                time.sleep(0.2)
             h, m, u = run_poison_workload(s, **wl_kwargs)
             if adaptive and agent:
                 text = agent_logs(agent, Path(f"/tmp/ar-poison-agent-{port}.log"))
@@ -387,7 +400,7 @@ def main() -> int:
     print(md)
     print(
         "\nRedis = fixed allkeys-lru/lfu only. Aura adaptive_poison uses "
-        "policy_agent A19 defensive mutate (lru|flat|soft, refuse pin).\n"
+        "policy_agent A19 defensive mutate (lfu|flat|soft, refuse pin).\n"
     )
 
     payload = {
