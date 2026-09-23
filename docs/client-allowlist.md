@@ -95,3 +95,9 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 - **DISCARD / UNWATCH / disconnect:** clear watches.
 - **WATCH inside MULTI:** `-ERR WATCH inside MULTI is not allowed`.
 
+## Typed REPLICAOF caveats (Tier 2)
+
+- Full sync emits `SET`/`HSET`/`RPUSH`/`ZADD` (+ `EXPIRE` when TTL) for existing keys.
+- Live feed propagates string writes **and** HSET/HDEL/HINCRBY/LPUSH/RPUSH/LPOP/RPOP/ZADD/ZREM.
+- Best-effort async single replica (not Redis PSYNC/Cluster); fail-closed on link loss until re-`REPLICAOF`.
+

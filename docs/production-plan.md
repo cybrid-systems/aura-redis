@@ -89,7 +89,7 @@
 | **P1.11 cache-only restart** | **DONE** — README + `docs/persistence.md` (cache-only default; optional P2.13) |
 | **P1.10 latency/slowlog** | **DONE** — INFO cmd_* histogram + slowlog_count; CONFIG slowlog-log-slower-than |
 | **P2.13 aura-rdb** | **DONE** — SAVE/BGSAVE + startup load; `tests/test_prod_rdb.py` |
-| **P2.14 REPLICAOF** | **DONE** — async single replica, read-only GET; `tests/test_prod_replica.py` |
+| **P2.14 REPLICAOF** | **DONE** — async single replica; **typed HASH/LIST/ZSET via T2.13**; `tests/test_prod_replica.py` |
 | **P2.15 TLS** | **DONE** — native OpenSSL `--tls-port` + cert/key; cleartext kept for policy_agent; `docs/tls.md`; `tests/test_prod_tls.py` |
 | **Production P2 band** | **COMPLETE** (P2.13–P2.15) |
 | **P3.16a HASH** | **DONE** — HSET/HGET/HMGET/HGETALL/HDEL/HEXISTS/HLEN/HINCRBY + TYPE; RDB string-only |
@@ -179,6 +179,7 @@ Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/
 | T2.11 | STRLEN / SETEX / PSETEX / DBSIZE | **DONE** | `ar_strlen`/`ar_dbsize` + SETEX/PSETEX via `ar_set_bin_ex`/`px`; `tests/test_prod_string_meta.py` |
 | T2.harden | Edge/regression + flake polls for T2.9–T2.11/SCAN/RDB | **DONE** | `tests/test_prod_tier2_edges.py`; poll-until-expire in set_opts/string_meta |
 | T2.12 | WATCH / UNWATCH for MULTI/EXEC CAS | **DONE** | `ar_watch_touch`; `tests/test_prod_watch.py`; allowlist + commands |
+| T2.13 | Typed REPLICAOF full-sync + live feed (HASH/LIST/ZSET) | **DONE** | `repl_sync_{hash,list,zset}` + propagate; `tests/test_prod_replica.py` |
 
 **Deferred / blocked:** A11 Restricted sandbox without Soft still needs Tenant Admin. Cluster/field-SCAN/Streams/Lua/ACL remain non-goals (keyspace SCAN/KEYS landed for Tier 2). Short `bench_hit_vs_redis` adaptive cites remain non-citeable.
 
@@ -232,3 +233,4 @@ AURA_REDIS_SOAK_SEC=60 ./scripts/soak-prod.sh
 | 2026-09-23 | **T2.11** | STRLEN/SETEX/PSETEX/DBSIZE; `tests/test_prod_string_meta.py`; docs + ci-prod |
 | 2026-09-23 | **T2.harden** | Edge suite SCAN/SETNX/RENAME-across-types/RDB-large + expire poll harden; ci-prod wire |
 | 2026-09-23 | **T2.12** | WATCH/UNWATCH optimistic locking; EXEC null-array abort; tests + allowlist + ci-prod |
+| 2026-09-23 | **T2.13** | Typed REPLICAOF full-sync + live HSET/LPUSH/ZADD/… propagate; replica tests |

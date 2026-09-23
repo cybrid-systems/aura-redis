@@ -301,6 +301,100 @@ static void repl_propagate(ArCore* core, Arg* argv, int argc) {
   }
 }
 
+static int repl_emit_expire(ArConn* c, ArEntry* e, uint64_t now) {
+  if (!e->expire_at)
+    return 0;
+  int64_t ttl_sec = (int64_t)((e->expire_at - now + 999) / 1000);
+  if (ttl_sec <= 0)
+    return 0;
+  char ttlbuf[32];
+  int tn = snprintf(ttlbuf, sizeof(ttlbuf), "%lld", (long long)ttl_sec);
+  if (tn < 0)
+    return -1;
+  if (resp_append_array_hdr(c, 3) < 0 || resp_append_bulk(c, "EXPIRE", 6) < 0 ||
+      resp_append_bulk(c, e->key, e->klen) < 0 ||
+      resp_append_bulk(c, ttlbuf, (size_t)tn) < 0)
+    return -1;
+  return 0;
+}
+
+static int repl_sync_string(ArConn* c, ArEntry* e, uint64_t now) {
+  int64_t ttl_sec = -1;
+  if (e->expire_at) {
+    ttl_sec = (int64_t)((e->expire_at - now + 999) / 1000);
+    if (ttl_sec <= 0)
+      return 0;
+  }
+  if (ttl_sec > 0) {
+    char ttlbuf[32];
+    int tn = snprintf(ttlbuf, sizeof(ttlbuf), "%lld", (long long)ttl_sec);
+    if (resp_append_array_hdr(c, 5) < 0 || resp_append_bulk(c, "SET", 3) < 0 ||
+        resp_append_bulk(c, e->key, e->klen) < 0 ||
+        resp_append_bulk(c, e->val, e->vlen) < 0 ||
+        resp_append_bulk(c, "EX", 2) < 0 ||
+        resp_append_bulk(c, ttlbuf, (size_t)tn) < 0)
+      return -1;
+  } else {
+    if (resp_append_array_hdr(c, 3) < 0 || resp_append_bulk(c, "SET", 3) < 0 ||
+        resp_append_bulk(c, e->key, e->klen) < 0 ||
+        resp_append_bulk(c, e->val, e->vlen) < 0)
+      return -1;
+  }
+  return 0;
+}
+
+static int repl_sync_hash(ArConn* c, ArEntry* e, uint64_t now) {
+  ArHash* h = (ArHash*)e->obj;
+  if (!h || h->nfields == 0)
+    return 0;
+  int argc = 2 + (int)h->nfields * 2;
+  if (resp_append_array_hdr(c, argc) < 0 || resp_append_bulk(c, "HSET", 4) < 0 ||
+      resp_append_bulk(c, e->key, e->klen) < 0)
+    return -1;
+  for (size_t bi = 0; bi < h->nbuckets; ++bi) {
+    for (ArHashField* f = h->buckets[bi]; f; f = f->next) {
+      if (resp_append_bulk(c, f->field, f->flen) < 0 ||
+          resp_append_bulk(c, f->val, f->vlen) < 0)
+        return -1;
+    }
+  }
+  return repl_emit_expire(c, e, now);
+}
+
+static int repl_sync_list(ArConn* c, ArEntry* e, uint64_t now) {
+  ArList* l = (ArList*)e->obj;
+  if (!l || l->len == 0)
+    return 0;
+  int argc = 2 + (int)l->len;
+  if (resp_append_array_hdr(c, argc) < 0 || resp_append_bulk(c, "RPUSH", 5) < 0 ||
+      resp_append_bulk(c, e->key, e->klen) < 0)
+    return -1;
+  for (ArListNode* n = l->head; n; n = n->next) {
+    if (resp_append_bulk(c, n->val, n->vlen) < 0)
+      return -1;
+  }
+  return repl_emit_expire(c, e, now);
+}
+
+static int repl_sync_zset(ArConn* c, ArEntry* e, uint64_t now) {
+  ArZSet* z = (ArZSet*)e->obj;
+  if (!z || z->len == 0)
+    return 0;
+  int argc = 2 + (int)z->len * 2;
+  if (resp_append_array_hdr(c, argc) < 0 || resp_append_bulk(c, "ZADD", 4) < 0 ||
+      resp_append_bulk(c, e->key, e->klen) < 0)
+    return -1;
+  for (size_t i = 0; i < z->len; ++i) {
+    char sbuf[64];
+    int sn = snprintf(sbuf, sizeof(sbuf), "%.17g", z->arr[i].score);
+    if (sn < 0 || resp_append_bulk(c, sbuf, (size_t)sn) < 0 ||
+        resp_append_bulk(c, z->arr[i].member, z->arr[i].mlen) < 0)
+      return -1;
+  }
+  return repl_emit_expire(c, e, now);
+}
+
+/* P2.14+/T2.13 — full sync string + HASH/LIST/ZSET (+ TTL). */
 static int repl_fullsync(ArCore* core, ArConn* c) {
   if (!core || !c)
     return -1;
@@ -312,31 +406,27 @@ static int repl_fullsync(ArCore* core, ArConn* c) {
       continue;
     for (size_t i = 0; i < nb; ++i) {
       for (ArEntry* e = table[i]; e; e = e->next) {
-        if (e->type != AR_TYPE_STRING)
-          continue;
         if (e->expire_at && now >= e->expire_at)
           continue;
-        int64_t ttl_sec = -1;
-        if (e->expire_at) {
-          ttl_sec = (int64_t)((e->expire_at - now + 999) / 1000);
-          if (ttl_sec <= 0)
-            continue;
+        int rc = 0;
+        switch (e->type) {
+          case AR_TYPE_STRING:
+            rc = repl_sync_string(c, e, now);
+            break;
+          case AR_TYPE_HASH:
+            rc = repl_sync_hash(c, e, now);
+            break;
+          case AR_TYPE_LIST:
+            rc = repl_sync_list(c, e, now);
+            break;
+          case AR_TYPE_ZSET:
+            rc = repl_sync_zset(c, e, now);
+            break;
+          default:
+            break;
         }
-        if (ttl_sec > 0) {
-          char ttlbuf[32];
-          int tn = snprintf(ttlbuf, sizeof(ttlbuf), "%lld", (long long)ttl_sec);
-          if (resp_append_array_hdr(c, 5) < 0 || resp_append_bulk(c, "SET", 3) < 0 ||
-              resp_append_bulk(c, e->key, e->klen) < 0 ||
-              resp_append_bulk(c, e->val, e->vlen) < 0 ||
-              resp_append_bulk(c, "EX", 2) < 0 ||
-              resp_append_bulk(c, ttlbuf, (size_t)tn) < 0)
-            return -1;
-        } else {
-          if (resp_append_array_hdr(c, 3) < 0 || resp_append_bulk(c, "SET", 3) < 0 ||
-              resp_append_bulk(c, e->key, e->klen) < 0 ||
-              resp_append_bulk(c, e->val, e->vlen) < 0)
-            return -1;
-        }
+        if (rc < 0)
+          return -1;
       }
     }
   }
@@ -1984,6 +2074,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     if (wt || added < 0)
       return reply_err(
           c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    repl_propagate(core, argv, argc);
     return reply_int(c, added);
   }
   if (cmd_eq(cmd, clen, "zscore")) {
@@ -2019,6 +2110,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     if (wt || rem < 0)
       return reply_err(
           c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (rem > 0)
+      repl_propagate(core, argv, argc);
     return reply_int(c, rem);
   }
   if (cmd_eq(cmd, clen, "zcard")) {
@@ -2196,6 +2289,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     if (wt || len < 0)
       return reply_err(
           c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    repl_propagate(core, argv, argc);
     return reply_int(c, len);
   }
   if (cmd_eq(cmd, clen, "lpop") || cmd_eq(cmd, clen, "rpop")) {
@@ -2212,6 +2306,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
           c, "WRONGTYPE Operation against a key holding the wrong kind of value");
     if (!v)
       return reply_null_bulk(c);
+    repl_propagate(core, argv, argc);
     int rc = reply_bulk(c, v, ol);
     free(v);
     return rc;
@@ -2340,6 +2435,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       return reply_err(c, "WRONGTYPE Operation against a key holding the wrong kind of value");
     if (added < 0)
       return reply_err(c, "ERR hset failed");
+    repl_propagate(core, argv, argc);
     return reply_int(c, added);
   }
   if (cmd_eq(cmd, clen, "hget")) {
@@ -2438,6 +2534,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     int rem = ar_hash_hdel(core, argv[1].p, argv[1].len, nf, fields, flens, &wt);
     if (wt || rem < 0)
       return reply_err(c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (rem > 0)
+      repl_propagate(core, argv, argc);
     return reply_int(c, rem);
   }
   if (cmd_eq(cmd, clen, "hexists")) {
@@ -2478,6 +2576,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       return reply_err(c, "WRONGTYPE Operation against a key holding the wrong kind of value");
     if (ni)
       return reply_err(c, "ERR hash value is not an integer");
+    repl_propagate(core, argv, argc);
     return reply_int(c, v);
   }
 

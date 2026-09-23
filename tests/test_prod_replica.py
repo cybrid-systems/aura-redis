@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P2.14 — REPLICAOF async replica: converges under SET; read-only writes."""
+"""P2.14+/T2.13 — REPLICAOF async replica: string+HASH/LIST/ZSET; read-only writes."""
 from __future__ import annotations
 
 import os
@@ -89,10 +89,14 @@ def main() -> int:
     pm, logm = start(PORT_M, "master")
     pr, logr = start(PORT_R, "replica")
     try:
-        # Seed master before replica attaches
+        # Seed master before replica attaches (string + typed)
         with socket.create_connection(("127.0.0.1", PORT_M), timeout=5) as sock:
             assert redis_call(sock, "SET", "pre", "seed") == "OK"
             assert redis_call(sock, "SET", "ttlkey", "tv", "EX", "60") == "OK"
+            assert redis_call(sock, "HSET", "hpre", "f", "1", "g", "2") == 2
+            assert redis_call(sock, "RPUSH", "lpre", "a", "b", "c") == 3
+            assert redis_call(sock, "ZADD", "zpre", "1", "m1", "2", "m2") == 2
+            assert redis_call(sock, "EXPIRE", "hpre", "90") == 1
 
         with socket.create_connection(("127.0.0.1", PORT_R), timeout=5) as sock:
             assert redis_call(sock, "REPLICAOF", "127.0.0.1", str(PORT_M)) == "OK"
@@ -100,23 +104,51 @@ def main() -> int:
             assert inf.get("role") == "slave", inf
             assert inf.get("master_port") == str(PORT_M), inf
 
-        # Full sync should bring pre-existing keys
+        # Full sync should bring pre-existing keys (string + typed)
         wait_get(PORT_R, "pre", "seed")
         wait_get(PORT_R, "ttlkey", "tv")
+
+        def wait_eq(port, *cmd_and_expect, timeout=3.0):
+            *cmd, expect = cmd_and_expect
+            deadline = time.time() + timeout
+            last = None
+            while time.time() < deadline:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=1) as sock:
+                        last = redis_call(sock, *cmd)
+                        if last == expect:
+                            return
+                except OSError:
+                    pass
+                time.sleep(0.05)
+            raise AssertionError(f"{cmd} on :{port} got {last!r}, want {expect!r}")
+
+        wait_eq(PORT_R, "HGET", "hpre", "f", "1")
+        wait_eq(PORT_R, "HGET", "hpre", "g", "2")
+        wait_eq(PORT_R, "LRANGE", "lpre", "0", "-1", ["a", "b", "c"])
+        wait_eq(PORT_R, "ZSCORE", "zpre", "m2", "2")
         with socket.create_connection(("127.0.0.1", PORT_R), timeout=5) as sock:
             ttl = redis_call(sock, "TTL", "ttlkey")
             assert isinstance(ttl, int) and 1 <= ttl <= 60, ttl
+            httl = redis_call(sock, "TTL", "hpre")
+            assert isinstance(httl, int) and 1 <= httl <= 90, httl
 
-        # Live SET stream converges
+        # Live stream converges (string + typed)
         with socket.create_connection(("127.0.0.1", PORT_M), timeout=5) as sock:
             for i in range(20):
                 assert redis_call(sock, "SET", f"k{i}", f"v{i}") == "OK"
             assert redis_call(sock, "SET", "hot", "live") == "OK"
             assert redis_call(sock, "EXPIRE", "hot", "30") == 1
             assert redis_call(sock, "DEL", "pre") == 1
+            assert redis_call(sock, "HSET", "hlive", "x", "9") == 1
+            assert redis_call(sock, "LPUSH", "llive", "z", "y") == 2
+            assert redis_call(sock, "ZADD", "zlive", "3.5", "q") == 1
 
         wait_get(PORT_R, "hot", "live")
         wait_get(PORT_R, "k19", "v19")
+        wait_eq(PORT_R, "HGET", "hlive", "x", "9")
+        wait_eq(PORT_R, "LINDEX", "llive", "0", "y")
+        wait_eq(PORT_R, "ZSCORE", "zlive", "q", "3.5")
         with socket.create_connection(("127.0.0.1", PORT_R), timeout=5) as sock:
             assert redis_call(sock, "GET", "pre") is None
             # read-only

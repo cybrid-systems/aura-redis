@@ -18,7 +18,7 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLI
 | `CONFIG` | GET 3 / SET 4 | array / `+OK` | P1.1+P1.12+P2.13: `maxmemory`, `requirepass`, `protected-mode`, `evict-samples`, `bind`, `maxclients`, `timeout`, `tcp-backlog`, `slowlog-log-slower-than`, `dir`, `dbfilename`, `shadow-policy`, `shadow-sample-pct`, `hot-soft-cap-pct`, `hot-soft-cap-min`, `hot-promote-on-get` |
 | `SAVE` | 1 | `+OK` | P2.13 sync aura-rdb **v2** (string+HASH+LIST+ZSET+TTL) |
 | `BGSAVE` | 1 | `+OK` | P2.13 fork child aura-rdb v2 (or sync fallback) |
-| `REPLICAOF` / `SLAVEOF` | 3 | `+OK` | P2.14: `host port` or `NO ONE`; replica read-only |
+| `REPLICAOF` / `SLAVEOF` | 3 | `+OK` | P2.14/T2.13: `host port` or `NO ONE`; replica read-only; full-sync string+HASH/LIST/ZSET |
 | `SYNC` | 1 | (stream) | P2.14 internal: full sync + feed; not for apps |
 | `QUIT` | any | `+OK` then close | Allowed pre-AUTH |
 | `GET` | 2 | bulk / null | |
