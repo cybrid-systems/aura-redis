@@ -1654,6 +1654,233 @@ size_t ar_core_list_pinned(ArCore* core, char** out_keys, size_t max_out) {
   return n;
 }
 
+/* --- Tier-2 SCAN / KEYS --- */
+
+int ar_glob_match(const char* pat, size_t plen, const char* str, size_t slen) {
+  if (!pat || plen == 0)
+    return slen == 0;
+  if (plen == 1 && pat[0] == '*')
+    return 1;
+  if (!str)
+    str = "";
+  size_t pi = 0, si = 0;
+  size_t star_p = (size_t)-1, star_s = 0;
+  while (si < slen) {
+    if (pi < plen && pat[pi] == '*') {
+      star_p = pi++;
+      star_s = si;
+    } else if (pi < plen && (pat[pi] == '?' || pat[pi] == str[si])) {
+      pi++;
+      si++;
+    } else if (star_p != (size_t)-1) {
+      pi = star_p + 1;
+      si = ++star_s;
+    } else {
+      return 0;
+    }
+  }
+  while (pi < plen && pat[pi] == '*')
+    pi++;
+  return pi == plen;
+}
+
+void ar_scan_free(char** keys, size_t* klens, size_t n) {
+  if (keys) {
+    for (size_t i = 0; i < n; ++i)
+      free(keys[i]);
+    free(keys);
+  }
+  free(klens);
+}
+
+static uint64_t scan_total_buckets(ArCore* core) {
+  if (!core || !core->buckets)
+    return 0;
+  uint64_t n = (uint64_t)core->nbuckets;
+  if (core->layout == AR_LAYOUT_HOT_COLD && core->cold_buckets)
+    n += (uint64_t)core->cold_nbuckets;
+  return n;
+}
+
+static int scan_bucket_at(ArCore* core, uint64_t idx, ArEntry*** table_out,
+                          size_t* bucket_out, int* tier_out) {
+  if (!core || !core->buckets)
+    return 0;
+  if (idx < (uint64_t)core->nbuckets) {
+    *table_out = core->buckets;
+    *bucket_out = (size_t)idx;
+    *tier_out = 0;
+    return 1;
+  }
+  uint64_t cidx = idx - (uint64_t)core->nbuckets;
+  if (core->layout == AR_LAYOUT_HOT_COLD && core->cold_buckets &&
+      cidx < (uint64_t)core->cold_nbuckets) {
+    *table_out = core->cold_buckets;
+    *bucket_out = (size_t)cidx;
+    *tier_out = 1;
+    return 1;
+  }
+  return 0;
+}
+
+static int scan_push(char*** keys, size_t** klens, size_t* n, size_t* cap,
+                     const char* key, size_t klen) {
+  if (*n >= *cap) {
+    size_t ncap = (*cap == 0) ? 16 : (*cap * 2);
+    char** nk = (char**)realloc(*keys, ncap * sizeof(char*));
+    if (!nk)
+      return 0;
+    *keys = nk;
+    size_t* nl = (size_t*)realloc(*klens, ncap * sizeof(size_t));
+    if (!nl)
+      return 0; /* *keys grown; *cap unchanged so next push retries */
+    *klens = nl;
+    *cap = ncap;
+  }
+  char* copy = (char*)malloc(klen + 1);
+  if (!copy)
+    return 0;
+  if (klen)
+    memcpy(copy, key, klen);
+  copy[klen] = '\0';
+  (*keys)[*n] = copy;
+  (*klens)[*n] = klen;
+  (*n)++;
+  return 1;
+}
+
+size_t ar_scan(ArCore* core, uint64_t cursor, const char* pattern, size_t plen,
+               int count, char*** out_keys, size_t** out_klens,
+               uint64_t* next_cursor) {
+  if (out_keys)
+    *out_keys = NULL;
+  if (out_klens)
+    *out_klens = NULL;
+  if (next_cursor)
+    *next_cursor = 0;
+  if (!core || !out_keys || !out_klens || !next_cursor)
+    return 0;
+
+  const char* pat = pattern;
+  size_t patlen = plen;
+  int match_all = (!pat || patlen == 0 || (patlen == 1 && pat[0] == '*'));
+
+  if (core->nkeys == 0) {
+    *next_cursor = 0;
+    return 0;
+  }
+  uint64_t total = scan_total_buckets(core);
+  if (total == 0) {
+    *next_cursor = 0;
+    return 0;
+  }
+  if (cursor >= total) {
+    *next_cursor = 0;
+    return 0;
+  }
+
+  int max_slots = count;
+  if (max_slots <= 0)
+    max_slots = 10;
+  if (max_slots > 10000)
+    max_slots = 10000;
+
+  char** keys = NULL;
+  size_t* klens = NULL;
+  size_t n = 0, cap = 0;
+  uint64_t idx = cursor;
+  int slots = 0;
+  uint64_t now = ar_now_ms();
+
+  while (slots < max_slots) {
+    ArEntry** table = NULL;
+    size_t bucket = 0;
+    int tier = 0;
+    if (!scan_bucket_at(core, idx, &table, &bucket, &tier))
+      break;
+    ArEntry* e = table[bucket];
+    while (e) {
+      ArEntry* next = e->next;
+      if (e->expire_at && now >= e->expire_at) {
+        core->expired++;
+        ar_entry_free_ex(core, bucket, tier, e);
+        e = next;
+        continue;
+      }
+      if (match_all || ar_glob_match(pat, patlen, e->key, e->klen)) {
+        if (!scan_push(&keys, &klens, &n, &cap, e->key, e->klen)) {
+          /* OOM mid-scan: return what we have; cursor advances past this bucket */
+          break;
+        }
+      }
+      e = next;
+    }
+    slots++;
+    idx++;
+    if (idx >= total) {
+      idx = 0;
+      break;
+    }
+  }
+
+  *out_keys = keys;
+  *out_klens = klens;
+  *next_cursor = idx;
+  return n;
+}
+
+size_t ar_keys(ArCore* core, const char* pattern, size_t plen, char*** out_keys,
+               size_t** out_klens) {
+  if (out_keys)
+    *out_keys = NULL;
+  if (out_klens)
+    *out_klens = NULL;
+  if (!core || !out_keys || !out_klens)
+    return 0;
+  uint64_t total = scan_total_buckets(core);
+  if (total == 0)
+    return 0;
+  char** keys = NULL;
+  size_t* klens = NULL;
+  size_t n = 0;
+  uint64_t cursor = 0;
+  do {
+    char** page = NULL;
+    size_t* page_l = NULL;
+    uint64_t next = 0;
+    int cnt = (total > 10000) ? 10000 : (int)total;
+    size_t m = ar_scan(core, cursor, pattern, plen, cnt, &page, &page_l, &next);
+    if (m) {
+      char** nk = (char**)realloc(keys, (n + m) * sizeof(char*));
+      if (!nk) {
+        ar_scan_free(page, page_l, m);
+        break;
+      }
+      keys = nk;
+      size_t* nl = (size_t*)realloc(klens, (n + m) * sizeof(size_t));
+      if (!nl) {
+        ar_scan_free(page, page_l, m);
+        break;
+      }
+      klens = nl;
+      for (size_t i = 0; i < m; ++i) {
+        keys[n + i] = page[i];
+        klens[n + i] = page_l[i];
+      }
+      free(page);
+      free(page_l);
+      n += m;
+    } else {
+      ar_scan_free(page, page_l, m);
+    }
+    cursor = next;
+    total = scan_total_buckets(core); /* layout may change rarely */
+  } while (cursor != 0);
+  *out_keys = keys;
+  *out_klens = klens;
+  return n;
+}
+
 /* M12 — per-prefix policy namespace */
 int ar_core_policy_set(ArCore* core, const char* prefix, const char* profile) {
   if (!core || !prefix || !profile || !prefix[0] || !profile[0])

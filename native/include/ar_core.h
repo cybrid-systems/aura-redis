@@ -232,6 +232,21 @@ char* ar_zscore(ArCore* core, const char* key, const char* member, int* ok,
 int64_t ar_zrem(ArCore* core, const char* key, const char* member, int* wrongtype);
 int64_t ar_zcard(ArCore* core, const char* key, int* wrongtype);
 
+/* Tier-2 keyspace iteration (string + HASH/LIST/ZSET keys; not fields).
+ * Glob MATCH: '*' and '?' only (no [class]). Cursor is opaque bucket index;
+ * next_cursor 0 means iteration complete. COUNT is a buckets-examined hint
+ * (default 10). Expired keys are purged as encountered.
+ * out_keys/out_klens: malloc'd arrays of n entries (or NULL if n==0);
+ * free via ar_scan_free. */
+int ar_glob_match(const char* pat, size_t plen, const char* str, size_t slen);
+void ar_scan_free(char** keys, size_t* klens, size_t n);
+size_t ar_scan(ArCore* core, uint64_t cursor, const char* pattern, size_t plen,
+               int count, char*** out_keys, size_t** out_klens,
+               uint64_t* next_cursor);
+/* KEYS — full keyspace scan (O(N)); same match/free contract as ar_scan. */
+size_t ar_keys(ArCore* core, const char* pattern, size_t plen, char*** out_keys,
+               size_t** out_klens);
+
 #ifdef __cplusplus
 }
 #endif

@@ -175,7 +175,7 @@ Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/
 | T2.7 | Adaptive gate SSOT docs | **DONE** | [`redis-compare.md`](redis-compare.md) · [`perf-eval.md`](perf-eval.md) · runbook §8 |
 | T2.8 | A11 prod-profile risk acceptance | **DONE** (Restricted still PARTIAL) | [`prod-profile.md`](prod-profile.md) |
 
-**Deferred / blocked:** A11 Restricted sandbox without Soft still needs Tenant Admin. Cluster/SCAN/Streams/Lua/ACL remain non-goals. Short `bench_hit_vs_redis` adaptive cites remain non-citeable.
+**Deferred / blocked:** A11 Restricted sandbox without Soft still needs Tenant Admin. Cluster/field-SCAN/Streams/Lua/ACL remain non-goals (keyspace SCAN/KEYS landed for Tier 2). Short `bench_hit_vs_redis` adaptive cites remain non-citeable.
 
 **How to run Tier 2 gates locally:**
 

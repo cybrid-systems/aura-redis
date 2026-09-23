@@ -2282,6 +2282,102 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     return reply_int(c, n);
   }
 
+  /* Tier-2 SCAN / KEYS — keyspace cursor iteration (all value types). */
+  if (cmd_eq(cmd, clen, "scan")) {
+    if (argc < 2)
+      return reply_err(c, "ERR wrong number of arguments for 'scan'");
+    char cbuf[32];
+    if (argv[1].len == 0 || argv[1].len >= sizeof(cbuf))
+      return reply_err(c, "ERR invalid cursor");
+    memcpy(cbuf, argv[1].p, argv[1].len);
+    cbuf[argv[1].len] = '\0';
+    char* end = NULL;
+    unsigned long long cursor = strtoull(cbuf, &end, 10);
+    if (!end || *end != '\0')
+      return reply_err(c, "ERR invalid cursor");
+    const char* pattern = NULL;
+    size_t plen = 0;
+    int count = 10;
+    for (int i = 2; i < argc; ) {
+      if (cmd_eq(argv[i].p, argv[i].len, "match")) {
+        if (i + 1 >= argc)
+          return reply_err(c, "ERR syntax error");
+        pattern = argv[i + 1].p;
+        plen = argv[i + 1].len;
+        i += 2;
+      } else if (cmd_eq(argv[i].p, argv[i].len, "count")) {
+        if (i + 1 >= argc)
+          return reply_err(c, "ERR syntax error");
+        char nbuf[32];
+        if (argv[i + 1].len == 0 || argv[i + 1].len >= sizeof(nbuf))
+          return reply_err(c, "ERR value is not an integer or out of range");
+        memcpy(nbuf, argv[i + 1].p, argv[i + 1].len);
+        nbuf[argv[i + 1].len] = '\0';
+        char* e2 = NULL;
+        long long cv = strtoll(nbuf, &e2, 10);
+        if (!e2 || *e2 != '\0' || cv < 1)
+          return reply_err(c, "ERR value is not an integer or out of range");
+        if (cv > 10000)
+          cv = 10000;
+        count = (int)cv;
+        i += 2;
+      } else {
+        return reply_err(c, "ERR syntax error");
+      }
+    }
+    char** keys = NULL;
+    size_t* klens = NULL;
+    uint64_t next = 0;
+    size_t n = ar_scan(core, (uint64_t)cursor, pattern, plen, count, &keys, &klens,
+                       &next);
+    char hdr[64];
+    int hn = snprintf(hdr, sizeof(hdr), "*2\r\n");
+    if (hn < 0 || wbuf_append(c, hdr, (size_t)hn) < 0) {
+      ar_scan_free(keys, klens, n);
+      return -1;
+    }
+    char ncur[32];
+    int cn = snprintf(ncur, sizeof(ncur), "%llu", (unsigned long long)next);
+    if (cn < 0 || reply_bulk(c, ncur, (size_t)cn) < 0) {
+      ar_scan_free(keys, klens, n);
+      return -1;
+    }
+    hn = snprintf(hdr, sizeof(hdr), "*%zu\r\n", n);
+    if (hn < 0 || wbuf_append(c, hdr, (size_t)hn) < 0) {
+      ar_scan_free(keys, klens, n);
+      return -1;
+    }
+    for (size_t i = 0; i < n; ++i) {
+      if (reply_bulk(c, keys[i], klens[i]) < 0) {
+        ar_scan_free(keys, klens, n);
+        return -1;
+      }
+    }
+    ar_scan_free(keys, klens, n);
+    return 0;
+  }
+  if (cmd_eq(cmd, clen, "keys")) {
+    if (argc != 2)
+      return reply_err(c, "ERR wrong number of arguments for 'keys'");
+    char** keys = NULL;
+    size_t* klens = NULL;
+    size_t n = ar_keys(core, argv[1].p, argv[1].len, &keys, &klens);
+    char hdr[32];
+    int hn = snprintf(hdr, sizeof(hdr), "*%zu\r\n", n);
+    if (hn < 0 || wbuf_append(c, hdr, (size_t)hn) < 0) {
+      ar_scan_free(keys, klens, n);
+      return -1;
+    }
+    for (size_t i = 0; i < n; ++i) {
+      if (reply_bulk(c, keys[i], klens[i]) < 0) {
+        ar_scan_free(keys, klens, n);
+        return -1;
+      }
+    }
+    ar_scan_free(keys, klens, n);
+    return 0;
+  }
+
   return reply_err(c, "ERR unknown command");
 }
 

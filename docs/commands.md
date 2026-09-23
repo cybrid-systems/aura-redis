@@ -4,7 +4,7 @@
 **Not covered here:** pure-Lisp `AURA_REDIS_ENGINE=aura` (broader demo subset in README).  
 **Production product:** string KV cache + Aura control commands — see [`production-plan.md`](production-plan.md).
 
-Last audited: 2026-09-23 (CST) for P3.16–P3.17 (HASH/LIST/ZSET/MULTI/PubSub).
+Last audited: 2026-09-23 (CST) for P3.16–P3.18 (HASH/LIST/ZSET/MULTI/PubSub/SCAN).
 
 ---
 
@@ -67,6 +67,8 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.17 (HASH/LIST/ZSET/MULTI/PubSub).
 | `SUBSCRIBE` | ≥2 | array confirms | enters pubsub mode (P3.17b) |
 | `UNSUBSCRIBE` | ≥1 | array confirms | no args = all |
 | `PUBLISH` | 3 | integer receivers | local subscribers only |
+| `SCAN` | ≥2 | `[cursor, [keys…]]` | Tier-2: opaque cursor; optional `MATCH` (`*`/`?`) + `COUNT` hint; string+HASH+LIST+ZSET keys; expires purged on visit |
+| `KEYS` | 2 | array | Full keyspace scan via same glob as SCAN; **O(N)** — fine for small Tier-2 caches; prefer SCAN for pagination |
 
 
 
@@ -92,7 +94,7 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 | Auth / admin | `SHUTDOWN`, `CLIENT`, `SLOWLOG`, `MONITOR` (AUTH/HELLO done in P0.4) |
 | Persistence / repl | `BGREWRITEAOF`, `PSYNC` (SAVE/BGSAVE/REPLICAOF/SYNC done P2.13–14) |
 | Strings extras | `APPEND`, `STRLEN`, `GETSET`, `SETEX`, `PSETEX`, `SET` NX/XX/PX |
-| Keys extras | `KEYS`, `DBSIZE`, `RENAME`, `UNLINK` (≠ DEL alias) |
+| Keys extras | `DBSIZE`, `RENAME`, `UNLINK` (≠ DEL alias); `KEYS`/`SCAN` done P3.18 |
 | (types) | HASH/LIST/ZSET done P3.16 |
 | Patterns / WATCH | `PSUBSCRIBE`, `WATCH`/`UNWATCH` (deferred) |
 | Cluster / modules | all |

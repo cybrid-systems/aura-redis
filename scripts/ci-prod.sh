@@ -37,6 +37,7 @@ run P3.16c tests/test_prod_zset.py
 run P3.16-edge tests/test_prod_types_edge.py
 run P3.17a tests/test_prod_multi.py
 run P3.17b tests/test_prod_pubsub.py
+run P3.18-scan tests/test_prod_scan.py
 
 # P1/P2 + strong-narrative (config/clients/rdb/replica/tls/policy_ha + A3–A13)
 AURA_REDIS_SKIP_BUILD=1 ./scripts/ci-strong.sh

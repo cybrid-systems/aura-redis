@@ -9,7 +9,7 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 ## Allowed (Tier 2)
 
 ### Strings
-`PING`, `AUTH`, `HELLO` (stub), `QUIT`, `GET`, `SET` (+ `EX`), `MGET`, `MSET`, `DEL`, `EXISTS`, `INCR`, `DECR`, `EXPIRE`, `TTL`, `TYPE`, `FLUSHDB`
+`PING`, `AUTH`, `HELLO` (stub), `QUIT`, `GET`, `SET` (+ `EX`), `MGET`, `MSET`, `DEL`, `EXISTS`, `INCR`, `DECR`, `EXPIRE`, `TTL`, `TYPE`, `FLUSHDB`, `SCAN`, `KEYS`
 
 ### HASH
 `HSET`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`
@@ -35,7 +35,7 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 
 | Surface | Examples | Why |
 |---------|----------|-----|
-| **SCAN family** | `SCAN`, `HSCAN`, `SSCAN`, `ZSCAN` | Not implemented |
+| **Field SCAN** | `HSCAN`, `SSCAN`, `ZSCAN` | Not implemented (keyspace `SCAN`/`KEYS` allowed) |
 | **Streams** | `XADD`, `XREAD`, `XGROUP`, … | Not implemented |
 | **Cluster** | `CLUSTER`, slot migration, redirects | Explicit non-goal |
 | **Lua** | `EVAL`, `EVALSHA`, `SCRIPT` | Not implemented |
@@ -51,5 +51,17 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 
 1. Does the app only need the allowlisted string/hash/list/zset/MULTI subset?  
 2. Can it tolerate cache-only restart **or** explicit SAVE warm-start (not Redis RDB)?  
-3. Does it require Cluster, Lua, Streams, SCAN, or ACL? → **reject**.  
+3. Does it require Cluster, Lua, Streams, field-SCAN (`HSCAN`/…), or ACL? → **reject**. (`SCAN`/`KEYS` OK for Tier 2; prefer SCAN; KEYS is O(N).)  
 4. Will `policy_agent` be the only writer of `EVICT`/`LAYOUT`/`PIN`? (Apps should not fight the agent.)
+
+---
+
+## SCAN / KEYS caveats (Tier 2)
+
+- **Allowed:** keyspace `SCAN cursor [MATCH pattern] [COUNT count]` and `KEYS pattern`.
+- **Types:** returns key names for string, HASH, LIST, and ZSET (not hash fields / zset members).
+- **MATCH:** Redis-ish glob with `*` and `?` only (no `[abc]` character classes).
+- **COUNT:** hint for buckets examined per call (default 10); not a hard return size.
+- **Cursor:** opaque integer (bucket index across hot+cold tables). Concurrent SET/DEL/rehash/layout migrate may skip or duplicate keys across pages — same class of caveat as Redis SCAN. A full iteration until cursor `0` is best-effort complete for a quiescent store.
+- **KEYS:** returns all matches in one reply (**O(N)**). Prefer SCAN for large keyspaces; OK for small Tier-2 caches.
+- **Still reject:** `HSCAN` / `SSCAN` / `ZSCAN`.

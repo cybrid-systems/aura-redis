@@ -84,7 +84,7 @@ Do **not** claim cross-version Redis RDB compatibility — format is **aura-rdb*
 
 ## 6. What clients may use
 
-See **[`client-allowlist.md`](client-allowlist.md)** (Tier 2 allowlist). Reject SCAN / Streams / Cluster / Lua / ACL apps at intake.
+See **[`client-allowlist.md`](client-allowlist.md)** (Tier 2 allowlist). Keyspace `SCAN`/`KEYS` allowed (prefer SCAN; KEYS O(N)). Reject field-SCAN / Streams / Cluster / Lua / ACL apps at intake.
 
 ---
 
