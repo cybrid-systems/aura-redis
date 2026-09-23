@@ -15,7 +15,7 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.17 (HASH/LIST/ZSET/MULTI/PubSub).
 | `PING` | 1 or 2 | `+PONG` or bulk | Extra args → wrong-arity error; allowed pre-AUTH |
 | `AUTH` | 2 or 3 | `+OK` / WRONGPASS | `AUTH <pass>` or `AUTH <user> <pass>` (user ignored); need `--requirepass` / `AURA_REDIS_REQUIREPASS` |
 | `HELLO` | 1+ | array map | Minimal stub; optional `AUTH` inline; allowed pre-AUTH |
-| `CONFIG` | GET 3 / SET 4 | array / `+OK` | P1.1+P1.12+P2.13: `maxmemory`, `requirepass`, `protected-mode`, `evict-samples`, `bind`, `maxclients`, `timeout`, `tcp-backlog`, `slowlog-log-slower-than`, `dir`, `dbfilename` |
+| `CONFIG` | GET 3 / SET 4 | array / `+OK` | P1.1+P1.12+P2.13: `maxmemory`, `requirepass`, `protected-mode`, `evict-samples`, `bind`, `maxclients`, `timeout`, `tcp-backlog`, `slowlog-log-slower-than`, `dir`, `dbfilename`, `shadow-policy`, `shadow-sample-pct` |
 | `SAVE` | 1 | `+OK` | P2.13 sync `aura-rdb` snapshot |
 | `BGSAVE` | 1 | `+OK` | P2.13 fork child (or sync fallback) |
 | `REPLICAOF` / `SLAVEOF` | 3 | `+OK` | P2.14: `host port` or `NO ONE`; replica read-only |
@@ -33,11 +33,12 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.17 (HASH/LIST/ZSET/MULTI/PubSub).
 | `FLUSHDB` | 1 | `+OK` | |
 | `COMMAND` | 1 | `*0` | stub for clients that probe |
 | `INFO` | 1+ | bulk | Sectioned (Server/Clients/Memory/Stats/Keyspace/Persistence/Aura); flat keys kept for policy_agent |
-| `EVICT` | 1 / 2 / 3 | bulk name / `+OK` | `EVICT` \| `EVICT <noop\|lru\|lfu\|ttl_aware>` \| `EVICT samples <n>` |
+| `EVICT` | 1 / 2 / 3 | bulk name / `+OK` | `EVICT` \| `EVICT <noop\|lru\|lfu\|ttl_aware\|slru\|tinylfu>` \| `EVICT samples <n>` |
 | `LAYOUT` | 1 / 2 | bulk / `+OK` | `flat` \| `hot_cold` |
 | `PIN` | 1 / 2 | list / `+OK` | `PIN` lists; `PIN key` pins |
 | `UNPIN` | 2 | integer | |
 | `POLICY` | 3 | `+OK` | `POLICY <prefix> <profile>` (M12 hints) |
+| `SHADOW` | 1–3 | bulk / `+OK` | A10: `SHADOW` stats; `SHADOW policy <name>`; `SHADOW sample-pct <n>`; `SHADOW reset\|diverge` |
 | `PLUGIN` | 1 / 2 | bulk / `+OK` | **Denied** when `AURA_REDIS_DENY_PLUGIN=1` |
 | `TYPE` | 2 | bulk | `string`/`hash`/`list`/`zset`/`none` (P3.16) |
 | `HSET` | ≥4 even | integer | new fields count; multi field/value (P3.16a) |

@@ -31,6 +31,10 @@
 ;   AURA_REDIS_WEIGHT_EVOLVE=0|1    A13: mutate signal weights with thresholds (default 1 if evolve)
 ;   AURA_REDIS_W_MISS / W_WRITE / W_EVICT  seed signal weights (defaults 10/2/10 = identity)
 ;   AURA_REDIS_FIBER_SHADOW=0|1     A16: fiber dual-body score without applying loser (default 0)
+;   AURA_REDIS_SHADOW_AB=0|1         A10: dual choose dry-run + C sample; never EVICT loser
+;   AURA_REDIS_SHADOW_PROFILE        challenger choose body (default inverted)
+;   AURA_REDIS_SHADOW_SAMPLE_PCT     C GET sample % for shadow_* INFO (default 10)
+;   AURA_REDIS_PREFER_SLRU=0|1       A12: zipf/miss_spike prefer slru over lfu
 ;   AURA_REDIS_PASSWORD / REQUIREPASS  AUTH to C server when requirepass set
 ;   AURA_REDIS_POLICY_HEARTBEAT     optional file rewritten each tick (HA probe)
 ;   AURA_REDIS_POLICY_PIN          durable pin (profile/version/hash) for HA resume
@@ -164,6 +168,15 @@
 (define *fiber-shadow* #f)
 (define *shadow-scores* 0)
 (define *shadow-wins* 0)
+; A10 — shadow A/B sample (C hook + agent dual dry-run; never apply loser)
+(define *shadow-ab* #f)
+(define *shadow-profile* "aggressive")
+(define *shadow-sample-pct* 10)
+(define *shadow-ab-ticks* 0)
+(define *shadow-ab-diverges* 0)
+(define *shadow-ab-blocked* 0)
+(define *shadow-c-ready* #f)
+(define *prefer-slru* #f)
 ; M12/A5 - per-prefix policy hints + param bags from INFO policy_hints
 (define *policy-hints* "")
 (define *prefix-policy-on* #f)
@@ -385,6 +398,30 @@
       (set! *fiber-shadow* #t)
       (display "policy_agent: fiber-shadow on (A16)\n"))
     #t))
+(let ((e (getenv "AURA_REDIS_SHADOW_AB")))
+  (if (and (string? e)
+           (or (string=? e "1") (string=? e "true") (string=? e "yes")
+               (string=? e "on")))
+    (begin
+      (set! *shadow-ab* #t)
+      (display "policy_agent: shadow-ab on (A10)\n"))
+    #t))
+(let ((e (getenv "AURA_REDIS_SHADOW_PROFILE")))
+  (if (and (string? e) (> (string-length e) 0))
+    (set! *shadow-profile* e)
+    #t))
+(let ((e (getenv "AURA_REDIS_SHADOW_SAMPLE_PCT")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *shadow-sample-pct* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_PREFER_SLRU")))
+  (if (and (string? e)
+           (or (string=? e "1") (string=? e "true") (string=? e "yes")
+               (string=? e "on")))
+    (begin
+      (set! *prefer-slru* #t)
+      (display "policy_agent: prefer-slru on (A12)\n"))
+    #t))
 (let ((e (getenv "AURA_REDIS_PASSWORD")))
   (if (and (string? e) (> (string-length e) 0))
     (set! *password* e)
@@ -536,6 +573,8 @@
 ;;   ttl_nopin → ttl_aware|flat (noise/session flood prefix — do NOT pin)
 (define (prof-is-lfu-family? pr)
   (or (>= (find-substr pr "lfu" 0) 0)
+      (>= (find-substr pr "slru" 0) 0)
+      (>= (find-substr pr "tinylfu" 0) 0)
       (>= (find-substr pr "zipf" 0) 0)
       (>= (find-substr pr "hot" 0) 0)))
 
@@ -558,7 +597,8 @@
          (>= (find-substr pr "ttl_aware" 0) 0)
          (string=? pr "ttl"))
      "ttl_aware|flat|pin")
-    ((prof-is-lfu-family? pr) "lfu|flat|pin")
+    ((prof-is-lfu-family? pr)
+     (if *prefer-slru* "slru|flat|pin" "lfu|flat|pin"))
     ((and (string? pr) (> (string-length pr) 0))
      (string-append pr "|flat|pin"))
     (else "")))
@@ -649,9 +689,10 @@
     (cond
       ((and want-ttl want-pin) "ttl_aware|flat|pin")
       (want-ttl "ttl_aware|flat")
-      ((and want-lfu want-pin) "lfu|flat|pin")
-      (want-lfu "lfu|flat")
-      (want-pin "lfu|flat|pin")
+      ((and want-lfu want-pin)
+       (if *prefer-slru* "slru|flat|pin" "lfu|flat|pin"))
+      (want-lfu (if *prefer-slru* "slru|flat" "lfu|flat"))
+      (want-pin (if *prefer-slru* "slru|flat|pin" "lfu|flat|pin"))
       (else ""))))
 
 ; ── RESP client (encode array of bulk strings; parse simple/bulk/err) ──
@@ -1096,6 +1137,58 @@
   (newline)
   (set! *evolve-logs* (+ *evolve-logs* 1))
   #t)
+
+;; A10 — shadow A/B dry-run + C sample setup (never apply loser kernels)
+(define (shadow-choice-kernel c)
+  (if (or (not (string? c)) (= (string-length c) 0))
+    ""
+    (let ((bar (find-substr c "|" 0)))
+      (if (>= bar 0) (substring c 0 bar) c))))
+
+(define (shadow-alt-choice)
+  (cond
+    ((string=? *shadow-profile* "aggressive") "lfu|flat|pin")
+    ((string=? *shadow-profile* "inverted") "lru|flat")
+    ((string=? *shadow-profile* "conservative") "lru|flat")
+    ((string=? *shadow-profile* "nosoft") "lfu|flat")
+    ((string=? *shadow-profile* "slru") "slru|flat|pin")
+    (else "lru|flat")))
+
+(define (shadow-c-setup!)
+  (if (or (not *shadow-ab*) *shadow-c-ready* (not *sock*))
+    #f
+    (begin
+      (try (redis-call! *sock* "SHADOW" "policy" *shadow-profile*)
+           (catch (e) #f))
+      (try (redis-call! *sock* "SHADOW" "sample-pct"
+                        (number->string *shadow-sample-pct*))
+           (catch (e) #f))
+      (set! *shadow-c-ready* #t)
+      (display "policy_agent: shadow-c setup policy=")
+      (display *shadow-profile*)
+      (display " sample-pct=")
+      (display *shadow-sample-pct*)
+      (newline)
+      #t)))
+
+(define (shadow-ab-tick! champ-choice)
+  (set! *shadow-ab-ticks* (+ *shadow-ab-ticks* 1))
+  (let ((alt-choice (shadow-alt-choice))
+        (ck (shadow-choice-kernel champ-choice))
+        (ak (shadow-choice-kernel (shadow-alt-choice))))
+    (if (and (> (string-length ck) 0) (> (string-length ak) 0)
+             (not (string=? ck ak)))
+      (begin
+        (set! *shadow-ab-diverges* (+ *shadow-ab-diverges* 1))
+        (try (redis-call! *sock* "SHADOW" "diverge") (catch (e) #f))
+        (display "policy_agent: shadow-ab champ=")
+        (display champ-choice)
+        (display " alt=")
+        (display alt-choice)
+        (display " (dry-run no EVICT loser)\n")
+        (set! *shadow-ab-blocked* (+ *shadow-ab-blocked* 1))
+        #t)
+      #t)))
 
 ;; A16 — fiber parallel trial fitness: score dual param bags in fibers
 ;; without applying the loser (shadow). Proxy score = fireability heuristic;
@@ -1920,6 +2013,9 @@
                        "weight_keeps=" (number->string *weight-keeps*) "\n"
                        "swarm_proposes=" (number->string *swarm-propose-logs*) "\n"
                        "shadow_scores=" (number->string *shadow-scores*) "\n"
+                       "shadow_ab_ticks=" (number->string *shadow-ab-ticks*) "\n"
+                       "shadow_ab_diverges=" (number->string *shadow-ab-diverges*) "\n"
+                       "shadow_ab_blocked=" (number->string *shadow-ab-blocked*) "\n"
                        "hit_ewma=" (number->string *hit-ewma*) "\n"
                        "swaps=" (number->string *swaps*) "\n"
                        "applies_sec=" (number->string
@@ -2368,7 +2464,7 @@
                           ((and (prefix-has-session?) *ttl-pressure*)
                            (set! choice "ttl_aware|flat|pin"))
                           ((prefix-has-zipf?)
-                           (set! choice "lfu|flat|pin"))
+                           (set! choice (if *prefer-slru* "slru|flat|pin" "lfu|flat|pin")))
                           ((prefix-has-session?)
                            (set! choice "ttl_aware|flat|pin"))
                           (else #t)))
@@ -2390,6 +2486,35 @@
                                          (if *prefix-deep* "prefix_deep" "prefix_policy"))
                           (set! *prefix-applies* 1))
                         #t))
+                    #t)
+                  ; A12 optional: miss_spike/write_heavy + prefer-slru → slru kernel
+                  (if (and *prefer-slru*
+                           (string? choice)
+                           (> (string-length choice) 0)
+                           (>= (find-substr choice "lfu" 0) 0)
+                           (or (string=? *phase-hint* "miss_spike")
+                               (string=? *phase-hint* "write_heavy")))
+                    (begin
+                      (set! choice
+                        (if (>= (find-substr choice "lfu|flat|pin" 0) 0)
+                          "slru|flat|pin"
+                          (if (>= (find-substr choice "lfu|flat" 0) 0)
+                            "slru|flat"
+                            "slru")))
+                      (display "policy_agent: prefer-slru rewrite → ")
+                      (display choice)
+                      (newline))
+                    #t)
+                  ; A10 shadow A/B dry-run (never EVICT loser)
+                  (if *shadow-ab*
+                    (begin
+                      (shadow-c-setup!)
+                      (shadow-ab-tick!
+                        (if (and (string? choice) (> (string-length choice) 0))
+                          choice
+                          (if (> (string-length *last-evict*) 0)
+                            *last-evict*
+                            "lru"))))
                     #t)
                   (if (and (string? choice) (> (string-length choice) 0))
                     (begin
@@ -2704,6 +2829,10 @@
 (display *shadow-scores*)
 (display " shadow-wins=")
 (display *shadow-wins*)
+(display " shadow-ab-diverges=")
+(display *shadow-ab-diverges*)
+(display " shadow-ab-blocked=")
+(display *shadow-ab-blocked*)
 (display " prefix-applies=")
 (display *prefix-applies*)
 (display " canary-commits=")

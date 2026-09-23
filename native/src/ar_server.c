@@ -531,6 +531,12 @@ static int get_ptr(ArCore* core, const char* key, size_t klen,
   ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
   if (!e) {
     core->misses++;
+    /* A10: sample miss under live champ */
+    if (core->shadow_sample_pct > 0 &&
+        (rand() % 100) < core->shadow_sample_pct) {
+      core->shadow_samples++;
+      core->shadow_misses++;
+    }
     *val = NULL;
     *vlen = 0;
     return 0;
@@ -541,6 +547,11 @@ static int get_ptr(ArCore* core, const char* key, size_t klen,
     return -1;
   }
   core->hits++;
+  if (core->shadow_sample_pct > 0 &&
+      (rand() % 100) < core->shadow_sample_pct) {
+    core->shadow_samples++;
+    core->shadow_hits++;
+  }
   ar_touch_get(core, e, b, tier);
   if (core->evict && core->evict->on_get)
     core->evict->on_get(core, e);
@@ -1082,11 +1093,11 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     if (argc == 2) {
       char namebuf[64];
       if (argv[1].len == 0 || argv[1].len >= sizeof(namebuf))
-        return reply_err(c, "ERR bad evict (want noop|lru|lfu|ttl_aware)");
+        return reply_err(c, "ERR bad evict (want noop|lru|lfu|ttl_aware|slru|tinylfu)");
       memcpy(namebuf, argv[1].p, argv[1].len);
       namebuf[argv[1].len] = '\0';
       if (!ar_core_set_evict_by_name(core, namebuf))
-        return reply_err(c, "ERR bad evict (want noop|lru|lfu|ttl_aware)");
+        return reply_err(c, "ERR bad evict (want noop|lru|lfu|ttl_aware|slru|tinylfu)");
       return reply_ok(c);
     }
     if (argc == 3 && cmd_eq(argv[1].p, argv[1].len, "samples")) {
@@ -1179,6 +1190,12 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       }
       AR_CFG_ADD("dir", "%s", ar_core_rdb_dir(core));
       AR_CFG_ADD("dbfilename", "%s", ar_core_rdb_filename(core));
+      AR_CFG_ADD("shadow-policy", "%s", ar_core_shadow_policy(core));
+      {
+        char vbuf[32];
+        snprintf(vbuf, sizeof(vbuf), "%d", ar_core_shadow_sample_pct(core));
+        AR_CFG_ADD("shadow-sample-pct", "%s", vbuf);
+      }
 #undef AR_CFG_ADD
       char hdr[32];
       int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", nitems);
@@ -1257,6 +1274,17 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
           return reply_err(c, "ERR config set dbfilename");
         return reply_ok(c);
       }
+      if (cmd_eq(argv[2].p, argv[2].len, "shadow-policy")) {
+        if (!ar_core_set_shadow_policy(core, val))
+          return reply_err(c, "ERR config set shadow-policy");
+        return reply_ok(c);
+      }
+      if (cmd_eq(argv[2].p, argv[2].len, "shadow-sample-pct")) {
+        int n = atoi(val);
+        if (!ar_core_set_shadow_sample_pct(core, n))
+          return reply_err(c, "ERR config set shadow-sample-pct");
+        return reply_ok(c);
+      }
       return reply_err(c, "ERR Unknown option or number of arguments for CONFIG "
                           "SET");
     }
@@ -1332,7 +1360,13 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         "layout_gen:%llu\n"
         "hot_keys:%llu\n"
         "cold_keys:%llu\n"
-        "policy_hints:%s\n",
+        "policy_hints:%s\n"
+        "shadow_policy:%s\n"
+        "shadow_sample_pct:%d\n"
+        "shadow_samples:%llu\n"
+        "shadow_hits:%llu\n"
+        "shadow_misses:%llu\n"
+        "shadow_diverges:%llu\n",
         core->tcp_port,
         core->tls_port,
         core->tls_listen_fd >= 0 ? "yes" : "no",
@@ -1383,10 +1417,65 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         (unsigned long long)ar_core_layout_gen(core),
         (unsigned long long)ar_core_hot_keys(core),
         (unsigned long long)ar_core_cold_keys(core),
-        hints);
+        hints,
+        ar_core_shadow_policy(core),
+        ar_core_shadow_sample_pct(core),
+        (unsigned long long)ar_core_shadow_samples(core),
+        (unsigned long long)ar_core_shadow_hits(core),
+        (unsigned long long)ar_core_shadow_misses(core),
+        (unsigned long long)ar_core_shadow_diverges(core));
     if (n < 0)
       return reply_err(c, "ERR info");
     return reply_bulk(c, buf, (size_t)n);
+  }
+
+  /* A10: SHADOW [policy <name>|sample-pct <n>|reset|diverge] — best-effort A/B */
+  if (cmd_eq(cmd, clen, "shadow")) {
+    if (argc == 1) {
+      char buf[512];
+      int n = snprintf(
+          buf, sizeof(buf),
+          "policy:%s sample_pct:%d samples:%llu hits:%llu misses:%llu "
+          "diverges:%llu\n",
+          ar_core_shadow_policy(core), ar_core_shadow_sample_pct(core),
+          (unsigned long long)ar_core_shadow_samples(core),
+          (unsigned long long)ar_core_shadow_hits(core),
+          (unsigned long long)ar_core_shadow_misses(core),
+          (unsigned long long)ar_core_shadow_diverges(core));
+      if (n < 0)
+        return reply_err(c, "ERR shadow");
+      return reply_bulk(c, buf, (size_t)n);
+    }
+    if (argc == 2 && cmd_eq(argv[1].p, argv[1].len, "reset")) {
+      ar_core_shadow_reset(core);
+      return reply_ok(c);
+    }
+    if (argc == 2 && cmd_eq(argv[1].p, argv[1].len, "diverge")) {
+      ar_core_shadow_note_diverge(core);
+      return reply_ok(c);
+    }
+    if (argc == 3 && cmd_eq(argv[1].p, argv[1].len, "policy")) {
+      char namebuf[64];
+      if (argv[2].len >= sizeof(namebuf))
+        return reply_err(c, "ERR bad shadow policy");
+      memcpy(namebuf, argv[2].p, argv[2].len);
+      namebuf[argv[2].len] = '\0';
+      if (!ar_core_set_shadow_policy(core, namebuf))
+        return reply_err(c, "ERR bad shadow policy");
+      return reply_ok(c);
+    }
+    if (argc == 3 && (cmd_eq(argv[1].p, argv[1].len, "sample-pct") ||
+                      cmd_eq(argv[1].p, argv[1].len, "sample_pct"))) {
+      char nbuf[32];
+      if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+        return reply_err(c, "ERR bad sample-pct");
+      memcpy(nbuf, argv[2].p, argv[2].len);
+      nbuf[argv[2].len] = '\0';
+      if (!ar_core_set_shadow_sample_pct(core, atoi(nbuf)))
+        return reply_err(c, "ERR bad sample-pct");
+      return reply_ok(c);
+    }
+    return reply_err(c, "ERR wrong number of arguments for 'shadow'");
   }
   /* M12: POLICY prefix profile | POLICY (list hints) */
   if (cmd_eq(cmd, clen, "policy")) {

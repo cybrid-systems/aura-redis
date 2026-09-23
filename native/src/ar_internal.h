@@ -148,6 +148,14 @@ struct ArCore {
   uint64_t maxmemory; /* 0 = unlimited */
   uint64_t used_memory;
 
+  /* A10 — shadow / A/B sample path (best-effort; does not dual-store) */
+  char shadow_policy[32]; /* alternate policy name for agent dual-score */
+  int shadow_sample_pct;  /* 0..100; sample GET hit/miss under live champ */
+  uint64_t shadow_samples;
+  uint64_t shadow_hits;
+  uint64_t shadow_misses;
+  uint64_t shadow_diverges; /* agent-reported champ≠challenger choices */
+
   /* network */
   int listen_fd;
   int epfd;

@@ -33,7 +33,7 @@ Redis is a **fixed** C data plane + fixed eviction knobs.
 
 **Aura Redis** should be:
 
-- **Fast** where bytes move (C kernels: built-in `lru`/`lfu`/`noop` + layout).
+- **Fast** where bytes move (C kernels: built-in `lru`/`lfu`/`ttl_aware`/`slru`/`tinylfu`/`noop` + layout).
 - **Alive** where policy lives: Aura **mutates policy code** (`std/hot-strategy` /
   `mutate:rebind`) under sandbox discipline, then applies choices via RESP
   `EVICT` / `LAYOUT`. See [`aura-native-control.md`](aura-native-control.md).
@@ -64,7 +64,7 @@ That combination is the product story—not “another C Redis with an Aura logo
 
 ```text
   clients ──TCP──►  aura_redis_server (C data plane)
-                      epoll / RESP / dict / lru|lfu|noop / LAYOUT
+                      epoll / RESP / dict / lru|lfu|ttl_aware|slru|tinylfu|noop / LAYOUT
                       admin: EVICT, LAYOUT, INFO  (PLUGIN = escape hatch)
                             ▲
                             │ RESP (no FFI in agent)

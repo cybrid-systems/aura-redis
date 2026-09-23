@@ -141,6 +141,18 @@ uint64_t ar_core_pinned_keys(ArCore* core);
 size_t ar_core_list_pinned(ArCore* core, char** out_keys, size_t max_out);
 uint64_t ar_core_nkeys(ArCore* core);
 
+/* A10 — shadow / A/B sample (CONFIG/INFO; agent dry-run never applies loser) */
+int ar_core_set_shadow_policy(ArCore* core, const char* name); /* "" clears */
+const char* ar_core_shadow_policy(ArCore* core);
+int ar_core_set_shadow_sample_pct(ArCore* core, int pct); /* clamp 0..100 */
+int ar_core_shadow_sample_pct(ArCore* core);
+void ar_core_shadow_reset(ArCore* core);
+uint64_t ar_core_shadow_samples(ArCore* core);
+uint64_t ar_core_shadow_hits(ArCore* core);
+uint64_t ar_core_shadow_misses(ArCore* core);
+uint64_t ar_core_shadow_diverges(ArCore* core);
+void ar_core_shadow_note_diverge(ArCore* core); /* agent dual-choice diverge */
+
 /* P0.3 — active expire sampling (Redis-ish). Walks random buckets and frees
  * keys past expire_at. Returns number expired this call. effort ≈ samples. */
 int ar_core_active_expire(ArCore* core, int effort);

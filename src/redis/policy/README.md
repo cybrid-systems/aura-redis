@@ -12,7 +12,7 @@ Chosen names are applied to the C data plane via RESP **`EVICT`** / **`LAYOUT`**
 
 ```text
 (lambda (dgets dsets dhits dmisses [devicted nkeys]) …)
-  → "" | "lfu" | "lru" | "noop" | "ttl_aware"
+  → "" | "lfu" | "lru" | "noop" | "ttl_aware" | "slru" | "tinylfu"
   → "lfu|hot_cold" | "lru|flat"     # joint EVICT+LAYOUT
   → "lfu|flat|pin"              # pin on miss spike (flat: no migrate hurt)
   → "lfu|hot_cold|pin"              # optional pin hint
@@ -40,3 +40,16 @@ if erate ≥ 20 → "ttl_aware|flat|soft" or "lru|flat|soft"   # refuse lfu|+pin
 ```
 
 See `docs/high-roi-iterations.md` (M10) and workload `flash_churn`.
+
+## A12 — SLRU / approx TinyLFU
+
+Named C kernels selectable via RESP `EVICT slru` or `EVICT tinylfu`.
+`tinylfu` is an **alias** of sample-based SLRU (probationary vs protected via
+`lfu_freq`; promote on GET). Not full paper W-TinyLFU (no Count-Min sketch /
+window cache). Optional agent path: `AURA_REDIS_PREFER_SLRU=1`.
+
+## A10 — Shadow A/B
+
+`AURA_REDIS_SHADOW_AB=1` → dual dry-run vs `SHADOW_PROFILE` (default aggressive);
+never EVICT-switches to loser. C `SHADOW sample-pct` samples GET hit/miss under
+live champ; INFO `shadow_*` keys.

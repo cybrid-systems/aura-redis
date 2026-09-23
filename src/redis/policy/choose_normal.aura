@@ -1,6 +1,6 @@
 ; choose_normal — multi-signal joint EVICT+LAYOUT choose-fn body (MVP M1/M2 + M9 + M10)
 ; Contract: (lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) …)
-;   → "" | "lfu" | "lru" | "ttl_aware" | "noop" | "lfu|flat|pin" | "ttl_aware|flat" | …
+;   → "" | "lfu" | "lru" | "ttl_aware" | "slru" | "tinylfu" | "noop" | "lfu|flat|pin" | "slru|flat|pin" | …
 ; Signals (M9 TTL):
 ;   dexpired  — delta INFO expired (lazy expire activity)
 ;   avg_ttl   — INFO avg_ttl_ms (remaining TTL proxy among keys with expire)

@@ -313,6 +313,110 @@ static const ArEvictOps kEvictTtlAware = {
     .name = "ttl_aware",
 };
 
+/* --- SLRU / approx TinyLFU (A12) ---
+ * Sample-based segmented LRU (not full paper W-TinyLFU / Count-Min sketch):
+ *   lfu_freq == 0  → probationary (new / cold-flood admissions)
+ *   lfu_freq >= 1  → protected (promoted on GET hit)
+ * Evict prefers oldest probationary victim; falls back to protected LRU.
+ * `tinylfu` is an alias of the same kernel — documents the admission-ish
+ * effect (cold keys stay probationary until they earn a hit) without a CMS. */
+static void sample_pick_slru(ArCore* db, ArEntry** best, size_t* best_b,
+                             int* best_tier, uint64_t* best_t, int* best_prot,
+                             int* samples) {
+  int max_samples = db->evict_samples > 0 ? db->evict_samples : 16;
+  for (int attempt = 0; attempt < 128 && *samples < max_samples; ++attempt) {
+    int use_cold = (db->layout == AR_LAYOUT_HOT_COLD && db->cold_buckets &&
+                    db->cold_nkeys > 0 && (attempt & 1));
+    ArEntry** table = use_cold ? db->cold_buckets : db->buckets;
+    size_t nb = use_cold ? db->cold_nbuckets : db->nbuckets;
+    if (!table || nb == 0)
+      continue;
+    size_t i = (size_t)(rand() % (int)nb);
+    for (ArEntry* e = table[i]; e && *samples < max_samples; ) {
+      ArEntry* next = e->next;
+      if (e->expire_at && ar_now_ms() >= e->expire_at) {
+        ar_entry_free_ex(db, i, use_cold ? 1 : 0, e);
+        db->expired++;
+        e = next;
+        continue;
+      }
+      if (e->pinned) {
+        e = next;
+        continue;
+      }
+      (*samples)++;
+      int prot = (e->lfu_freq >= 1) ? 1 : 0;
+      /* Prefer probationary; within same segment prefer oldest last_access. */
+      if (prot < *best_prot ||
+          (prot == *best_prot && e->last_access < *best_t)) {
+        *best_prot = prot;
+        *best_t = e->last_access;
+        *best = e;
+        *best_b = i;
+        *best_tier = use_cold ? 1 : 0;
+      }
+      e = next;
+    }
+  }
+}
+
+static void evict_slru_on_get(ArCore* db, void* entry) {
+  ArEntry* e = (ArEntry*)entry;
+  e->last_access = ++db->clock;
+  /* Promote probationary → protected on hit (TinyLFU-ish "earn retention"). */
+  if (e->lfu_freq == 0)
+    e->lfu_freq = 1;
+  else if (e->lfu_freq < 255)
+    e->lfu_freq++;
+}
+
+static void evict_slru_on_set(ArCore* db, void* entry) {
+  ArEntry* e = (ArEntry*)entry;
+  e->last_access = ++db->clock;
+  /* New / rewritten keys start probationary (cold-flood friendly). */
+  e->lfu_freq = 0;
+}
+
+static int evict_slru_should(ArCore* db) {
+  return db->maxmemory > 0 && db->used_memory > db->maxmemory;
+}
+
+static int evict_slru_one(ArCore* db) {
+  ArEntry* best = NULL;
+  size_t best_b = 0;
+  int best_tier = 0;
+  uint64_t best_t = UINT64_MAX;
+  int best_prot = 2; /* 0=probation preferred, 1=protected */
+  int samples = 0;
+  if (db->nkeys == 0)
+    return 0;
+  sample_pick_slru(db, &best, &best_b, &best_tier, &best_t, &best_prot,
+                   &samples);
+  if (!best)
+    return 0;
+  ar_entry_free_ex(db, best_b, best_tier, best);
+  db->evicted++;
+  return 1;
+}
+
+static const ArEvictOps kEvictSlru = {
+    .on_get = evict_slru_on_get,
+    .on_set = evict_slru_on_set,
+    .should_evict = evict_slru_should,
+    .evict_one = evict_slru_one,
+    .name = "slru",
+};
+
+/* tinylfu shares SLRU ops but reports name "tinylfu" for EVICT/INFO. */
+static const ArEvictOps kEvictTinylfu = {
+    .on_get = evict_slru_on_get,
+    .on_set = evict_slru_on_set,
+    .should_evict = evict_slru_should,
+    .evict_one = evict_slru_one,
+    .name = "tinylfu",
+};
+
+
 
 static size_t hash_bin(const char* s, size_t n) {
   size_t h = 1469598103934665603ull;
@@ -975,17 +1079,33 @@ char* ar_get_bin(ArCore* core, const char* key, size_t klen, size_t* out_len) {
   ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
   if (!e) {
     core->misses++;
+    /* A10: sample miss under live champ (best-effort shadow traffic) */
+    if (core->shadow_sample_pct > 0 &&
+        (rand() % 100) < core->shadow_sample_pct) {
+      core->shadow_samples++;
+      core->shadow_misses++;
+    }
     if (out_len)
       *out_len = 0;
     return NULL;
   }
   if (e->type != AR_TYPE_STRING) {
     core->misses++;
+    if (core->shadow_sample_pct > 0 &&
+        (rand() % 100) < core->shadow_sample_pct) {
+      core->shadow_samples++;
+      core->shadow_misses++;
+    }
     if (out_len)
       *out_len = 0;
     return NULL;
   }
   core->hits++;
+  if (core->shadow_sample_pct > 0 &&
+      (rand() % 100) < core->shadow_sample_pct) {
+    core->shadow_samples++;
+    core->shadow_hits++;
+  }
   ar_touch_get(core, e, b, tier);
   if (core->evict && core->evict->on_get)
     core->evict->on_get(core, e);
@@ -1160,6 +1280,11 @@ int ar_core_set_evict_by_name(ArCore* core, const char* name) {
     ops = &kEvictLfu;
   else if (strcmp(name, "ttl_aware") == 0 || strcmp(name, "ttl") == 0)
     ops = &kEvictTtlAware;
+  else if (strcmp(name, "slru") == 0)
+    ops = &kEvictSlru;
+  else if (strcmp(name, "tinylfu") == 0 || strcmp(name, "w_tinylfu") == 0 ||
+           strcmp(name, "tiny_lfu") == 0)
+    ops = &kEvictTinylfu;
   else
     return 0;
   if (core->evict_plugin) {
@@ -1295,6 +1420,69 @@ int ar_core_has_evict_plugin(ArCore* core) {
 }
 
 /* --- MVP M4: samples + pin set --- */
+
+
+/* --- A10 shadow / A/B sample --- */
+int ar_core_set_shadow_policy(ArCore* core, const char* name) {
+  if (!core)
+    return 0;
+  if (!name || !name[0]) {
+    core->shadow_policy[0] = '\0';
+    return 1;
+  }
+  size_t n = strlen(name);
+  if (n >= sizeof(core->shadow_policy))
+    return 0;
+  memcpy(core->shadow_policy, name, n + 1);
+  return 1;
+}
+
+const char* ar_core_shadow_policy(ArCore* core) {
+  if (!core || !core->shadow_policy[0])
+    return "";
+  return core->shadow_policy;
+}
+
+int ar_core_set_shadow_sample_pct(ArCore* core, int pct) {
+  if (!core)
+    return 0;
+  if (pct < 0)
+    pct = 0;
+  if (pct > 100)
+    pct = 100;
+  core->shadow_sample_pct = pct;
+  return 1;
+}
+
+int ar_core_shadow_sample_pct(ArCore* core) {
+  return core ? core->shadow_sample_pct : 0;
+}
+
+void ar_core_shadow_reset(ArCore* core) {
+  if (!core)
+    return;
+  core->shadow_samples = 0;
+  core->shadow_hits = 0;
+  core->shadow_misses = 0;
+  core->shadow_diverges = 0;
+}
+
+uint64_t ar_core_shadow_samples(ArCore* core) {
+  return core ? core->shadow_samples : 0;
+}
+uint64_t ar_core_shadow_hits(ArCore* core) {
+  return core ? core->shadow_hits : 0;
+}
+uint64_t ar_core_shadow_misses(ArCore* core) {
+  return core ? core->shadow_misses : 0;
+}
+uint64_t ar_core_shadow_diverges(ArCore* core) {
+  return core ? core->shadow_diverges : 0;
+}
+void ar_core_shadow_note_diverge(ArCore* core) {
+  if (core)
+    core->shadow_diverges++;
+}
 
 int ar_core_set_evict_samples(ArCore* core, int n) {
   if (!core)
