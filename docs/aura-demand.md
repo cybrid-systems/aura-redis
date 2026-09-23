@@ -3,7 +3,9 @@
 **Status:** authoritative (Aura differentiation track)  
 **Tip baseline:** ~`c1e7abb` (main)  
 **Scope:** What a Redis-*compatible* cache uniquely needs from **Aura** — not generic Redis feature parity.  
-**Companions:** [`aura-native-control.md`](aura-native-control.md) · [`mutation-gains.md`](mutation-gains.md) · [`runtime-mutation-explore.md`](runtime-mutation-explore.md) · [`high-roi-iterations.md`](high-roi-iterations.md) · [`mvp-plan.md`](mvp-plan.md) · [`architecture.md`](architecture.md) · [`workloads.md`](workloads.md) · [`production-plan.md`](production-plan.md) · [`perf-eval.md`](perf-eval.md)
+**Companions:** [`aura-redis-match.md`](aura-redis-match.md) · [`aura-native-control.md`](aura-native-control.md) · [`mutation-gains.md`](mutation-gains.md) · [`runtime-mutation-explore.md`](runtime-mutation-explore.md) · [`high-roi-iterations.md`](high-roi-iterations.md) · [`mvp-plan.md`](mvp-plan.md) · [`architecture.md`](architecture.md) · [`workloads.md`](workloads.md) · [`production-plan.md`](production-plan.md) · [`perf-eval.md`](perf-eval.md)
+
+**See also matching matrix:** [`aura-redis-match.md`](aura-redis-match.md) — comprehensive Aura capability catalog ↔ Redis production pain matrix (STRONG/MEDIUM/WEAK/NONE + anti-matches). Broader than this demand-mining doc; use it when judging fit honesty.
 
 **Invariant:** Redis-specific work stays in **this** repo. Aura compiler/runtime opts must stay **generic** (language-wide). Do not propose Redis-shaped Aura core patches unless framed as generic primitives Redis happens to use. `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos — `PLUGIN` / `.so` is escape hatch, not moat.
 
@@ -165,6 +167,8 @@ Priorities here are **P0–P2 for Aura differentiation**, independent of Redis c
 | **A12** | Named kernel `slru` or approx TinyLFU (C) — Aura select only | 2–3d | zipf regret ≤ LFU | explore | |
 | **A13** | Signal-weight evolve (not only min-ops) | 1–2d | `mutation_gain` under weight evolve ≥ threshold path | A1–A2 | |
 | **A14** | Controller overhead dashboard (applies/sec, swap rate vs hitΔ) | 0.5–1d | Heartbeat fields + bench summary | A3 | |
+| **A15** | **Swarm/FSS/PSO evolve backend** — replace/augment hand threshold walk with `std/swarm` | 2–3d | `evolve_gain` ≥ +8pp + swarm gen logs | A2 | |
+| **A16** | Agent-side fiber parallel trial fitness (canary/shadow score without C hook) | 1–2d | Dual-body score in logs; no apply of loser | A4, A10 | |
 
 **Top 3 start next:** **A1**, **A2**, **A3**.
 
@@ -203,4 +207,5 @@ Wire-in:
 
 | Date (CST) | Notes |
 |------------|-------|
+| 2026-09-23 | Link [`aura-redis-match.md`](aura-redis-match.md); add **A15** swarm/FSS evolve backend, **A16** fiber trial fitness from matching pass. |
 | 2026-09-23 | Initial authoritative demand map from deep read of control / mutation / MVP / arch / workloads / prod / perf + `policy_agent.aura` / `policy/*.aura` / regret benches. |

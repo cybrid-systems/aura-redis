@@ -46,7 +46,7 @@ That combination is the product story—not “another C Redis with an Aura logo
 ---
 
 
-**Aura differentiation (post production P0–P3):** Redis-compatible data plane is table stakes; the moat is sandbox + mutate + hot-strategy policy (`policy_agent.aura`). Demand map and backlog: [`aura-demand.md`](aura-demand.md).
+**Aura differentiation (post production P0–P3):** Redis-compatible data plane is table stakes; the moat is sandbox + mutate + hot-strategy policy (`policy_agent.aura`). Demand map and backlog: [`aura-demand.md`](aura-demand.md). Capability ↔ Redis production-pain matching: [`aura-redis-match.md`](aura-redis-match.md).
 
 ## 2. Design principles
 
