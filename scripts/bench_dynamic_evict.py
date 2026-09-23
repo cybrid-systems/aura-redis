@@ -51,6 +51,11 @@ Workloads
     RESP POLICY a: session / b: zipf → Aura pins both prefixes; global one-policy
     (no POLICY) loses at least one set's useful GETs.
 
+12. prefix_mix_v2 (A5) — conflicting optima: a: wants lfu+pin, b: wants ttl_aware
+    (nopin). Short-TTL high-freq noise + cold flood. Global adaptive picks one
+    kernel and loses the victim tenant; adaptive_prefix deep bags compose
+    ttl_aware + PIN only a: → ≥ +20pp on worse tenant.
+
 Policies: lru | lfu | ttl_aware | adaptive (=adaptive_soft) | adaptive_soft |
           adaptive_nosoft | adaptive_frozen | adaptive_mutate |
           poison_frozen | poison_mutate | adaptive_evolve | adaptive_evolve_frozen
@@ -1384,6 +1389,78 @@ def workload_prefix_mix(s: socket.socket, mode: str) -> List[PhaseResult]:
     ]
 
 
+def workload_prefix_mix_v2(s: socket.socket, mode: str) -> List[PhaseResult]:
+    """A5: conflicting optima — a: lfu+pin vs b: ttl_aware.
+
+    Same noisy-neighbor skeleton as prefix_mix, but POLICY profiles conflict:
+    a:=lfu (PIN+LFU bag) vs b:=ttl_aware (PIN+ttl_aware bag). Deep compose picks
+    ttl_aware|flat|pin and PINs both tenant prefixes. Global adaptive without
+    POLICY pins hot/z only → victim tenant collapses (≥ +20pp worse-tenant).
+    """
+    na, nb = 28, 28
+    nsess = 80
+    ncold = 500
+    val = "V" * 170
+
+    use_policy = is_adaptive(mode) and "prefix" in mode
+    if use_policy:
+        try:
+            redis_call(s, "POLICY", "a:", "lfu")
+            redis_call(s, "POLICY", "b:", "ttl_aware")
+            time.sleep(0.25)
+        except Exception as e:
+            print(f"  note: POLICY v2 failed: {e}")
+
+    for i in range(na):
+        redis_call(s, "SET", f"a:{i:04d}", val)
+    for i in range(na):
+        redis_call(s, "GET", f"a:{i:04d}")
+
+    for i in range(nb):
+        redis_call(s, "SET", f"b:{i:04d}", val)
+    for _ in range(8):
+        for i in range(nb):
+            redis_call(s, "GET", f"b:{i:04d}")
+
+    for i in range(nsess):
+        redis_call(s, "SET", f"sess{i:04d}", val, "EX", "8")
+    for _ in range(25):
+        for i in range(nsess):
+            redis_call(s, "GET", f"sess{i:04d}")
+
+    if is_adaptive(mode):
+        for k in range(40):
+            redis_call(s, "SET", f"__pw{k}", "w" * 40)
+            redis_call(s, "GET", f"__pm{k}")
+        time.sleep(0.65)
+        for i in range(na):
+            redis_call(s, "SET", f"a:{i:04d}", val)
+        for i in range(nb):
+            redis_call(s, "SET", f"b:{i:04d}", val)
+        time.sleep(0.35)
+
+    for i in range(ncold):
+        redis_call(s, "SET", f"cold{i:05d}", val)
+
+    hits_a = miss_a = hits_b = miss_b = 0
+    for i in range(na):
+        if redis_call(s, "GET", f"a:{i:04d}") is None:
+            miss_a += 1
+        else:
+            hits_a += 1
+    for i in range(nb):
+        if redis_call(s, "GET", f"b:{i:04d}") is None:
+            miss_b += 1
+        else:
+            hits_b += 1
+    info = parse_info(redis_call(s, "INFO"))
+    return [
+        PhaseResult("prefix_a", hits_a, miss_a, info_int(info, "evicted"), hits_a),
+        PhaseResult("prefix_b", hits_b, miss_b, info_int(info, "evicted"), hits_b),
+    ]
+
+
+
 # ── orchestration ─────────────────────────────────────────────────────
 
 
@@ -1463,7 +1540,7 @@ def run_one(
                 seed_profile = "nosoft"
             elif policy in ("adaptive", "adaptive_soft"):
                 seed_profile = "normal"
-        if workload == "prefix_mix":
+        if workload in ("prefix_mix", "prefix_mix_v2"):
             fitness_mutate = False
             evolve = False
             seed_profile = "normal"
@@ -1533,6 +1610,8 @@ def run_one(
                 phases = workload_evolve_gain(s, mode)
             elif workload == "prefix_mix":
                 phases = workload_prefix_mix(s, mode)
+            elif workload == "prefix_mix_v2":
+                phases = workload_prefix_mix_v2(s, mode)
             elif workload in ("mutation_gain", "poison_heal"):
                 # mutation_gain = diurnal under mutate-vs-frozen attribution
                 # poison_heal = hot_protect-shaped under inverted seed
@@ -1809,45 +1888,63 @@ def print_soft_goal_table(results: List[RunResult]) -> None:
 
 
 def print_prefix_table(results: List[RunResult]) -> None:
-    """M12: per-prefix POLICY vs global on prefix_mix."""
-    print()
-    print("=" * 78)
-    print("PREFIX POLICY (M12) — a: session + b: zipf noisy neighbor")
-    print("=" * 78)
+    """M12/A5: per-prefix POLICY vs global on prefix_mix / prefix_mix_v2."""
     by_wl: Dict[str, Dict[str, RunResult]] = {}
     for r in results:
         by_wl.setdefault(r.workload, {})[r.policy] = r
-    m = by_wl.get("prefix_mix")
-    if not m:
-        print("  (no prefix_mix runs)")
+    for wl, title in (
+        ("prefix_mix", "PREFIX POLICY (M12) — a: session + b: zipf noisy neighbor"),
+        ("prefix_mix_v2", "PREFIX POLICY v2 (A5) — a: lfu+pin vs b: ttl_aware conflict"),
+    ):
+        print()
         print("=" * 78)
-        return
-    print(f"  {'policy':<18} {'hit%':>7} {'useful':>7}  a_hit  b_hit  notes")
-    print("  " + "-" * 66)
-    for pol in ("lru", "lfu", "ttl_aware", "adaptive", "adaptive_prefix"):
-        r = m.get(pol)
-        if not r:
+        print(title)
+        print("=" * 78)
+        m = by_wl.get(wl)
+        if not m:
+            print(f"  (no {wl} runs)")
+            print("=" * 78)
             continue
-        pa = next((p for p in r.phases if p.name == "prefix_a"), None)
-        pb = next((p for p in r.phases if p.name == "prefix_b"), None)
-        pref = [s for s in r.swaps if "prefix-policy" in s or "PIN prefix" in s]
-        print(
-            f"  {pol:<18} {100*r.overall_hit_rate:6.1f}% {r.total_useful:>7}  "
-            f"{100*(pa.hit_rate if pa else 0):5.1f}% "
-            f"{100*(pb.hit_rate if pb else 0):5.1f}%  "
-            f"pref_logs={len(pref)}"
-        )
-        for ln in pref[:3]:
-            print(f"      · {ln}")
-    glo = m.get("adaptive")
-    pref = m.get("adaptive_prefix")
-    if glo and pref:
-        print(
-            f"  → prefix vs global: Δ="
-            f"{100*(pref.overall_hit_rate-glo.overall_hit_rate):+.1f}pp "
-            f"useful {pref.total_useful} vs {glo.total_useful}"
-        )
-    print("=" * 78)
+        print(f"  {'policy':<18} {'hit%':>7} {'useful':>7}  a_hit  b_hit  notes")
+        print("  " + "-" * 66)
+        for pol in ("lru", "lfu", "ttl_aware", "adaptive", "adaptive_prefix"):
+            r = m.get(pol)
+            if not r:
+                continue
+            pa = next((p for p in r.phases if p.name == "prefix_a"), None)
+            pb = next((p for p in r.phases if p.name == "prefix_b"), None)
+            pref = [s for s in r.swaps if "prefix-policy" in s or "PIN prefix" in s]
+            print(
+                f"  {pol:<18} {100*r.overall_hit_rate:6.1f}% {r.total_useful:>7}  "
+                f"{100*(pa.hit_rate if pa else 0):5.1f}% "
+                f"{100*(pb.hit_rate if pb else 0):5.1f}%  "
+                f"pref_logs={len(pref)}"
+            )
+            for ln in pref[:3]:
+                print(f"      · {ln}")
+        glo = m.get("adaptive")
+        pref = m.get("adaptive_prefix")
+        if glo and pref:
+            pa_g = next((p for p in glo.phases if p.name == "prefix_a"), None)
+            pb_g = next((p for p in glo.phases if p.name == "prefix_b"), None)
+            pa_p = next((p for p in pref.phases if p.name == "prefix_a"), None)
+            pb_p = next((p for p in pref.phases if p.name == "prefix_b"), None)
+            worse_g = min(
+                (pa_g.hit_rate if pa_g else 0.0),
+                (pb_g.hit_rate if pb_g else 0.0),
+            )
+            worse_p = min(
+                (pa_p.hit_rate if pa_p else 0.0),
+                (pb_p.hit_rate if pb_p else 0.0),
+            )
+            print(
+                f"  → prefix vs global: Δ="
+                f"{100*(pref.overall_hit_rate-glo.overall_hit_rate):+.1f}pp "
+                f"useful {pref.total_useful} vs {glo.total_useful}; "
+                f"worse-tenant Δ={100*(worse_p-worse_g):+.1f}pp "
+                f"({100*worse_p:.1f}% vs {100*worse_g:.1f}%)"
+            )
+        print("=" * 78)
 
 
 def print_evolve_table(results: List[RunResult]) -> None:
@@ -1971,6 +2068,44 @@ def assert_success(results: List[RunResult]) -> None:
                 f"prefix_mix: prefix useful={pref.total_useful} "
                 f"(a={pa.useful_gets},b={pb.useful_gets}) vs "
                 f"global={glo.total_useful}; logs={len(plogs)}"
+            )
+
+    if "prefix_mix_v2" in by_wl_mut:
+        mm = by_wl_mut["prefix_mix_v2"]
+        pref = mm.get("adaptive_prefix")
+        glo = mm.get("adaptive")
+        if pref and glo:
+            pa_g = next((p for p in glo.phases if p.name == "prefix_a"), None)
+            pb_g = next((p for p in glo.phases if p.name == "prefix_b"), None)
+            pa_p = next((p for p in pref.phases if p.name == "prefix_a"), None)
+            pb_p = next((p for p in pref.phases if p.name == "prefix_b"), None)
+            if not pa_p or not pb_p:
+                raise SystemExit("FAIL: prefix_mix_v2 missing prefix phases")
+            worse_g = min(
+                (pa_g.hit_rate if pa_g else 0.0),
+                (pb_g.hit_rate if pb_g else 0.0),
+            )
+            worse_p = min(pa_p.hit_rate, pb_p.hit_rate)
+            delta = worse_p - worse_g
+            if delta + 1e-9 < 0.20:
+                raise SystemExit(
+                    f"FAIL: prefix_mix_v2 worse-tenant must gain ≥ +20pp vs global; "
+                    f"prefix_worse={100*worse_p:.1f}% global_worse={100*worse_g:.1f}% "
+                    f"(Δ={100*delta:+.1f}pp); "
+                    f"a={100*pa_p.hit_rate:.1f}/{100*(pa_g.hit_rate if pa_g else 0):.1f} "
+                    f"b={100*pb_p.hit_rate:.1f}/{100*(pb_g.hit_rate if pb_g else 0):.1f}"
+                )
+            plogs = [s for s in pref.swaps
+                     if "prefix-policy" in s or "prefix-policy-deep" in s]
+            if not plogs:
+                raise SystemExit(
+                    f"FAIL: prefix_mix_v2 expected prefix-policy[-deep] log; "
+                    f"swaps={pref.swaps[:6]}"
+                )
+            print(
+                f"prefix_mix_v2: worse-tenant prefix={100*worse_p:.1f}% vs "
+                f"global={100*worse_g:.1f}% (Δ={100*delta:+.1f}pp); "
+                f"a={pa_p.useful_gets} b={pb_p.useful_gets}; logs={len(plogs)}"
             )
 
     if "evolve_gain" in by_wl_mut:
@@ -2196,7 +2331,7 @@ def main() -> int:
         print_soft_goal_table(results)
     if any(r.workload == 'evolve_gain' for r in results):
         print_evolve_table(results)
-    if any(r.workload == 'prefix_mix' for r in results):
+    if any(r.workload in ('prefix_mix', 'prefix_mix_v2') for r in results):
         print_prefix_table(results)
     if not args.skip_assert:
         assert_success(results)

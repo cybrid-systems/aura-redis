@@ -31,7 +31,7 @@ Redis-compatible cache (RESP, maxmemory kernels, string/typed KV) is **table sta
 | **Fitness-driven choose / profile swap** | Miss spike / EWMA drop → `conservative→aggressive` etc. | **SHIPPED** (stretch flaky) | [`mutation-gains.md`](mutation-gains.md) historical +14.8pp; **recent [`perf-eval.md`](perf-eval.md) `mutation_gain` Δ=0** → open demand |
 | **Threshold mutate (body-string rebuild)** | Lower `min-ops` / `miss-pin` via `swap!` of rebuilt lambda | **SHIPPED** | M7 `fitness-threshold-mutate min-ops=40→28` logs |
 | **Evolve loop (multi-gen keep/revert)** | Bad seed thresholds → propose/trial/keep or revert | **SHIPPED** (stretch flaky) | M11; historical evolve Δ=+32.9pp; **recent `evolve_gain` Δ=0** → open demand |
-| **Per-prefix `POLICY`** | Multi-tenant hint → pin/override choose | **PARTIAL** | M12 `prefix_mix` +73pp; hints only — not isolated choose-fn / budgets |
+| **Per-prefix `POLICY`** | Multi-tenant hint → pin/override choose | **SHIPPED** (A5) | M12 + A5 `prefix_mix_v2` +96.4pp worse-tenant; per-prefix bags + deep compose |
 | **Layout migrate (`flat` ↔ `hot_cold`)** | Joint EVICT+LAYOUT from choose string | **SHIPPED** | Agent owns layout; C `LAYOUT`; leave `AURA_REDIS_LAYOUT_ADAPTIVE` **off** when agent runs |
 | **PIN / protect** | Skip hot keys under flood | **SHIPPED** | `PIN` / `UNPIN`; auto-pin on `\|pin`; `EVICT samples` bump |
 | **TTL-aware kernel + signals** | Expire-soon-first under TTL waves | **SHIPPED** | C `ttl_aware`; INFO `keys_with_ttl` / `avg_ttl_ms` / `expired`; `ttl_wave` ~100% |
@@ -161,7 +161,7 @@ Priorities here are **P0–P2 for Aura differentiation**, independent of Redis c
 | **A2** | **Close `evolve_gain` Δ>0** — window/gen tuning; keep≥1 gen; assert evolve logs | 1–2d | `python3 scripts/bench_regret.py evolve_gain` ≥ +8pp + ≥2 evolve gens | — | **DONE** (+57.1pp) |
 | **A3** | **Mutation audit + explain schema** — ring of {ts, op, from, to, reason, version}; INFO or heartbeat | 1–2d | New `tests/test_policy_audit.py`; explain reasons on `phase_marathon` | — | **DONE** |
 | **A4** | Canary choose-fn — trial body N ticks; auto `heal!` if fitness drops | 2–3d | `tests/test_policy_canary.py` | A3 | **DONE** |
-| **A5** | Deep prefix isolation — per-prefix choose body or param bag via multi `register!` | 2–3d | Conflicting-optima `prefix_mix_v2` ≥ +20pp on victim tenant | M12 | |
+| **A5** | Deep prefix isolation — per-prefix choose body or param bag via multi `register!` | 2–3d | Conflicting-optima `prefix_mix_v2` ≥ +20pp on victim tenant | M12 |  **DONE** +96.4pp |
 | **A6** | Policy version pin across replica promote | 1–2d | Extend `tests/test_prod_policy_ha.py` + replica | P2.14, P1.9 | |
 | **A7** | Typed pressure signals in INFO + choose | 2–3d | `typed_pressure` harness PASS | P3.16 | |
 | **A8** | Auto-freeze meta-policy (cost gate) | 1–2d | Stable-load INFO rate ↓ ≥5×; hit% within 2pp | A1 | |

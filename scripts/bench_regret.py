@@ -12,6 +12,7 @@ Pass --python-ctl for the host-only Python mirror of choose_*.aura.
   python3 scripts/bench_regret.py flash_churn
   python3 scripts/bench_regret.py evolve_gain
   python3 scripts/bench_regret.py prefix_mix
+  python3 scripts/bench_regret.py prefix_mix_v2
 """
 from __future__ import annotations
 
@@ -42,6 +43,8 @@ def main() -> int:
         policies = "lru,lfu,adaptive_evolve_frozen,adaptive_evolve"
     elif workloads == "prefix_mix":
         policies = "lru,lfu,adaptive,adaptive_prefix"
+    elif workloads == "prefix_mix_v2":
+        policies = "lru,lfu,ttl_aware,adaptive,adaptive_prefix"
     elif workloads == "poison_heal":
         policies = "lru,lfu,poison_frozen,poison_mutate"
     elif "mutation_gain" in workloads or "diurnal_shift" in workloads:

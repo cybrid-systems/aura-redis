@@ -108,6 +108,7 @@ One server lifetime: `zipf_hotkey` → bridge/UNPIN → `ws_shift` → bridge �
 | `ttl_wave` | adaptive / ttl_aware **100%** vs lru **0%** / lfu **31.2%** | PASS |
 | `flash_churn` | adaptive_soft / nosoft **100%** / 400 useful vs lfu **5%** / lru **0%** | PASS |
 | `prefix_mix` | adaptive_prefix **100%** vs global adaptive **28.6%** / lru **1.8%** (Δ=+71.4pp) | PASS |
+| `prefix_mix_v2` (A5) | adaptive_prefix worse-tenant **100%** vs global **3.6%** (Δ=**+96.4pp**) | PASS |
 | `mutation_gain` | mutate **100%** vs frozen **72.1%** (Δ=**+27.9pp**); LFU **100%**; fitness-swap + inline EVICT/PIN | **PASS** (A1 restore) |
 | `evolve_gain` | evolve **61.4%** vs frozen **4.3%** (Δ=**+57.1pp**); ≥2 gens; LFU **100%** | **PASS** (A2 restore) |
 

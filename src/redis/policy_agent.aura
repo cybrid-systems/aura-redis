@@ -134,14 +134,18 @@
 (define *evolve-keeps* 0)
 (define *evolve-reverts* 0)
 (define *evolve-logs* 0)
-; M12 - per-prefix policy hints from INFO policy_hints
+; M12/A5 - per-prefix policy hints + param bags from INFO policy_hints
 (define *policy-hints* "")
 (define *prefix-policy-on* #f)
+(define *prefix-deep* #f) ; A5: conflicting lfu+pin vs ttl_aware (nopin)
 (define *pfx0* "")
 (define *pfx1* "")
 (define *prof0* "")
 (define *prof1* "")
+(define *bag0* "") ; per-prefix choose/param bag (e.g. lfu|flat|pin)
+(define *bag1* "")
 (define *prefix-applies* 0)
+(define *prefix-bag-version* 0)
 
 (define *prev-gets* 0)
 (define *prev-sets* 0)
@@ -385,55 +389,131 @@
     (while (< (- (monotonic-ms) t0) ms) 0)
     #t))
 
-;; M12: parse "a:=session;b:=zipf" (prefix=profile) from INFO
+;; M12/A5: parse "a:=session;b:=zipf" or "a:=lfu;b:=ttl_aware" from INFO
+;; Profile → param bag (per-prefix namespace):
+;;   lfu|zipf|hot → lfu|flat|pin (PIN tenant prefix)
+;;   ttl_aware|ttl|session → ttl_aware|flat|pin (tenant durable still PIN'd;
+;;     kernel prefers ttl_aware — conflict vs lfu resolved by compose)
+;;   ttl_nopin → ttl_aware|flat (noise/session flood prefix — do NOT pin)
+(define (prof-is-lfu-family? pr)
+  (or (>= (find-substr pr "lfu" 0) 0)
+      (>= (find-substr pr "zipf" 0) 0)
+      (>= (find-substr pr "hot" 0) 0)))
+
+(define (prof-is-ttl-nopin? pr)
+  ; only explicit ttl_nopin skips PIN (session *noise* prefix)
+  (>= (find-substr pr "ttl_nopin" 0) 0))
+
+(define (prof-is-session? pr)
+  (>= (find-substr pr "session" 0) 0))
+
+(define (prof-wants-ttl-kernel? pr)
+  (or (prof-is-session? pr)
+      (prof-is-ttl-nopin? pr)
+      (>= (find-substr pr "ttl" 0) 0)))
+
+(define (bag-for-profile pr)
+  (cond
+    ((prof-is-ttl-nopin? pr) "ttl_aware|flat")
+    ((or (prof-is-session? pr)
+         (>= (find-substr pr "ttl_aware" 0) 0)
+         (string=? pr "ttl"))
+     "ttl_aware|flat|pin")
+    ((prof-is-lfu-family? pr) "lfu|flat|pin")
+    ((and (string? pr) (> (string-length pr) 0))
+     (string-append pr "|flat|pin"))
+    (else "")))
+
+(define (bag-wants-pin? bag)
+  (>= (find-substr bag "pin" 0) 0))
+
+(define (refresh-prefix-bags!)
+  (let ((b0 (bag-for-profile *prof0*))
+        (b1 (bag-for-profile *prof1*)))
+    (if (or (not (string=? b0 *bag0*)) (not (string=? b1 *bag1*)))
+      (begin
+        (set! *bag0* b0)
+        (set! *bag1* b1)
+        (if *prefix-policy-on*
+          (set! *prefix-bag-version* (+ *prefix-bag-version* 1))
+          #t))
+      (begin
+        (set! *bag0* b0)
+        (set! *bag1* b1)))
+    ; Deep isolation: conflicting bags — lfu+pin tenant vs ttl_aware tenant
+    (set! *prefix-deep*
+      (and *prefix-policy-on*
+           (or (prof-is-lfu-family? *prof0*) (prof-is-lfu-family? *prof1*))
+           (or (prof-wants-ttl-kernel? *prof0*) (prof-wants-ttl-kernel? *prof1*))))
+    *prefix-deep*))
+
 (define (parse-policy-hints! hints)
   (set! *policy-hints* (if (string? hints) hints ""))
-  (set! *pfx0* "")
-  (set! *pfx1* "")
-  (set! *prof0* "")
-  (set! *prof1* "")
-  (set! *prefix-policy-on* #f)
-  (if (or (not (string? hints)) (= (string-length hints) 0))
-    #f
-    (let ((slot 0)
-          (start 0)
-          (n (string-length hints))
-          (i 0))
-      (while (<= i n)
-        (if (or (= i n)
-                (and (< i n) (string=? (substring hints i (+ i 1)) ";")))
-          (begin
-            (if (> i start)
-              (let ((piece (substring hints start i)))
-                (let ((peq (find-substr piece "=" 0)))
-                  (if (>= peq 0)
-                    (let ((px (substring piece 0 peq))
-                          (pr (substring piece (+ peq 1) (string-length piece))))
-                      (if (= slot 0)
-                        (begin (set! *pfx0* px) (set! *prof0* pr))
-                        (if (= slot 1)
-                          (begin (set! *pfx1* px) (set! *prof1* pr))
-                          #t))
-                      (set! slot (+ slot 1))
-                      (set! *prefix-policy-on* #t))
-                    #t)))
-              #t)
-            (set! start (+ i 1))
-            (set! i (+ i 1)))
-          (set! i (+ i 1))))
-      *prefix-policy-on*)))
+  (let ((old0 *pfx0*) (old1 *pfx1*) (op0 *prof0*) (op1 *prof1*))
+    (set! *pfx0* "")
+    (set! *pfx1* "")
+    (set! *prof0* "")
+    (set! *prof1* "")
+    (set! *prefix-policy-on* #f)
+    (set! *prefix-deep* #f)
+    (if (or (not (string? hints)) (= (string-length hints) 0))
+      (begin
+        (set! *bag0* "")
+        (set! *bag1* "")
+        #f)
+      (let ((slot 0)
+            (start 0)
+            (n (string-length hints))
+            (i 0))
+        (while (<= i n)
+          (if (or (= i n)
+                  (and (< i n) (string=? (substring hints i (+ i 1)) ";")))
+            (begin
+              (if (> i start)
+                (let ((piece (substring hints start i)))
+                  (let ((peq (find-substr piece "=" 0)))
+                    (if (>= peq 0)
+                      (let ((px (substring piece 0 peq))
+                            (pr (substring piece (+ peq 1) (string-length piece))))
+                        (if (= slot 0)
+                          (begin (set! *pfx0* px) (set! *prof0* pr))
+                          (if (= slot 1)
+                            (begin (set! *pfx1* px) (set! *prof1* pr))
+                            #t))
+                        (set! slot (+ slot 1))
+                        (set! *prefix-policy-on* #t))
+                      #t)))
+                #t)
+              (set! start (+ i 1))
+              (set! i (+ i 1)))
+            (set! i (+ i 1))))
+        (refresh-prefix-bags!)
+        *prefix-policy-on*))))
 
 (define (prefix-has-session?)
-  (or (>= (find-substr *prof0* "session" 0) 0)
-      (>= (find-substr *prof0* "ttl" 0) 0)
-      (>= (find-substr *prof1* "session" 0) 0)
-      (>= (find-substr *prof1* "ttl" 0) 0)))
+  (or (prof-is-session? *prof0*)
+      (prof-is-session? *prof1*)
+      (prof-wants-ttl-kernel? *prof0*)
+      (prof-wants-ttl-kernel? *prof1*)))
 
 (define (prefix-has-zipf?)
-  (or (>= (find-substr *prof0* "zipf" 0) 0)
-      (>= (find-substr *prof0* "hot" 0) 0)
-      (>= (find-substr *prof1* "zipf" 0) 0)
-      (>= (find-substr *prof1* "hot" 0) 0)))
+  (or (prof-is-lfu-family? *prof0*)
+      (prof-is-lfu-family? *prof1*)))
+
+; A5: compose global EVICT|LAYOUT|pin from per-prefix bags (C kernel still one)
+(define (compose-prefix-choice)
+  (let ((want-ttl (or (prof-wants-ttl-kernel? *prof0*)
+                      (prof-wants-ttl-kernel? *prof1*)))
+        (want-lfu (or (prof-is-lfu-family? *prof0*)
+                      (prof-is-lfu-family? *prof1*)))
+        (want-pin (or (bag-wants-pin? *bag0*) (bag-wants-pin? *bag1*))))
+    (cond
+      ((and want-ttl want-pin) "ttl_aware|flat|pin")
+      (want-ttl "ttl_aware|flat")
+      ((and want-lfu want-pin) "lfu|flat|pin")
+      (want-lfu "lfu|flat")
+      (want-pin "lfu|flat|pin")
+      (else ""))))
 
 
 ; ── RESP client (encode array of bulk strings; parse simple/bulk/err) ──
@@ -1063,6 +1143,12 @@
   (display "policy_agent: register/swap normal → ")
   (display r)
   (newline))
+; A5: register per-prefix param-bag strategy names (multi-register namespace).
+; hot-strategy tracks one active heal target — re-register choose-fn as primary.
+(hot-strategy:register! "pfx-bag-0" "lfu|flat|pin")
+(hot-strategy:register! "pfx-bag-1" "ttl_aware|flat|pin")
+(hot-strategy:register! "choose-fn" *policy-choose-normal*)
+(display "policy_agent: prefix param-bag namespace registered (pfx-bag-0/1 + choose-fn)\n")
 ; last-good = normal; optional non-normal seed (poison/conservative benches)
 (set! *last-good-profile* "normal")
 (set! *profile-name* "normal")
@@ -1239,7 +1325,10 @@
                        "canary_mode=" *canary-mode* "\n"
                        "canary_ticks=" (number->string *canary-ticks*) "\n"
                        "canary_commits=" (number->string *canary-commits*) "\n"
-                       "canary_heals=" (number->string *canary-heals*) "\n")))
+                       "canary_heals=" (number->string *canary-heals*) "\n"
+                       "prefix_deep=" (if *prefix-deep* "1" "0") "\n"
+                       "prefix_bags=" *bag0* ";" *bag1* "\n"
+                       "prefix_bag_version=" (number->string *prefix-bag-version*) "\n")))
         (write-file *heartbeat-file* payload)
         (display "policy_agent: heartbeat wrote path=")
         (display *heartbeat-file*)
@@ -1662,25 +1751,35 @@
                                 (choose-fn dgets dsets dhits dmisses devicted nk
                                            dexpired at kt)
                                 (catch (e) ""))))
-                  ; M12: prefix-scoped override from POLICY hints
+                  ; M12/A5: prefix-scoped override from POLICY hints / bags
                   (if *prefix-policy-on*
                     (begin
-                      (cond
-                        ((and (prefix-has-session?) *ttl-pressure*)
-                         (set! choice "ttl_aware|flat|pin"))
-                        ((prefix-has-zipf?)
-                         (set! choice "lfu|flat|pin"))
-                        ((prefix-has-session?)
-                         (set! choice "ttl_aware|flat|pin"))
-                        (else #t))
+                      (if *prefix-deep*
+                        (set! choice (compose-prefix-choice))
+                        (cond
+                          ((and (prefix-has-session?) *ttl-pressure*)
+                           (set! choice "ttl_aware|flat|pin"))
+                          ((prefix-has-zipf?)
+                           (set! choice "lfu|flat|pin"))
+                          ((prefix-has-session?)
+                           (set! choice "ttl_aware|flat|pin"))
+                          (else #t)))
                       (if (and (string? choice) (> (string-length choice) 0)
                                (= *prefix-applies* 0))
                         (begin
-                          (display "policy_agent: prefix-policy hints=")
+                          (display "policy_agent: prefix-policy")
+                          (if *prefix-deep* (display "-deep") (display ""))
+                          (display " hints=")
                           (display *policy-hints*)
+                          (display " bags=")
+                          (display *bag0*)
+                          (display ";")
+                          (display *bag1*)
                           (display " → ")
                           (display choice)
                           (newline)
+                          (audit-append! "prefix_policy" *policy-hints* choice
+                                         (if *prefix-deep* "prefix_deep" "prefix_policy"))
                           (set! *prefix-applies* 1))
                         #t))
                     #t)
@@ -1792,15 +1891,20 @@
                                 #t)
                               (if *prefix-policy-on*
                                 (begin
-                                  (display "policy_agent: PIN prefix-policy ")
+                                  ; A5 deep: PIN only bags that request pin (ttl_aware nopin skips)
+                                  (display "policy_agent: PIN prefix-policy")
+                                  (if *prefix-deep* (display "-deep") (display ""))
+                                  (display " ")
                                   (display *pfx0*)
                                   (display "/")
                                   (display *pfx1*)
                                   (newline)
-                                  (if (> (string-length *pfx0*) 0)
+                                  (if (and (> (string-length *pfx0*) 0)
+                                           (or (not *prefix-deep*) (bag-wants-pin? *bag0*)))
                                     (pin-prefix-set! *sock* *pfx0* 32)
                                     #t)
-                                  (if (> (string-length *pfx1*) 0)
+                                  (if (and (> (string-length *pfx1*) 0)
+                                           (or (not *prefix-deep*) (bag-wants-pin? *bag1*)))
                                     (pin-prefix-set! *sock* *pfx1* 32)
                                     #t))
                                 (begin

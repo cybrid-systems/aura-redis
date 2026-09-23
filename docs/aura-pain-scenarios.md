@@ -285,11 +285,11 @@ INFO `policy_hints` → `parse-policy-hints!` → 冲突时按 hint 偏向 sessi
 
 #### 6. 可验证出口
 
-已有 `prefix_mix` adaptive_prefix **100%** vs global **28.6%**（+71.4pp）。**A5：** `prefix_mix_v2` 冲突最优 ≥ +20pp on victim。
+已有 `prefix_mix` adaptive_prefix **100%** vs global **28.6%**（+71.4pp）。**A5 DONE：** `prefix_mix_v2` worse-tenant **+96.4pp**（100% vs 3.6%）；per-prefix bags + deep compose。
 
 #### 7. 现状与缺口
 
-**PARTIAL** hints（非隔离 choose-fn / budget）。**GAP** 原生 MT isolation 接线。
+**SHIPPED** A5 bags + deep compose（仍非硬 MT sandbox）。**GAP** 原生 MT isolation 接线。
 
 #### 8. 不做承诺
 
@@ -641,7 +641,7 @@ C 数据面卫生指标（本仓库约 **1.02–1.14×** Redis，`perf-eval.md`�
 | S5 Poison / heal | STRONG | P0 | CI | 保持 `poison_heal` gate |
 | S10 vs Module/Lua/Gears | STRONG | P0 | — | 永不抬 PLUGIN 为 moat |
 | S3 Hit% 为何下降 | MEDIUM | P1 | **A3**, A14 | audit schema + parseable reasons |
-| S6 Noisy neighbor | MEDIUM | P1 | **A5** | `prefix_mix_v2` ≥ +20pp victim |
+| S6 Noisy neighbor | MEDIUM | P1 | **A5 DONE** | `prefix_mix_v2` +96.4pp victim |
 | S9 Failover 策略冷 | MEDIUM | P1 | **A6** | HA promote version continuity |
 | S7 Hot-key | MEDIUM | — | A12 optional | 已有 zipf/hot_protect |
 | S8 TTL pileup | MEDIUM | — | A7 typed | 已有 `ttl_wave` |

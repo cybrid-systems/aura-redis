@@ -107,7 +107,7 @@ Make ops trust live code change: durable audit, canary, prod-shaped sandbox.
 | **Exit criteria** | Conflicting-optima `prefix_mix_v2` ≥ +20pp on victim tenant |
 | **Depends-on** | M12 |
 | **Estimate** | 2–3d |
-| **Status** | **TODO** |
+| **Status** | **DONE** (2026-09-23): worse-tenant **Δ=+96.4pp** (100% vs 3.6%); bags + deep compose + `pfx-bag-0/1` register |
 
 #### SN7 / A6 — Policy version across failover
 
@@ -165,8 +165,11 @@ Also backlog (demand map, not SN-gated): **A7** typed pressure INFO+choose; **A9
 3. **A3** → audit test + explain + push  
 4. **A4** → canary choose-fn + `test_policy_canary.py` + push  
 5. **A11** → Restricted sandbox profile (honest PARTIAL if TA blocked) + push  
+6. **A5** → `prefix_mix_v2` deepen + push  
+7. **A6** → policy version pin across failover + push  
+8. **A8** → auto-freeze meta-policy + push  
 
-If A2/A3/A4/A11 blocked: document blocker here, push partial, continue what is possible.
+If blocked: document blocker here, push PARTIAL, continue what is possible.
 
 ---
 
@@ -188,3 +191,4 @@ If A2/A3/A4/A11 blocked: document blocker here, push partial, continue what is p
 | 2026-09-23 | A1 +27.9pp, A2 +57.1pp, A3 audit ring + test green on main. |
 | 2026-09-23 | A4 canary choose-fn (auto-heal / commit) + test green on main. |
 | 2026-09-23 | A11 Restricted sandbox profile PARTIAL (TA blocker); smoke + docs. |
+| 2026-09-23 | A5 prefix_mix_v2 worse-tenant +96.4pp; per-prefix bags + deep compose. |
