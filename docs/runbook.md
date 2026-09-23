@@ -127,3 +127,24 @@ redis-cli -p 6379 PING
 redis-cli -p 6379 INFO | egrep 'used_memory|evicted|keys_|aura_rdb|role|evict|layout'
 # Agent: last audit / pin files in cwd (see policy_agent docs); DENY_PLUGIN still 1
 ```
+
+## 10. CONFIG file + CLIENT LIST
+
+| Concern | Guidance |
+|---------|----------|
+| **Enable persist** | `--config /var/lib/aura-redis/aura-redis.conf` or `AURA_REDIS_CONFIG=…`. **Unset/empty = runtime-only** (no auto file in cwd). |
+| **Boot order** | defaults → config file → CLI/env (**CLI wins**). |
+| **What survives** | Durable knobs rewritten on `CONFIG SET` / `CONFIG REWRITE`: maxmemory, requirepass, timeout, maxclients, evict-samples, protected-mode, tcp-backlog, slowlog-*, dir, dbfilename, bind, shadow-*, hot-*. |
+| **Secrets** | `requirepass` is stored **cleartext** in the config file — mode `0600` + restricted dir. |
+| **CLIENT LIST** | `CLIENT LIST` for id/addr/fd/name/age/idle/flags/db/cmd; `CLIENT ID` / `SETNAME` / `KILL ID` for ops. |
+
+```bash
+# Persist knobs across restart
+./native/build/aura_redis_server --port 6379 --config /var/lib/aura-redis/aura-redis.conf ...
+# redis-cli: CONFIG SET maxmemory 268435456   # auto-rewrites file
+#            CONFIG REWRITE
+#            CLIENT LIST
+```
+
+Verify: `python3 tests/test_prod_config_persist.py` · `python3 tests/test_prod_client_list.py`.
+

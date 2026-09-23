@@ -964,6 +964,9 @@ ArCore* ar_core_create(void) {
   c->tcp_backlog = 512;
   c->slowlog_slower_than_us = 10000;
   c->shutting_down = 0;
+  /* Empty = CONFIG persist disabled until --config / AURA_REDIS_CONFIG. */
+  c->config_path[0] = '\0';
+  c->next_client_id = 1;
   snprintf(c->rdb_dir, sizeof(c->rdb_dir), ".");
   snprintf(c->rdb_filename, sizeof(c->rdb_filename), "dump.aura-rdb");
   c->rdb_last_save_time = 0;

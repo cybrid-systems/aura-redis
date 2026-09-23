@@ -83,7 +83,7 @@
 | MVP M0–M5 | **DONE** |
 | High-ROI M6–M12 (mutation, TTL kernel, soft-goal, evolve, prefix POLICY) | **DONE** |
 | **Production P0** | **P0.1–P0.7 DONE** |
-| **P1.1 / P1.8 CONFIG** | **DONE** (runtime; no persist) |
+| **P1.1 / P1.8 CONFIG** | **DONE** (runtime + T2.14 file persist) |
 | **P1.9 policy_agent HA** | **DONE** — reconnect/backoff, re-apply last EVICT/LAYOUT, policy-pin log, heartbeat; fail-safe documented; **A6** durable pin resume |
 | **P1.12 client limits** | **DONE** — maxclients / timeout / tcp-backlog (CONFIG + CLI); `tests/test_prod_clients.py` |
 | **P1.11 cache-only restart** | **DONE** — README + `docs/persistence.md` (cache-only default; optional P2.13) |
@@ -180,8 +180,10 @@ Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/
 | T2.harden | Edge/regression + flake polls for T2.9–T2.11/SCAN/RDB | **DONE** | `tests/test_prod_tier2_edges.py`; poll-until-expire in set_opts/string_meta |
 | T2.12 | WATCH / UNWATCH for MULTI/EXEC CAS | **DONE** | `ar_watch_touch`; `tests/test_prod_watch.py`; allowlist + commands |
 | T2.13 | Typed REPLICAOF full-sync + live feed (HASH/LIST/ZSET) | **DONE** | `repl_sync_{hash,list,zset}` + propagate; `tests/test_prod_replica.py` |
+| T2.14 | CONFIG persist across restart | **DONE** | `ar_config.c`; `--config`/`AURA_REDIS_CONFIG`; auto-rewrite on SET + `CONFIG REWRITE`; `tests/test_prod_config_persist.py` |
+| T2.15 | CLIENT LIST (+ ID/SETNAME/KILL) | **DONE** | `CLIENT LIST` id/addr/fd/name/age/idle/flags/db/cmd; `tests/test_prod_client_list.py` |
 
-**Deferred / blocked:** A11 Restricted sandbox without Soft still needs Tenant Admin. Cluster/field-SCAN/Streams/Lua/ACL remain non-goals (keyspace SCAN/KEYS landed for Tier 2). Short `bench_hit_vs_redis` adaptive cites remain non-citeable.
+**Deferred / blocked:** A11 Restricted sandbox without Soft still needs Tenant Admin. Cluster/field-SCAN/Streams/Lua/ACL remain non-goals (keyspace SCAN/KEYS landed for Tier 2). Short `bench_hit_vs_redis` adaptive cites remain non-citeable. CONFIG persist + CLIENT LIST landed (T2.14–T2.15).
 
 **How to run Tier 2 gates locally:**
 
@@ -191,6 +193,8 @@ export AURA_REDIS_DENY_PLUGIN=1
 python3 tests/test_prod_rdb.py          # typed RDB
 python3 tests/test_prod_tier2_edges.py  # T2 harden edges
 python3 tests/test_prod_watch.py       # T2.12 WATCH/UNWATCH
+python3 tests/test_prod_config_persist.py  # T2.14 CONFIG persist
+python3 tests/test_prod_client_list.py     # T2.15 CLIENT LIST
 AURA_REDIS_SOAK_SEC=60 ./scripts/soak-prod.sh
 ./scripts/ci-prod.sh                    # wall-time gate (short soak)
 # long (optional): ./scripts/ci-bench.sh
@@ -234,3 +238,5 @@ AURA_REDIS_SOAK_SEC=60 ./scripts/soak-prod.sh
 | 2026-09-23 | **T2.harden** | Edge suite SCAN/SETNX/RENAME-across-types/RDB-large + expire poll harden; ci-prod wire |
 | 2026-09-23 | **T2.12** | WATCH/UNWATCH optimistic locking; EXEC null-array abort; tests + allowlist + ci-prod |
 | 2026-09-23 | **T2.13** | Typed REPLICAOF full-sync + live HSET/LPUSH/ZADD/… propagate; replica tests |
+| 2026-09-23 | **T2.14** | CONFIG persist (`aura-redis.conf` via `--config`/`AURA_REDIS_CONFIG`); auto-save on durable SET + REWRITE; `tests/test_prod_config_persist.py` |
+| 2026-09-23 | **T2.15** | CLIENT LIST/ID/SETNAME/KILL; `tests/test_prod_client_list.py`; docs + ci-prod |

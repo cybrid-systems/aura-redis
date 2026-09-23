@@ -53,7 +53,7 @@ Pinned / LFU / layout tier state is **not** persisted (keys reload into flat hot
 | `SIGKILL` / crash | keys discarded | last successful dump retained |
 | Restart | empty unless dump loaded | `GET` / `TTL` restored from dump |
 
-`CONFIG` / last `EVICT` / `LAYOUT` still reset to CLI/env/defaults. Aura `policy_agent` reconnects against the warm keyspace + live `INFO`.
+`CONFIG` durable knobs survive when a config file is enabled (`--config` / `AURA_REDIS_CONFIG`; see runbook §10). Last `EVICT` / `LAYOUT` still reset to CLI/env/defaults unless re-applied by `policy_agent`. Aura `policy_agent` reconnects against the warm keyspace + live `INFO`.
 
 ## INFO (Persistence)
 

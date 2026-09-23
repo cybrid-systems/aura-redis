@@ -17,3 +17,5 @@ native/build/
 
 .ar-policy-pin-*.pin
 .ar-policy-audit-*.log
+# Local CONFIG rewrite drops (ops path override)
+aura-redis.conf

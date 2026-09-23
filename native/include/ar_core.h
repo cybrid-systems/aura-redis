@@ -180,6 +180,12 @@ int ar_core_policy_set(ArCore* core, const char* prefix, const char* profile);
 /* Write "pfx:=prof;..." into buf; returns length (excl NUL). */
 int ar_core_policy_hints(ArCore* core, char* buf, size_t buflen);
 
+/* Ops — durable CONFIG file (load on boot; rewrite on SET / CONFIG REWRITE) */
+int ar_core_set_config_file(ArCore* core, const char* path); /* "" disables */
+const char* ar_core_config_file(ArCore* core);
+int ar_config_load(ArCore* core);    /* missing file = ok; 1 success */
+int ar_config_rewrite(ArCore* core); /* write durable knobs; 1 ok */
+
 /* P2.13 — optional aura-rdb snapshot (string keys + TTL) */
 int ar_core_set_rdb_dir(ArCore* core, const char* dir);
 const char* ar_core_rdb_dir(ArCore* core);

@@ -19,6 +19,8 @@ int main(int argc, char** argv) {
   uint64_t maxmem = 0;
   const char* rdb_dir = NULL;
   const char* rdb_filename = NULL;
+  const char* config_path = NULL;
+  int config_path_set = 0; /* 1 if --config / env provided (incl empty=disable) */
   int tls_port = 0;
   int tls_yes = 0;
   const char* tls_cert = NULL;
@@ -51,7 +53,10 @@ int main(int argc, char** argv) {
       timeout_sec = atoi(argv[++i]);
     else if (strcmp(argv[i], "--tcp-backlog") == 0 && i + 1 < argc)
       tcp_backlog = atoi(argv[++i]);
-    else if (strcmp(argv[i], "--dir") == 0 && i + 1 < argc)
+    else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+      config_path = argv[++i];
+      config_path_set = 1;
+    } else if (strcmp(argv[i], "--dir") == 0 && i + 1 < argc)
       rdb_dir = argv[++i];
     else if (strcmp(argv[i], "--dbfilename") == 0 && i + 1 < argc)
       rdb_filename = argv[++i];
@@ -125,6 +130,13 @@ int main(int argc, char** argv) {
     const char* e = getenv("AURA_REDIS_TCP_BACKLOG");
     if (e && e[0]) tcp_backlog = atoi(e);
   }
+  if (!config_path_set) {
+    const char* e = getenv("AURA_REDIS_CONFIG");
+    if (e) { /* present — empty disables default aura-redis.conf */
+      config_path = e;
+      config_path_set = 1;
+    }
+  }
   if (!rdb_dir || !rdb_dir[0]) {
     const char* e = getenv("AURA_REDIS_DIR");
     if (e && e[0]) rdb_dir = e;
@@ -160,6 +172,20 @@ int main(int argc, char** argv) {
   ArCore* core = ar_core_create();
   if (!core) {
     fprintf(stderr, "ar_main: create failed\n");
+    return 1;
+  }
+  /* Config file: defaults → file → CLI/env (CLI wins). Empty path disables. */
+  if (config_path_set) {
+    if (!ar_core_set_config_file(core, config_path)) {
+      fprintf(stderr, "ar_main: bad --config path\n");
+      ar_core_destroy(core);
+      return 1;
+    }
+  }
+  if (!ar_config_load(core)) {
+    fprintf(stderr, "ar_main: config load failed (%s)\n",
+            ar_core_config_file(core));
+    ar_core_destroy(core);
     return 1;
   }
   if (bind_addr && bind_addr[0]) {

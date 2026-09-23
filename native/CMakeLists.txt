@@ -20,7 +20,8 @@ add_library(aura_redis_core SHARED
   src/ar_types.c
   src/ar_server.c
   src/ar_rdb.c
-  src/ar_tls.c)
+  src/ar_tls.c
+  src/ar_config.c)
 target_include_directories(aura_redis_core PUBLIC include)
 target_include_directories(aura_redis_core PRIVATE src)
 set_target_properties(aura_redis_core PROPERTIES

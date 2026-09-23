@@ -122,6 +122,12 @@ typedef struct ArConn {
   int nsubs;
   char* sub_channels[AR_PUBSUB_MAX];
   size_t sub_clens[AR_PUBSUB_MAX];
+  /* Ops surface — CLIENT LIST / SETNAME / ID */
+  uint64_t client_id;
+  char peer_addr[48]; /* "ip:port" */
+  char name[64];
+  uint64_t ctime_ms;
+  char last_cmd[48];
 } ArConn;
 
 struct ArCore {
@@ -201,6 +207,10 @@ struct ArCore {
   char policy_prof[4][32];
   int policy_n;
 
+  /* Ops — durable CONFIG file (aura-redis.conf) */
+  char config_path[512]; /* empty = disabled / default applied in create */
+  uint64_t next_client_id; /* CLIENT ID allocator; starts at 1 */
+
   /* P2.13 — aura-rdb snapshot */
   char rdb_dir[256];
   char rdb_filename[128];
@@ -223,6 +233,12 @@ struct ArCore {
   char tls_ca_file[512];
   void* ssl_ctx; /* SSL_CTX* when built with OpenSSL */
 };
+
+/* Ops — CONFIG file persist (ar_config.c) */
+int ar_core_set_config_file(ArCore* core, const char* path);
+const char* ar_core_config_file(ArCore* core);
+int ar_config_load(ArCore* core);    /* 1 ok (missing file ok); 0 parse/apply error */
+int ar_config_rewrite(ArCore* core); /* 1 ok; 0 fail / no path */
 
 /* P2.13 RDB (implemented in ar_rdb.c) */
 int ar_rdb_build_path(ArCore* core, char* out, size_t outsz);

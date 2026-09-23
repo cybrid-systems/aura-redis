@@ -91,6 +91,11 @@ static void conn_reset(ArConn* c) {
   c->ssl = NULL;
   c->is_tls = 0;
   c->ssl_hs_done = 0;
+  c->client_id = 0;
+  c->peer_addr[0] = '\0';
+  c->name[0] = '\0';
+  c->ctime_ms = 0;
+  c->last_cmd[0] = '\0';
 }
 
 static ArConn* conn_alloc(ArCore* core, int fd) {
@@ -818,11 +823,35 @@ static int publish_local(ArCore* core, const char* chan, size_t clen,
 }
 
 
+static void note_last_cmd(ArConn* c, const char* cmd, size_t clen) {
+  if (!c)
+    return;
+  size_t n = clen < sizeof(c->last_cmd) - 1 ? clen : sizeof(c->last_cmd) - 1;
+  for (size_t i = 0; i < n; ++i) {
+    char ch = cmd[i];
+    if (ch >= 'A' && ch <= 'Z')
+      ch = (char)(ch - 'A' + 'a');
+    c->last_cmd[i] = ch;
+  }
+  c->last_cmd[n] = '\0';
+}
+
+/* After durable CONFIG SET: best-effort rewrite (ignore if no path / fail). */
+static int config_set_ok(ArCore* core, ArConn* c) {
+  if (core->config_path[0] && !ar_config_rewrite(core)) {
+    /* Still OK to client — file may be unwritable; ops can CONFIG REWRITE. */
+    fprintf(stderr, "ar_server: CONFIG auto-rewrite failed (%s)\n",
+            core->config_path);
+  }
+  return reply_ok(c);
+}
+
 static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (argc < 1)
     return reply_err(c, "ERR empty command");
   const char* cmd = argv[0].p;
   size_t clen = argv[0].len;
+  note_last_cmd(c, cmd, clen);
 
   /* P0.4: requirepass — unauthenticated clients limited to AUTH/PING/QUIT/HELLO */
   if (core->requirepass && core->requirepass[0] && !c->authenticated &&
@@ -833,9 +862,11 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (core->repl_readonly && cmd_is_write(cmd, clen) && !c->is_master_link)
     return reply_err(c, "READONLY You can't write against a read only replica.");
 
-  /* P2.14: CONFIG SET denied on replica (CONFIG GET ok). */
+  /* P2.14: CONFIG SET/REWRITE denied on replica (CONFIG GET ok). */
   if (core->repl_readonly && !c->is_master_link && cmd_eq(cmd, clen, "config") &&
-      argc >= 2 && cmd_eq(argv[1].p, argv[1].len, "set"))
+      argc >= 2 &&
+      (cmd_eq(argv[1].p, argv[1].len, "set") ||
+       cmd_eq(argv[1].p, argv[1].len, "rewrite")))
     return reply_err(c, "READONLY You can't write against a read only replica.");
 
   /* P3.17b — pubsub mode restricts commands */
@@ -1449,7 +1480,141 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     }
     return reply_err(c, "ERR wrong number of arguments for 'evict'");
   }
-  /* P1.1 — CONFIG GET/SET (runtime knobs; not persisted). */
+  /* Ops — CLIENT LIST / ID / SETNAME / KILL (Redis-ish subset). */
+  if (cmd_eq(cmd, clen, "client")) {
+    if (argc < 2)
+      return reply_err(c, "ERR wrong number of arguments for 'client'");
+    if (cmd_eq(argv[1].p, argv[1].len, "list")) {
+      if (argc != 2)
+        return reply_err(c, "ERR wrong number of arguments for 'client|list'");
+      char* out = NULL;
+      size_t olen = 0, ocap = 0;
+      uint64_t now = ar_now_ms();
+      for (int i = 0; i < AR_MAX_CONN; ++i) {
+        ArConn* x = &core->conns[i];
+        if (!x->in_use)
+          continue;
+        char flags[8];
+        int fn = 0;
+        if (x->is_replica)
+          flags[fn++] = 'S';
+        if (x->is_master_link)
+          flags[fn++] = 'M';
+        if (x->pubsub_mode)
+          flags[fn++] = 'P';
+        if (x->in_multi)
+          flags[fn++] = 'x';
+        if (fn == 0)
+          flags[fn++] = 'N';
+        flags[fn] = '\0';
+        uint64_t age =
+            (x->ctime_ms && now >= x->ctime_ms) ? (now - x->ctime_ms) / 1000 : 0;
+        uint64_t idle = (x->last_active_ms && now >= x->last_active_ms)
+                            ? (now - x->last_active_ms) / 1000
+                            : 0;
+        char line[384];
+        int ln = snprintf(
+            line, sizeof(line),
+            "id=%llu addr=%s fd=%d name=%s age=%llu idle=%llu flags=%s db=0 "
+            "cmd=%s\n",
+            (unsigned long long)x->client_id,
+            x->peer_addr[0] ? x->peer_addr : "unknown", x->fd,
+            x->name[0] ? x->name : "", (unsigned long long)age,
+            (unsigned long long)idle, flags,
+            x->last_cmd[0] ? x->last_cmd : "");
+        if (ln < 0)
+          continue;
+        if (olen + (size_t)ln + 1 > ocap) {
+          size_t ncap = ocap ? ocap * 2 : 1024;
+          while (ncap < olen + (size_t)ln + 1)
+            ncap *= 2;
+          char* np = (char*)realloc(out, ncap);
+          if (!np) {
+            free(out);
+            return reply_err(c, "ERR out of memory");
+          }
+          out = np;
+          ocap = ncap;
+        }
+        memcpy(out + olen, line, (size_t)ln);
+        olen += (size_t)ln;
+      }
+      int rc = reply_bulk(c, out ? out : "", olen);
+      free(out);
+      return rc;
+    }
+    if (cmd_eq(argv[1].p, argv[1].len, "id")) {
+      if (argc != 2)
+        return reply_err(c, "ERR wrong number of arguments for 'client|id'");
+      return reply_int(c, (int64_t)c->client_id);
+    }
+    if (cmd_eq(argv[1].p, argv[1].len, "setname")) {
+      if (argc != 3)
+        return reply_err(c, "ERR wrong number of arguments for 'client|setname'");
+      size_t n =
+          argv[2].len < sizeof(c->name) - 1 ? argv[2].len : sizeof(c->name) - 1;
+      memcpy(c->name, argv[2].p, n);
+      c->name[n] = '\0';
+      return reply_ok(c);
+    }
+    if (cmd_eq(argv[1].p, argv[1].len, "kill")) {
+      /* CLIENT KILL ID <id>  |  CLIENT KILL <addr> */
+      if (argc == 3) {
+        char addr[64];
+        size_t al =
+            argv[2].len < sizeof(addr) - 1 ? argv[2].len : sizeof(addr) - 1;
+        memcpy(addr, argv[2].p, al);
+        addr[al] = '\0';
+        int killed = 0;
+        for (int i = 0; i < AR_MAX_CONN; ++i) {
+          ArConn* x = &core->conns[i];
+          if (!x->in_use)
+            continue;
+          if (strcmp(x->peer_addr, addr) == 0) {
+            if (x == c)
+              c->should_close = 1;
+            else
+              conn_close(core, x);
+            killed = 1;
+            break;
+          }
+        }
+        if (!killed)
+          return reply_err(c, "ERR No such client");
+        return reply_ok(c);
+      }
+      if (argc == 4 && cmd_eq(argv[2].p, argv[2].len, "id")) {
+        char idbuf[32];
+        size_t il =
+            argv[3].len < sizeof(idbuf) - 1 ? argv[3].len : sizeof(idbuf) - 1;
+        memcpy(idbuf, argv[3].p, il);
+        idbuf[il] = '\0';
+        uint64_t want = strtoull(idbuf, NULL, 10);
+        int killed = 0;
+        for (int i = 0; i < AR_MAX_CONN; ++i) {
+          ArConn* x = &core->conns[i];
+          if (!x->in_use)
+            continue;
+          if (x->client_id == want) {
+            if (x == c)
+              c->should_close = 1;
+            else
+              conn_close(core, x);
+            killed = 1;
+            break;
+          }
+        }
+        if (!killed)
+          return reply_err(c, "ERR No such client");
+        return reply_ok(c);
+      }
+      return reply_err(c, "ERR syntax error");
+    }
+    return reply_err(c, "ERR Unknown subcommand or wrong number of arguments "
+                        "for 'client'");
+  }
+
+  /* P1.1 — CONFIG GET/SET (+ REWRITE persist). */
   if (cmd_eq(cmd, clen, "config")) {
     if (argc < 2)
       return reply_err(c, "ERR wrong number of arguments for 'config'");
@@ -1544,6 +1709,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       }
       AR_CFG_ADD("hot-promote-on-get", "%s",
                  ar_core_hot_promote_on_get(core) ? "yes" : "no");
+      AR_CFG_ADD("config-file", "%s",
+                 core->config_path[0] ? core->config_path : "");
 #undef AR_CFG_ADD
       char hdr[32];
       int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", nitems);
@@ -1567,95 +1734,105 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       if (cmd_eq(argv[2].p, argv[2].len, "maxmemory")) {
         uint64_t m = strtoull(val, NULL, 10);
         ar_core_set_maxmemory(core, m);
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "requirepass")) {
         if (!ar_core_set_requirepass(core, val))
           return reply_err(c, "ERR config set requirepass");
         /* Existing connections keep auth state; new ones need AUTH if set */
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "protected-mode")) {
         int on = !(strcmp(val, "no") == 0 || strcmp(val, "0") == 0 ||
                    strcmp(val, "false") == 0);
         ar_core_set_protected_mode(core, on);
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "evict-samples") ||
           cmd_eq(argv[2].p, argv[2].len, "samples")) {
         int n = atoi(val);
         if (!ar_core_set_evict_samples(core, n))
           return reply_err(c, "ERR config set evict-samples");
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "maxclients")) {
         int n = atoi(val);
         if (!ar_core_set_maxclients(core, n))
           return reply_err(c, "ERR config set maxclients");
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "timeout")) {
         int n = atoi(val);
         if (!ar_core_set_timeout(core, n))
           return reply_err(c, "ERR config set timeout");
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "tcp-backlog")) {
         int n = atoi(val);
         if (!ar_core_set_tcp_backlog(core, n))
           return reply_err(c, "ERR config set tcp-backlog");
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "slowlog-log-slower-than")) {
         int n = atoi(val);
         if (!ar_core_set_slowlog_slower_than(core, n))
           return reply_err(c, "ERR config set slowlog-log-slower-than");
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "dir")) {
         if (!ar_core_set_rdb_dir(core, val))
           return reply_err(c, "ERR config set dir");
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "dbfilename")) {
         if (!ar_core_set_rdb_filename(core, val))
           return reply_err(c, "ERR config set dbfilename");
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "shadow-policy")) {
         if (!ar_core_set_shadow_policy(core, val))
           return reply_err(c, "ERR config set shadow-policy");
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "shadow-sample-pct")) {
         int n = atoi(val);
         if (!ar_core_set_shadow_sample_pct(core, n))
           return reply_err(c, "ERR config set shadow-sample-pct");
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "hot-soft-cap-pct")) {
         int n = atoi(val);
         if (!ar_core_set_hot_soft_cap_pct(core, n))
           return reply_err(c, "ERR config set hot-soft-cap-pct");
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "hot-soft-cap-min")) {
         int n = atoi(val);
         if (!ar_core_set_hot_soft_cap_min(core, n))
           return reply_err(c, "ERR config set hot-soft-cap-min");
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "hot-promote-on-get")) {
         int on = !(strcmp(val, "no") == 0 || strcmp(val, "0") == 0 ||
                    strcmp(val, "false") == 0);
         if (!ar_core_set_hot_promote_on_get(core, on))
           return reply_err(c, "ERR config set hot-promote-on-get");
-        return reply_ok(c);
+        return config_set_ok(core, c);
       }
       return reply_err(c, "ERR Unknown option or number of arguments for CONFIG "
                           "SET");
     }
-    return reply_err(c, "ERR CONFIG subcommand must be GET or SET");
+    if (cmd_eq(argv[1].p, argv[1].len, "rewrite")) {
+      if (argc != 2)
+        return reply_err(c, "ERR wrong number of arguments for 'config|rewrite'");
+      if (!core->config_path[0])
+        return reply_err(c, "ERR CONFIG REWRITE disabled (empty config-file; "
+                            "set --config / AURA_REDIS_CONFIG)");
+      if (!ar_config_rewrite(core))
+        return reply_err(c, "ERR CONFIG REWRITE failed");
+      return reply_ok(c);
+    }
+    return reply_err(c, "ERR CONFIG subcommand must be GET, SET or REWRITE");
   }
 
   /* INFO — Redis-ish sections; keep flat metric keys for policy_agent (P0.6). */
@@ -2946,6 +3123,19 @@ static int accept_clients_on(ArCore* core, int listen_fd, int is_tls) {
       }
       close(fd);
       continue;
+    }
+    {
+      char ip[INET_ADDRSTRLEN];
+      if (!inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip)))
+        snprintf(ip, sizeof(ip), "?");
+      snprintf(c->peer_addr, sizeof(c->peer_addr), "%s:%u", ip,
+               (unsigned)ntohs(addr.sin_port));
+      c->client_id = core->next_client_id++;
+      if (core->next_client_id == 0)
+        core->next_client_id = 1;
+      c->ctime_ms = ar_now_ms();
+      c->name[0] = '\0';
+      c->last_cmd[0] = '\0';
     }
     if (is_tls) {
       if (ar_tls_accept_setup(core, c) < 0) {

@@ -27,7 +27,7 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 `SUBSCRIBE`, `UNSUBSCRIBE`, `PUBLISH` — **no `PSUBSCRIBE`**
 
 ### Ops / Aura control (operators & agent — not app hot path)
-`INFO`, `CONFIG GET/SET`, `SAVE`, `BGSAVE`, `EVICT`, `LAYOUT`, `PIN`, `UNPIN`, `POLICY`, `SHADOW`, `HOTCOLD`, `REPLICAOF` / `SLAVEOF`
+`INFO`, `CONFIG GET/SET/REWRITE`, `CLIENT LIST/ID/SETNAME/KILL`, `SAVE`, `BGSAVE`, `EVICT`, `LAYOUT`, `PIN`, `UNPIN`, `POLICY`, `SHADOW`, `HOTCOLD`, `REPLICAOF` / `SLAVEOF`
 
 ---
 
@@ -100,4 +100,12 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 - Full sync emits `SET`/`HSET`/`RPUSH`/`ZADD` (+ `EXPIRE` when TTL) for existing keys.
 - Live feed propagates string writes **and** HSET/HDEL/HINCRBY/LPUSH/RPUSH/LPOP/RPOP/ZADD/ZREM.
 - Best-effort async single replica (not Redis PSYNC/Cluster); fail-closed on link loss until re-`REPLICAOF`.
+
+## CONFIG persist / CLIENT LIST caveats (Tier 2)
+
+- **CONFIG file:** enable with `--config <path>` or `AURA_REDIS_CONFIG=<path>`. Empty disables. Boot order: defaults → file → CLI/env (CLI wins).
+- **Auto-save:** durable `CONFIG SET` (maxmemory, requirepass, timeout, maxclients, evict-samples, protected-mode, tcp-backlog, slowlog-*, dir, dbfilename, shadow-*, hot-*) rewrites the file; `CONFIG REWRITE` forces a rewrite.
+- **Not Redis redis.conf:** simple `key value` lines only; not a full Redis `CONFIG REWRITE` of an imported redis.conf.
+- **CLIENT LIST:** Redis-ish single bulk of `id=… addr=… fd=… name=… age=… idle=… flags=… db=0 cmd=…` lines. Flags: `N` normal, `S` replica feed, `M` master link, `P` pubsub, `x` MULTI.
+- **CLIENT KILL / SETNAME / ID:** supported; no `CLIENT PAUSE` / tracking / caching.
 

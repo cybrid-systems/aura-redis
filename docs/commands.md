@@ -4,7 +4,7 @@
 **Not covered here:** pure-Lisp `AURA_REDIS_ENGINE=aura` (broader demo subset in README).  
 **Production product:** string KV cache + Aura control commands — see [`production-plan.md`](production-plan.md).
 
-Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLINK + STRLEN/SETEX/PSETEX/DBSIZE + WATCH/UNWATCH (+ T2.harden edges).
+Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLINK + STRLEN/SETEX/PSETEX/DBSIZE + WATCH/UNWATCH + CONFIG persist + CLIENT LIST.
 
 ---
 
@@ -15,7 +15,8 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLI
 | `PING` | 1 or 2 | `+PONG` or bulk | Extra args → wrong-arity error; allowed pre-AUTH |
 | `AUTH` | 2 or 3 | `+OK` / WRONGPASS | `AUTH <pass>` or `AUTH <user> <pass>` (user ignored); need `--requirepass` / `AURA_REDIS_REQUIREPASS` |
 | `HELLO` | 1+ | array map | Minimal stub; optional `AUTH` inline; allowed pre-AUTH |
-| `CONFIG` | GET 3 / SET 4 | array / `+OK` | P1.1+P1.12+P2.13: `maxmemory`, `requirepass`, `protected-mode`, `evict-samples`, `bind`, `maxclients`, `timeout`, `tcp-backlog`, `slowlog-log-slower-than`, `dir`, `dbfilename`, `shadow-policy`, `shadow-sample-pct`, `hot-soft-cap-pct`, `hot-soft-cap-min`, `hot-promote-on-get` |
+| `CONFIG` | GET 3 / SET 4 / REWRITE 2 | array / `+OK` | Knobs: `maxmemory`, `requirepass`, `protected-mode`, `evict-samples`, `bind` (GET), `maxclients`, `timeout`, `tcp-backlog`, `slowlog-log-slower-than`, `dir`, `dbfilename`, `shadow-*`, `hot-*`, `config-file` (GET). Durable SET auto-rewrites `--config` / `AURA_REDIS_CONFIG` file; `CONFIG REWRITE` explicit |
+| `CLIENT` | LIST 2 / ID 2 / SETNAME 3 / KILL 3–4 | bulk / int / `+OK` | Ops: `CLIENT LIST` (id/addr/fd/name/age/idle/flags/db/cmd); `CLIENT ID`; `CLIENT SETNAME`; `CLIENT KILL <addr>` or `CLIENT KILL ID <id>` |
 | `SAVE` | 1 | `+OK` | P2.13 sync aura-rdb **v2** (string+HASH+LIST+ZSET+TTL) |
 | `BGSAVE` | 1 | `+OK` | P2.13 fork child aura-rdb v2 (or sync fallback) |
 | `REPLICAOF` / `SLAVEOF` | 3 | `+OK` | P2.14/T2.13: `host port` or `NO ONE`; replica read-only; full-sync string+HASH/LIST/ZSET |
@@ -103,7 +104,7 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 
 | Area | Examples |
 |------|----------|
-| Auth / admin | `SHUTDOWN`, `CLIENT`, `SLOWLOG`, `MONITOR` (AUTH/HELLO done in P0.4) |
+| Auth / admin | `SHUTDOWN`, `SLOWLOG`, `MONITOR` (AUTH/HELLO done; `CLIENT LIST/ID/SETNAME/KILL` done) |
 | Persistence / repl | `BGREWRITEAOF`, `PSYNC` (SAVE/BGSAVE/REPLICAOF/SYNC done P2.13–14) |
 | Strings extras | `SET` GET/KEEPTTL/EXAT/PXAT (`STRLEN`/`SETEX`/`PSETEX` done T2.11) |
 | Keys extras | `APPEND`/`RENAME`/`RENAMENX`/`UNLINK` done T2.10; `DBSIZE` done T2.11; `KEYS`/`SCAN` done P3.18 |
@@ -143,4 +144,5 @@ Exercised by `tests/test_types_ffi.aura` — not a substitute for RESP product t
 - When `requirepass` is set, unauthenticated clients may only run `AUTH` / `PING` / `QUIT` / `HELLO`; others → `-NOAUTH Authentication required.`
 - **Protected-mode** (Redis spirit): if enabled **and** no password, non-loopback peers are refused with `-DENIED …` even when `--bind 0.0.0.0`. Loopback always allowed. Password **or** `--protected-mode no` permits remote.
 - Default bind remains loopback — safest deploy default; use `--bind 0.0.0.0` + `requirepass` for remote + Aura policy_agent on another host.
-- `CONFIG SET/GET` knobs at runtime (not persisted across restart except via CLI/env): maxmemory, requirepass, protected-mode, evict-samples, maxclients, timeout, tcp-backlog, dir, dbfilename.
+- `CONFIG SET/GET` runtime knobs: maxmemory, requirepass, protected-mode, evict-samples, maxclients, timeout, tcp-backlog, dir, dbfilename, …
+- **CONFIG persist:** when `--config <path>` or `AURA_REDIS_CONFIG` is set, durable `CONFIG SET` auto-writes that file; `CONFIG REWRITE` rewrites explicitly. Load on boot (defaults → file → CLI/env; CLI wins). Empty path / unset = no file (runtime-only). Default is **disabled** (empty) so casual runs do not drop `aura-redis.conf` in cwd. `requirepass` is stored in cleartext in the file — protect the path.
