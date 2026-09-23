@@ -9,7 +9,7 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 ## Allowed (Tier 2)
 
 ### Strings
-`PING`, `AUTH`, `HELLO` (stub), `QUIT`, `GET`, `SET` (+ `NX`/`XX`/`EX`/`PX`), `SETNX`, `GETSET`, `MGET`, `MSET`, `DEL`, `EXISTS`, `INCR`, `DECR`, `EXPIRE`, `TTL`, `TYPE`, `FLUSHDB`, `SCAN`, `KEYS`
+`PING`, `AUTH`, `HELLO` (stub), `QUIT`, `GET`, `SET` (+ `NX`/`XX`/`EX`/`PX`), `SETNX`, `GETSET`, `APPEND`, `MGET`, `MSET`, `DEL`, `UNLINK`, `RENAME`, `RENAMENX`, `EXISTS`, `INCR`, `DECR`, `EXPIRE`, `TTL`, `TYPE`, `FLUSHDB`, `SCAN`, `KEYS`
 
 ### HASH
 `HSET`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`
@@ -73,3 +73,10 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 - **Cursor:** opaque integer (bucket index across hot+cold tables). Concurrent SET/DEL/rehash/layout migrate may skip or duplicate keys across pages — same class of caveat as Redis SCAN. A full iteration until cursor `0` is best-effort complete for a quiescent store.
 - **KEYS:** returns all matches in one reply (**O(N)**). Prefer SCAN for large keyspaces; OK for small Tier-2 caches.
 - **Still reject:** `HSCAN` / `SSCAN` / `ZSCAN`.
+
+## APPEND / RENAME / UNLINK caveats (Tier 2)
+
+- **APPEND:** creates the key if missing; returns new string length; **WRONGTYPE** on HASH/LIST/ZSET; does **not** clear TTL.
+- **RENAME:** overwrites `newkey` if present; moves any type (string/HASH/LIST/ZSET); preserves TTL/pin; `ERR no such key` if source missing; same-key is `+OK`.
+- **RENAMENX:** integer `1` if renamed, `0` if destination exists; still errors if source missing.
+- **UNLINK:** same semantics as multi-key `DEL` (returns deleted count). No background reclaim on this single-threaded server.

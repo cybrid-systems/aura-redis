@@ -398,6 +398,8 @@ static int repl_connect_master(ArCore* core, const char* host, int port) {
 static int cmd_is_write(const char* cmd, size_t clen) {
   return cmd_eq(cmd, clen, "set") || cmd_eq(cmd, clen, "setnx") ||
          cmd_eq(cmd, clen, "getset") || cmd_eq(cmd, clen, "del") ||
+         cmd_eq(cmd, clen, "unlink") || cmd_eq(cmd, clen, "append") ||
+         cmd_eq(cmd, clen, "rename") || cmd_eq(cmd, clen, "renamenx") ||
          cmd_eq(cmd, clen, "expire") || cmd_eq(cmd, clen, "flushdb") ||
          cmd_eq(cmd, clen, "mset") || cmd_eq(cmd, clen, "incr") ||
          cmd_eq(cmd, clen, "decr") || cmd_eq(cmd, clen, "pin") ||
@@ -1077,9 +1079,14 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     core->ops++;
     return reply_int(c, ttl);
   }
-  if (cmd_eq(cmd, clen, "del")) {
-    if (argc < 2)
-      return reply_err(c, "ERR wrong number of arguments for 'del'");
+  if (cmd_eq(cmd, clen, "del") || cmd_eq(cmd, clen, "unlink")) {
+    /* UNLINK: Redis async delete; single-threaded → DEL-equivalent, return count */
+    const char* cname = cmd_eq(cmd, clen, "unlink") ? "unlink" : "del";
+    if (argc < 2) {
+      char ebuf[80];
+      snprintf(ebuf, sizeof(ebuf), "ERR wrong number of arguments for '%s'", cname);
+      return reply_err(c, ebuf);
+    }
     int64_t n = 0;
     for (int i = 1; i < argc; ++i) {
       if (ar_del_bin(core, argv[i].p, argv[i].len))
@@ -1088,6 +1095,43 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     if (n > 0)
       repl_propagate(core, argv, argc);
     return reply_int(c, n);
+  }
+  if (cmd_eq(cmd, clen, "append")) {
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'append'");
+    int wt = 0;
+    int64_t nlen =
+        ar_append(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len, &wt);
+    if (wt)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (nlen < 0)
+      return reply_err(c, "ERR OOM");
+    repl_propagate(core, argv, argc);
+    return reply_int(c, nlen);
+  }
+  if (cmd_eq(cmd, clen, "rename") || cmd_eq(cmd, clen, "renamenx")) {
+    int nx = cmd_eq(cmd, clen, "renamenx");
+    const char* cname = nx ? "renamenx" : "rename";
+    if (argc != 3) {
+      char ebuf[80];
+      snprintf(ebuf, sizeof(ebuf), "ERR wrong number of arguments for '%s'", cname);
+      return reply_err(c, ebuf);
+    }
+    int rc = ar_rename(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len, nx);
+    if (rc == 0)
+      return reply_err(c, "ERR no such key");
+    if (rc < 0)
+      return reply_err(c, "ERR OOM");
+    if (nx) {
+      /* 2 = dest exists (not renamed); 1 = renamed */
+      if (rc == 2)
+        return reply_int(c, 0);
+      repl_propagate(core, argv, argc);
+      return reply_int(c, 1);
+    }
+    repl_propagate(core, argv, argc);
+    return reply_ok(c);
   }
   if (cmd_eq(cmd, clen, "exists")) {
     if (argc < 2)

@@ -1176,6 +1176,126 @@ int ar_del(ArCore* core, const char* key) {
   return ar_del_bin(core, key, strlen(key));
 }
 
+/* APPEND key value — create if missing; WRONGTYPE on non-string; keeps TTL. */
+int64_t ar_append(ArCore* core, const char* key, size_t klen, const char* val,
+                  size_t vlen, int* wrongtype) {
+  if (wrongtype)
+    *wrongtype = 0;
+  if (!core || !key || (!val && vlen))
+    return -1;
+  if (!val)
+    vlen = 0;
+  core->ops++;
+  core->sets++;
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
+  if (!e) {
+    if (!ar_entry_set(core, key, klen, val ? val : "", vlen))
+      return -1;
+    e = ar_find_entry_ex(core, key, klen, &b, &tier);
+    return e ? (int64_t)e->vlen : -1;
+  }
+  if (e->type != AR_TYPE_STRING) {
+    if (wrongtype)
+      *wrongtype = 1;
+    return -1;
+  }
+  if (vlen == 0)
+    return (int64_t)e->vlen;
+  size_t newlen = e->vlen + vlen;
+  char* nv = (char*)malloc(newlen + 1);
+  if (!nv)
+    return -1;
+  if (e->vlen)
+    memcpy(nv, e->val, e->vlen);
+  memcpy(nv + e->vlen, val, vlen);
+  nv[newlen] = '\0';
+  free(e->val);
+  e->val = nv;
+  e->vlen = newlen;
+  core->used_memory += vlen;
+  ar_type_stats_bytes_delta(core, AR_TYPE_STRING, (int64_t)vlen);
+  ar_type_stats_note_bigkey(core, AR_TYPE_STRING, newlen);
+  e->last_access = ++core->clock;
+  /* keep expire_at (Redis APPEND does not clear TTL) */
+  if (core->layout == AR_LAYOUT_HOT_COLD && tier == 1)
+    ar_touch_get(core, e, b, tier);
+  if (core->evict && core->evict->on_set)
+    core->evict->on_set(core, e);
+  maybe_evict(core);
+  return (int64_t)newlen;
+}
+
+/* RENAME / RENAMENX — move any type; overwrite dest unless nx. */
+int ar_rename(ArCore* core, const char* key, size_t klen, const char* newkey,
+              size_t nklen, int nx) {
+  if (!core || !key || !newkey)
+    return -1;
+  core->ops++;
+  size_t sb = 0;
+  int stier = 0;
+  ArEntry* e = ar_find_entry_ex(core, key, klen, &sb, &stier);
+  if (!e)
+    return 0;
+  if (klen == nklen && memcmp(key, newkey, klen) == 0)
+    return 1;
+
+  size_t db = 0;
+  int dtier = 0;
+  ArEntry* dest = ar_find_entry_ex(core, newkey, nklen, &db, &dtier);
+  if (dest && nx)
+    return 2;
+
+  /* Allocate new key before destroying dest (avoid dest-lost-on-OOM). */
+  char* nk = xmemdup(newkey, nklen);
+  if (!nk)
+    return -1;
+  if (dest)
+    ar_entry_free_ex(core, db, dtier, dest);
+
+  ArEntry** stable =
+      (stier == 1 && core->cold_buckets) ? core->cold_buckets : core->buckets;
+  unlink_entry(stable, sb, e);
+  if (core->layout == AR_LAYOUT_HOT_COLD) {
+    if (stier == 1) {
+      if (core->cold_nkeys)
+        core->cold_nkeys--;
+    } else {
+      if (core->hot_nkeys)
+        core->hot_nkeys--;
+    }
+  }
+
+  if (nklen > e->klen) {
+    size_t delta = nklen - e->klen;
+    ar_mem_add(core, delta);
+    ar_type_stats_bytes_delta(core, e->type, (int64_t)delta);
+  } else if (nklen < e->klen) {
+    size_t delta = e->klen - nklen;
+    ar_mem_sub(core, delta);
+    ar_type_stats_bytes_delta(core, e->type, -(int64_t)delta);
+  }
+  free(e->key);
+  e->key = nk;
+  e->klen = nklen;
+  e->last_access = ++core->clock;
+  core->sets++;
+
+  size_t nb = hash_bin(newkey, nklen) & (core->nbuckets - 1);
+  e->next = core->buckets[nb];
+  core->buckets[nb] = e;
+  if (core->layout == AR_LAYOUT_HOT_COLD)
+    core->hot_nkeys++;
+
+  if (core->evict && core->evict->on_set)
+    core->evict->on_set(core, e);
+  maybe_demote_hot(core);
+  ar_rehash_if_needed(core);
+  maybe_evict(core);
+  return 1;
+}
+
 int ar_exists_bin(ArCore* core, const char* key, size_t klen) {
   if (!core || !key)
     return 0;

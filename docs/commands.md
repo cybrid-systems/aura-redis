@@ -4,7 +4,7 @@
 **Not covered here:** pure-Lisp `AURA_REDIS_ENGINE=aura` (broader demo subset in README).  
 **Production product:** string KV cache + Aura control commands — see [`production-plan.md`](production-plan.md).
 
-Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET NX/XX/EX/PX (+ SETNX/GETSET).
+Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLINK (+ RENAMENX).
 
 ---
 
@@ -28,6 +28,10 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET NX/XX/EX/PX (+ SETNX/GETS
 | `EXPIRE` | 3 | integer 0/1 | |
 | `TTL` | 2 | integer | −2 missing, −1 no expire, else seconds |
 | `DEL` | ≥2 | integer deleted | multi-key |
+| `UNLINK` | ≥2 | integer deleted | Tier-2: DEL-equivalent (single-threaded; no async reclaim) |
+| `APPEND` | 3 | integer new length | create if missing; WRONGTYPE on non-string; keeps TTL |
+| `RENAME` | 3 | `+OK` / ERR | overwrite dest; any type; ERR no such key |
+| `RENAMENX` | 3 | integer 0/1 | rename only if dest absent |
 | `EXISTS` | ≥2 | integer count | multi-key |
 | `MGET` | ≥2 | array of bulks | |
 | `MSET` | odd ≥3 | `+OK` | key val pairs |
@@ -95,8 +99,8 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 |------|----------|
 | Auth / admin | `SHUTDOWN`, `CLIENT`, `SLOWLOG`, `MONITOR` (AUTH/HELLO done in P0.4) |
 | Persistence / repl | `BGREWRITEAOF`, `PSYNC` (SAVE/BGSAVE/REPLICAOF/SYNC done P2.13–14) |
-| Strings extras | `APPEND`, `STRLEN`, `SETEX`, `PSETEX`, `SET` GET/KEEPTTL/EXAT/PXAT |
-| Keys extras | `DBSIZE`, `RENAME`, `UNLINK` (≠ DEL alias); `KEYS`/`SCAN` done P3.18 |
+| Strings extras | `STRLEN`, `SETEX`, `PSETEX`, `SET` GET/KEEPTTL/EXAT/PXAT |
+| Keys extras | `DBSIZE`; `APPEND`/`RENAME`/`RENAMENX`/`UNLINK` done T2.10; `KEYS`/`SCAN` done P3.18 |
 | (types) | HASH/LIST/ZSET done P3.16 |
 | Patterns / WATCH | `PSUBSCRIBE`, `WATCH`/`UNWATCH` (deferred) |
 | Cluster / modules | all |

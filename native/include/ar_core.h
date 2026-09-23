@@ -250,6 +250,15 @@ size_t ar_scan(ArCore* core, uint64_t cursor, const char* pattern, size_t plen,
 size_t ar_keys(ArCore* core, const char* pattern, size_t plen, char*** out_keys,
                size_t** out_klens);
 
+/* Tier-2 string/key ops */
+/* APPEND: new length; *wrongtype=1 on non-string; -1 on OOM/wrongtype. */
+int64_t ar_append(ArCore* core, const char* key, size_t klen, const char* val,
+                  size_t vlen, int* wrongtype);
+/* RENAME: 1=ok, 0=no such key, 2=RENAMENX dest exists, -1=OOM.
+ * nx!=0 → do not overwrite destination. Moves any type; preserves TTL. */
+int ar_rename(ArCore* core, const char* key, size_t klen, const char* newkey,
+              size_t nklen, int nx);
+
 #ifdef __cplusplus
 }
 #endif
