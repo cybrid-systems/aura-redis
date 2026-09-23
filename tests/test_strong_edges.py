@@ -28,6 +28,7 @@ from _agentutil import (  # noqa: E402
     agent_logs as _agent_logs,
     start_agent as _start_agent,
     stop_agent as _stop_agent,
+    wait_log as _wait_log,
 )
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26990"))
@@ -262,12 +263,14 @@ def test_canary_default_off_fitness(proc: subprocess.Popen) -> None:
         },
     )
     try:
-        # Wait boot (native or docker via _agentutil)
-        for _ in range(100):
-            text = _agent_logs(cid, agent_log)
-            if "policy_agent:" in text or "PING" in text or boot.exists():
-                break
-            time.sleep(0.15)
+        # Wait boot (native or docker via _agentutil); fail-fast if agent dies.
+        _wait_log(
+            cid,
+            ["policy_agent:", "PING", "PONG"],
+            timeout=30,
+            log_path=agent_log,
+            match_any=True,
+        )
         s = socket.create_connection(("127.0.0.1", port), timeout=5)
         # Drive miss-heavy traffic so fitness path has signal
         val = "v" * 80

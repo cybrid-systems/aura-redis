@@ -24,6 +24,7 @@ from _agentutil import (  # noqa: E402
     agent_logs as _agent_logs,
     start_agent as _start_agent,
     stop_agent as _stop_agent,
+    wait_log as _wait_log,
 )
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26973"))
@@ -82,14 +83,10 @@ def start_agent() -> str:
         },
         log_path=AGENT_LOG,
     )
-    t0 = time.time()
-    last = ""
-    while time.time() - t0 < 18:
-        last = _agent_logs(cid, AGENT_LOG)
-        if "PING" in last or "evolve=" in last:
-            return cid
-        time.sleep(0.15)
-    raise TimeoutError(f"agent did not boot; log:\n{last[-2000:]}")
+    _wait_log(
+        cid, ["PING", "PONG", "evolve="], timeout=30, log_path=AGENT_LOG, match_any=True
+    )
+    return cid
 
 
 def drive_traffic(rounds: int = 10) -> None:

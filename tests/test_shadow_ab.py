@@ -24,6 +24,7 @@ from _agentutil import (  # noqa: E402
     agent_logs as _agent_logs,
     start_agent as _start_agent,
     stop_agent as _stop_agent,
+    wait_log as _wait_log,
 )
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26982"))
@@ -119,14 +120,14 @@ def start_agent() -> str:
         log_path=AGENT_LOG,
         path_env={"AURA_REDIS_POLICY_HEARTBEAT": hb_path},
     )
-    t0 = time.time()
-    last = ""
-    while time.time() - t0 < 18:
-        last = _agent_logs(cid, AGENT_LOG)
-        if "shadow-ab on" in last or "PING" in last or "policy_agent:" in last:
-            return cid
-        time.sleep(0.15)
-    raise TimeoutError(f"agent did not boot; log:\n{last[-2000:]}")
+    _wait_log(
+        cid,
+        ["shadow-ab on", "PING", "PONG", "policy_agent:"],
+        timeout=30,
+        log_path=AGENT_LOG,
+        match_any=True,
+    )
+    return cid
 
 
 def test_agent_shadow_dryrun(cid: str) -> None:

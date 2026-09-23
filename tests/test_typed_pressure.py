@@ -24,6 +24,7 @@ from _agentutil import (  # noqa: E402
     agent_logs as _agent_logs,
     start_agent as _start_agent,
     stop_agent as _stop_agent,
+    wait_log as _wait_log,
 )
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26983"))
@@ -128,15 +129,18 @@ def start_agent() -> str:
         log_path=AGENT_LOG,
         path_env={"AURA_REDIS_POLICY_HEARTBEAT": hb_path},
     )
-    t0 = time.time()
-    last = ""
-    while time.time() - t0 < 18:
-        last = _agent_logs(cid, AGENT_LOG)
-        if "policy_agent:" in last or "PING" in last or BOOT.exists():
-            return cid
-        time.sleep(0.15)
-    _stop_agent(cid)
-    raise RuntimeError("agent boot timeout:\n" + last[-2000:])
+    try:
+        _wait_log(
+            cid,
+            ["policy_agent:", "PING", "PONG"],
+            timeout=30,
+            log_path=AGENT_LOG,
+            match_any=True,
+        )
+    except Exception:
+        _stop_agent(cid)
+        raise
+    return cid
 
 
 def stop_agent(cid: str) -> None:

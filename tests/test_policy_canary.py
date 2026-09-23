@@ -26,6 +26,7 @@ from _agentutil import (  # noqa: E402
     agent_logs as _agent_logs,
     start_agent as _start_agent,
     stop_agent as _stop_agent,
+    wait_log as _wait_log,
 )
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26953"))
@@ -90,14 +91,11 @@ def start_agent(tag: str, inject: str, seed: str = "normal") -> str:
             "AURA_REDIS_POLICY_AUDIT": p["audit"],
         },
     )
-    t0 = time.time()
-    last = ""
-    while time.time() - t0 < 12:
-        last = _agent_logs(cid, p["agent_log"])
-        if "PING" in last or "PONG" in last:
-            return cid
-        time.sleep(0.15)
-    raise TimeoutError(f"agent did not PING; log:\n{last}")
+    # Same as A3: line-buffered native logs + fail-fast if agent dies.
+    _wait_log(
+        cid, ["PING", "PONG"], timeout=30, log_path=p["agent_log"], match_any=True
+    )
+    return cid
 
 
 def drive_load(rounds: int = 40) -> None:
