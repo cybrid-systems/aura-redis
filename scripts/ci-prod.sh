@@ -40,6 +40,10 @@ run P3.17b tests/test_prod_pubsub.py
 run P3.18-scan tests/test_prod_scan.py
 run T2.hscan tests/test_prod_hscan.py
 run T2.ms-ttl-incr tests/test_prod_ms_ttl_incr.py
+run T2.slowlog-cmd tests/test_prod_slowlog_cmd.py
+run T2.list-mutate tests/test_prod_list_mutate.py
+run T2.replica-failover tests/test_prod_replica_failover.py
+run T2.zset-cap tests/test_prod_zset_cap.py
 run T2.9-set-opts tests/test_prod_set_opts.py
 run T2.10-string-keys tests/test_prod_string_keys.py
 run T2.11-string-meta tests/test_prod_string_meta.py

@@ -81,12 +81,26 @@ typedef enum {
 #define AR_MULTI_ARGV 32
 #define AR_PUBSUB_MAX 64
 #define AR_WATCH_MAX 64
+#define AR_SLOWLOG_MAX 128
+#define AR_SLOWLOG_ARGV 8
+#define AR_SLOWLOG_ARG_LEN 48
+#define AR_ZSET_MAX_MEMBERS 4096
+#define AR_ZSET_RANGE_MATCH_CAP 256
 
 typedef struct ArQueuedCmd {
   int argc;
   char* args[AR_MULTI_ARGV];
   size_t alens[AR_MULTI_ARGV];
 } ArQueuedCmd;
+
+typedef struct ArSlowEntry {
+  uint64_t id;
+  int64_t unix_ts; /* seconds */
+  uint64_t duration_us;
+  int argc;
+  char args[AR_SLOWLOG_ARGV][AR_SLOWLOG_ARG_LEN];
+  size_t alens[AR_SLOWLOG_ARGV];
+} ArSlowEntry;
 
 typedef struct ArConn {
   int fd;
@@ -192,6 +206,11 @@ struct ArCore {
   /* P1.10 — command latency / slowlog */
   int slowlog_slower_than_us; /* threshold µs; default 10000 */
   uint64_t slowlog_count; /* commands slower than threshold */
+  ArSlowEntry slowlog[AR_SLOWLOG_MAX];
+  int slowlog_len; /* entries currently stored */
+  int slowlog_head; /* next write slot (ring) */
+  uint64_t slowlog_next_id;
+  int slowlog_max_len; /* CONFIG slowlog-max-len; default AR_SLOWLOG_MAX */
   uint64_t cmd_lt_1ms, cmd_lt_10ms, cmd_lt_100ms, cmd_ge_100ms;
   uint64_t cmd_latency_sum_us; /* for avg */
   uint64_t cmd_latency_samples;
@@ -332,6 +351,13 @@ char* ar_list_lindex(ArCore* core, const char* key, size_t klen, int64_t index,
                      size_t* out_len, int* wrongtype);
 /* LRANGE fills via iterating; exposed struct accessors */
 ArList* ar_list_get(ArCore* core, const char* key, size_t klen, int* wrongtype);
+/* LREM: remove count occurrences of element; count>0 head→tail, <0 tail→head, 0=all.
+ * Returns removed count; -1 WRONGTYPE. */
+int64_t ar_list_lrem(ArCore* core, const char* key, size_t klen, int64_t count,
+                     const char* elem, size_t elen, int* wrongtype);
+/* LTRIM: keep only [start,stop] inclusive (Redis negative indices). 1=ok, -1 WRONGTYPE. */
+int ar_list_ltrim(ArCore* core, const char* key, size_t klen, int64_t start,
+                  int64_t stop, int* wrongtype);
 
 /* ZSET */
 int ar_zset_zadd(ArCore* core, const char* key, size_t klen,

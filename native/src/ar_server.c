@@ -526,6 +526,7 @@ static int cmd_is_write(const char* cmd, size_t clen) {
          cmd_eq(cmd, clen, "hdel") || cmd_eq(cmd, clen, "hincrby") ||
          cmd_eq(cmd, clen, "lpush") || cmd_eq(cmd, clen, "rpush") ||
          cmd_eq(cmd, clen, "lpop") || cmd_eq(cmd, clen, "rpop") ||
+         cmd_eq(cmd, clen, "lrem") || cmd_eq(cmd, clen, "ltrim") ||
          cmd_eq(cmd, clen, "zadd") || cmd_eq(cmd, clen, "zrem") ||
          cmd_eq(cmd, clen, "publish");
 }
@@ -701,7 +702,34 @@ static uint64_t ar_now_us(void) {
   return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000ull);
 }
 
-static void note_cmd_latency(ArCore* core, uint64_t us) {
+static void slowlog_push(ArCore* core, uint64_t us, Arg* argv, int argc) {
+  if (!core)
+    return;
+  int maxl = core->slowlog_max_len;
+  if (maxl <= 0)
+    return;
+  if (maxl > AR_SLOWLOG_MAX)
+    maxl = AR_SLOWLOG_MAX;
+  ArSlowEntry* e = &core->slowlog[core->slowlog_head];
+  e->id = core->slowlog_next_id++;
+  e->unix_ts = (int64_t)time(NULL);
+  e->duration_us = us;
+  e->argc = argc < AR_SLOWLOG_ARGV ? argc : AR_SLOWLOG_ARGV;
+  for (int i = 0; i < e->argc; ++i) {
+    size_t n = argv[i].len;
+    if (n >= AR_SLOWLOG_ARG_LEN)
+      n = AR_SLOWLOG_ARG_LEN - 1;
+    if (n && argv[i].p)
+      memcpy(e->args[i], argv[i].p, n);
+    e->args[i][n] = '\0';
+    e->alens[i] = n;
+  }
+  core->slowlog_head = (core->slowlog_head + 1) % maxl;
+  if (core->slowlog_len < maxl)
+    core->slowlog_len++;
+}
+
+static void note_cmd_latency(ArCore* core, uint64_t us, Arg* argv, int argc) {
   if (!core)
     return;
   core->cmd_latency_sum_us += us;
@@ -716,8 +744,12 @@ static void note_cmd_latency(ArCore* core, uint64_t us) {
     core->cmd_ge_100ms++;
   /* 0 = log all (Redis-ish); negative disabled via CONFIG guard */
   if (core->slowlog_slower_than_us >= 0 &&
-      us >= (uint64_t)core->slowlog_slower_than_us)
+      us >= (uint64_t)core->slowlog_slower_than_us) {
     core->slowlog_count++;
+    /* Do not record SLOWLOG itself (RESET would immediately re-fill the ring). */
+    if (argv && argc > 0 && !cmd_eq(argv[0].p, argv[0].len, "slowlog"))
+      slowlog_push(core, us, argv, argc);
+  }
 }
 
 static int connected_clients(ArCore* core) {
@@ -1090,6 +1122,17 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (cmd_eq(cmd, clen, "quit")) {
     reply_ok(c);
     c->should_close = 1;
+    return 0;
+  }
+  if (cmd_eq(cmd, clen, "shutdown")) {
+    /* Alias of SIGTERM path: stop accept, drain, exit 0. Optional NOSAVE/SAVE ignored
+     * (aura-rdb is explicit SAVE only; no auto-dump on shutdown). */
+    if (argc > 2)
+      return reply_err(c, "ERR wrong number of arguments for 'shutdown'");
+    reply_ok(c);
+    c->should_close = 1;
+    core->quit = 1;
+    core->shutting_down = 1;
     return 0;
   }
   /* P2.13 — SAVE / BGSAVE (aura-rdb snapshot) */
@@ -1830,6 +1873,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         char vbuf[32];
         snprintf(vbuf, sizeof(vbuf), "%d", core->slowlog_slower_than_us);
         AR_CFG_ADD("slowlog-log-slower-than", "%s", vbuf);
+        snprintf(vbuf, sizeof(vbuf), "%d", core->slowlog_max_len);
+        AR_CFG_ADD("slowlog-max-len", "%s", vbuf);
       }
       AR_CFG_ADD("dir", "%s", ar_core_rdb_dir(core));
       AR_CFG_ADD("dbfilename", "%s", ar_core_rdb_filename(core));
@@ -1882,6 +1927,22 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         if (!ar_core_set_requirepass(core, val))
           return reply_err(c, "ERR config set requirepass");
         /* Existing connections keep auth state; new ones need AUTH if set */
+        if (core->config_path[0]) {
+          fprintf(stderr,
+                  "aura-redis: WARN config: requirepass stored in cleartext in %s "
+                  "(protect file mode/ownership)\n",
+                  core->config_path);
+          fflush(stderr);
+        }
+        if (!val[0] && core->protected_mode == 0 &&
+            core->bind_addr[0] && strcmp(core->bind_addr, "127.0.0.1") != 0 &&
+            strcmp(core->bind_addr, "::1") != 0) {
+          fprintf(stderr,
+                  "aura-redis: WARN security: empty requirepass + protected-mode no "
+                  "+ non-loopback bind (%s)\n",
+                  core->bind_addr);
+          fflush(stderr);
+        }
         return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "protected-mode")) {
@@ -1919,6 +1980,17 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         int n = atoi(val);
         if (!ar_core_set_slowlog_slower_than(core, n))
           return reply_err(c, "ERR config set slowlog-log-slower-than");
+        return config_set_ok(core, c);
+      }
+      if (cmd_eq(argv[2].p, argv[2].len, "slowlog-max-len")) {
+        int n = atoi(val);
+        if (n < 0)
+          n = 0;
+        if (n > AR_SLOWLOG_MAX)
+          n = AR_SLOWLOG_MAX;
+        core->slowlog_max_len = n;
+        if (core->slowlog_len > n)
+          core->slowlog_len = n;
         return config_set_ok(core, c);
       }
       if (cmd_eq(argv[2].p, argv[2].len, "dir")) {
@@ -2390,9 +2462,13 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     int wt = 0;
     int added = ar_zset_zadd(core, argv[1].p, argv[1].len, np, scores, members,
                              mlens, &wt);
-    if (wt || added < 0)
+    if (wt)
       return reply_err(
           c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (added == -2)
+      return reply_err(c, "ERR zset max members exceeded (Tier-2 sorted-array cap)");
+    if (added < 0)
+      return reply_err(c, "ERR zadd failed");
     repl_propagate(core, argv, argc);
     return reply_int(c, added);
   }
@@ -2548,9 +2624,9 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     if (!z || z->len == 0)
       return wbuf_append(c, "*0\r\n", 4);
     /* collect matching indices */
-    size_t match[256];
+    size_t match[AR_ZSET_RANGE_MATCH_CAP];
     int nm = 0;
-    for (size_t i = 0; i < z->len && nm < 256; ++i) {
+    for (size_t i = 0; i < z->len && nm < AR_ZSET_RANGE_MATCH_CAP; ++i) {
       double sc = z->arr[i].score;
       if (sc < minv || sc > maxv)
         continue;
@@ -2717,6 +2793,56 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       node = node->next;
     }
     return 0;
+  }
+  if (cmd_eq(cmd, clen, "lrem")) {
+    if (argc != 4)
+      return reply_err(c, "ERR wrong number of arguments for 'lrem'");
+    char nbuf[32];
+    if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[2].p, argv[2].len);
+    nbuf[argv[2].len] = '\0';
+    char* end = NULL;
+    long long count = strtoll(nbuf, &end, 10);
+    if (end == nbuf || *end != '\0')
+      return reply_err(c, "ERR value is not an integer or out of range");
+    int wt = 0;
+    int64_t rem = ar_list_lrem(core, argv[1].p, argv[1].len, (int64_t)count,
+                               argv[3].p, argv[3].len, &wt);
+    if (wt || rem < 0)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    if (rem > 0)
+      repl_propagate(core, argv, argc);
+    return reply_int(c, rem);
+  }
+  if (cmd_eq(cmd, clen, "ltrim")) {
+    if (argc != 4)
+      return reply_err(c, "ERR wrong number of arguments for 'ltrim'");
+    char nbuf[32];
+    long long start, stop;
+    char* end = NULL;
+    if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf) ||
+        argv[3].len == 0 || argv[3].len >= sizeof(nbuf))
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[2].p, argv[2].len);
+    nbuf[argv[2].len] = '\0';
+    start = strtoll(nbuf, &end, 10);
+    if (end == nbuf || *end != '\0')
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[3].p, argv[3].len);
+    nbuf[argv[3].len] = '\0';
+    end = NULL;
+    stop = strtoll(nbuf, &end, 10);
+    if (end == nbuf || *end != '\0')
+      return reply_err(c, "ERR value is not an integer or out of range");
+    int wt = 0;
+    int rc = ar_list_ltrim(core, argv[1].p, argv[1].len, start, stop, &wt);
+    if (wt || rc < 0)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    repl_propagate(core, argv, argc);
+    return reply_ok(c);
   }
 
   /* ---- P3.16a HASH ---- */
@@ -3122,6 +3248,75 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     return 0;
   }
 
+  if (cmd_eq(cmd, clen, "slowlog")) {
+    if (argc < 2)
+      return reply_err(c, "ERR wrong number of arguments for 'slowlog'");
+    if (cmd_eq(argv[1].p, argv[1].len, "len")) {
+      if (argc != 2)
+        return reply_err(c, "ERR wrong number of arguments for 'slowlog'");
+      return reply_int(c, core->slowlog_len);
+    }
+    if (cmd_eq(argv[1].p, argv[1].len, "reset")) {
+      if (argc != 2)
+        return reply_err(c, "ERR wrong number of arguments for 'slowlog'");
+      core->slowlog_len = 0;
+      core->slowlog_head = 0;
+      return reply_ok(c);
+    }
+    if (cmd_eq(argv[1].p, argv[1].len, "get")) {
+      int want = core->slowlog_len;
+      if (argc == 3) {
+        char nbuf[32];
+        if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+          return reply_err(c, "ERR value is not an integer or out of range");
+        memcpy(nbuf, argv[2].p, argv[2].len);
+        nbuf[argv[2].len] = '\0';
+        char* e2 = NULL;
+        long long cv = strtoll(nbuf, &e2, 10);
+        if (!e2 || *e2 != '\0' || cv < 0)
+          return reply_err(c, "ERR value is not an integer or out of range");
+        if (cv < want)
+          want = (int)cv;
+      } else if (argc != 2) {
+        return reply_err(c, "ERR wrong number of arguments for 'slowlog'");
+      }
+      int maxl = core->slowlog_max_len;
+      if (maxl <= 0)
+        maxl = AR_SLOWLOG_MAX;
+      if (maxl > AR_SLOWLOG_MAX)
+        maxl = AR_SLOWLOG_MAX;
+      /* Newest first: head-1, head-2, ... */
+      char hdr[32];
+      int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", want);
+      if (hn < 0 || wbuf_append(c, hdr, (size_t)hn) < 0)
+        return -1;
+      for (int i = 0; i < want; ++i) {
+        int idx = core->slowlog_head - 1 - i;
+        while (idx < 0)
+          idx += maxl;
+        ArSlowEntry* e = &core->slowlog[idx % maxl];
+        /* Redis: *4 id unix_ts duration argv-array (we omit client fields) */
+        if (wbuf_append(c, "*4\r\n", 4) < 0)
+          return -1;
+        if (reply_int(c, (int64_t)e->id) < 0)
+          return -1;
+        if (reply_int(c, e->unix_ts) < 0)
+          return -1;
+        if (reply_int(c, (int64_t)e->duration_us) < 0)
+          return -1;
+        hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", e->argc);
+        if (hn < 0 || wbuf_append(c, hdr, (size_t)hn) < 0)
+          return -1;
+        for (int a = 0; a < e->argc; ++a) {
+          if (reply_bulk(c, e->args[a], e->alens[a]) < 0)
+            return -1;
+        }
+      }
+      return 0;
+    }
+    return reply_err(c, "ERR unknown subcommand for 'slowlog'");
+  }
+
   return reply_err(c, "ERR unknown command");
 }
 
@@ -3211,7 +3406,7 @@ static int process_reads(ArCore* core, ArConn* c) {
         c->wlen = 0;
         c->woff = 0;
       }
-      note_cmd_latency(core, ar_now_us() - t0);
+      note_cmd_latency(core, ar_now_us() - t0, argv, argc);
       if (dr < 0) {
         c->should_close = 1;
         break;

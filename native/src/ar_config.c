@@ -74,6 +74,13 @@ static int apply_kv(ArCore* core, const char* key, const char* val) {
   if (key_eq(key, "slowlog-log-slower-than")) {
     return ar_core_set_slowlog_slower_than(core, atoi(val)) ? 1 : 0;
   }
+  if (key_eq(key, "slowlog-max-len")) {
+    int n = atoi(val);
+    if (n < 0) n = 0;
+    if (n > AR_SLOWLOG_MAX) n = AR_SLOWLOG_MAX;
+    core->slowlog_max_len = n;
+    return 1;
+  }
   if (key_eq(key, "dir")) {
     return ar_core_set_rdb_dir(core, val) ? 1 : 0;
   }
@@ -172,6 +179,7 @@ int ar_config_rewrite(ArCore* core) {
   fprintf(f, "timeout %d\n", core->timeout_sec);
   fprintf(f, "tcp-backlog %d\n", core->tcp_backlog);
   fprintf(f, "slowlog-log-slower-than %d\n", core->slowlog_slower_than_us);
+  fprintf(f, "slowlog-max-len %d\n", core->slowlog_max_len);
   fprintf(f, "dir %s\n", ar_core_rdb_dir(core));
   fprintf(f, "dbfilename %s\n", ar_core_rdb_filename(core));
   fprintf(f, "bind %s\n",

@@ -2,7 +2,7 @@
 
 **Audience:** operators bringing a single-node aura-redis into staging/canary.  
 **Product:** RESP2 cache/KV + Aura `policy_agent` control plane — **not** Redis Cluster.  
-**Companions:** [`prod-profile.md`](prod-profile.md) · [`client-allowlist.md`](client-allowlist.md) · [`persistence.md`](persistence.md) · [`tls.md`](tls.md) · [`commands.md`](commands.md) · [`production-plan.md`](production-plan.md)
+**Companions:** [`prod-profile.md`](prod-profile.md) · [`client-allowlist.md`](client-allowlist.md) · [`intake-reject-checklist.md`](intake-reject-checklist.md) · [`persistence.md`](persistence.md) · [`tls.md`](tls.md) · [`commands.md`](commands.md) · [`production-plan.md`](production-plan.md)
 
 **Invariant:** `AURA_REDIS_DENY_PLUGIN=1`. Do not ship with PLUGIN/.so as the adaptation path.
 
@@ -57,14 +57,15 @@ Verify: `python3 tests/test_prod_policy_ha.py`.
 
 ---
 
-## 4. REPLICAOF + policy pin (A6)
+## 4. REPLICAOF + policy pin (A6) — honesty
 
 - Single async replica: `REPLICAOF <host> <port>` on the replica; `REPLICAOF NO ONE` to promote.
 - Replica is **read-only** for writes (`-READONLY`).
-- String KV feed (typed keys: treat replica as best-effort; prefer SAVE warm-start for typed durability).
-- After failover, start `policy_agent` against the new primary; durable **policy-pin** resumes last version when configured.
+- Full-sync + live feed cover **string + HASH/LIST/ZSET** (best-effort async — not Redis PSYNC/Cluster/sentinel).
+- **No auto-reconnect** on master link loss: replica keeps last applied data and stays read-only until an operator re-issues `REPLICAOF` (or restarts). Do not claim HA.
+- After promote: point clients + `policy_agent` at the new primary; durable **policy-pin** resumes last version when configured.
 
-Test: `python3 tests/test_prod_replica.py`.
+Tests: `python3 tests/test_prod_replica.py` · `python3 tests/test_prod_replica_failover.py`.
 
 ---
 
@@ -88,13 +89,24 @@ See **[`client-allowlist.md`](client-allowlist.md)** (Tier 2 allowlist). Keyspac
 
 ---
 
-## 7. Cache-only vs SAVE semantics
+## 7. Cache-only vs SAVE / RPO
 
 | Mode | Restart behavior |
 |------|------------------|
 | **Cache-only (default)** | No SAVE → empty keyspace on restart. Honest for pure cache. |
 | **Warm-start** | `SAVE` / `BGSAVE` writes **aura-rdb v2** (string + HASH + LIST + ZSET + TTL). Load at startup from `--dir`/`--dbfilename`. |
 | **Not durable like AOF** | Crash between SAVEs loses recent writes. No AOF/fsync-every-write. |
+
+### RPO (recovery point objective) — honest bar
+
+| Knob | Meaning |
+|------|---------|
+| **RPO with cache-only** | Entire keyspace since boot (or last load) — typically **seconds…minutes of app traffic**, unbounded until SAVE. |
+| **RPO with periodic SAVE/BGSAVE** | ≈ interval between successful dumps (ops-chosen). Crash loses writes after last `rdb_last_save_time`. |
+| **RPO with replica only** | Not a durability story — async feed + fail-closed on link loss; prefer SAVE on primary for warm-start. |
+| **Not offered** | Redis AOF `everysec`/`always`, diskless sync, multi-replica quorum. |
+
+Ops checklist: schedule `BGSAVE` (or external `SAVE`) if warm-start matters; monitor INFO `rdb_last_save_time` / `rdb_last_bgsave_status`; treat replica as read-scaling / failover assist only.
 
 Details: [`persistence.md`](persistence.md).
 

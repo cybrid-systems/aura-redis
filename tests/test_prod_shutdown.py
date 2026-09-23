@@ -94,8 +94,32 @@ def test_sigint_clean_exit() -> None:
             proc.wait(timeout=2)
 
 
+
+def test_shutdown_cmd() -> None:
+    """SHUTDOWN command aliases SIGTERM graceful path."""
+    proc, log = start_server()
+    try:
+        with socket.create_connection(("127.0.0.1", PORT), timeout=5) as sock:
+            assert redis_call(sock, "SET", "a", "1") == "OK"
+            assert redis_call(sock, "SHUTDOWN") == "OK"
+        try:
+            rc = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise AssertionError("SHUTDOWN did not exit within 5s")
+        assert rc == 0, f"exit code {rc}, log:\n{log.read_text()}"
+        txt = log.read_text(errors="replace")
+        assert "graceful shutdown complete" in txt, txt
+        print("SHUTDOWN cmd clean exit OK")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
 def main() -> int:
     test_sigterm_clean_exit()
+    test_shutdown_cmd()
     test_sigint_clean_exit()
     print("test_prod_shutdown: ALL PASSED")
     return 0

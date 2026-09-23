@@ -17,6 +17,8 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLI
 | `HELLO` | 1+ | array map | Minimal stub; optional `AUTH` inline; allowed pre-AUTH |
 | `CONFIG` | GET 3 / SET 4 / REWRITE 2 | array / `+OK` | Knobs: `maxmemory`, `requirepass`, `protected-mode`, `evict-samples`, `bind` (GET), `maxclients`, `timeout`, `tcp-backlog`, `slowlog-log-slower-than`, `dir`, `dbfilename`, `shadow-*`, `hot-*`, `config-file` (GET). Durable SET auto-rewrites `--config` / `AURA_REDIS_CONFIG` file; `CONFIG REWRITE` explicit |
 | `CLIENT` | LIST 2 / ID 2 / SETNAME 3 / KILL 3–4 | bulk / int / `+OK` | Ops: `CLIENT LIST` (id/addr/fd/name/age/idle/flags/db/cmd); `CLIENT ID`; `CLIENT SETNAME`; `CLIENT KILL <addr>` or `CLIENT KILL ID <id>` |
+| `SLOWLOG` | GET 2–3 / RESET 2 / LEN 2 | array / `+OK` / int | Thin ring (default max 128); threshold `CONFIG slowlog-log-slower-than`; `slowlog-max-len` |
+| `SHUTDOWN` | 1–2 | `+OK` then exit | Graceful drain (SIGTERM path alias); NOSAVE/SAVE args ignored (explicit SAVE only) |
 | `SAVE` | 1 | `+OK` | P2.13 sync aura-rdb **v2** (string+HASH+LIST+ZSET+TTL) |
 | `BGSAVE` | 1 | `+OK` | P2.13 fork child aura-rdb v2 (or sync fallback) |
 | `REPLICAOF` / `SLAVEOF` | 3 | `+OK` | P2.14/T2.13: `host port` or `NO ONE`; replica read-only; full-sync string+HASH/LIST/ZSET |
@@ -48,7 +50,7 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLI
 | `FLUSHDB` | 1 | `+OK` | |
 | `DBSIZE` | 1 | integer | O(N) count of non-expired keys (string+typed); purges expired on walk |
 | `COMMAND` | 1 | `*0` | stub for clients that probe |
-| `INFO` | 1+ | bulk | Sectioned; flat keys for policy_agent; A7 `keys_{string,hash,list,zset}`/`mem_*`/`bigkey_*`; A9 `hot_soft_cap_*` |
+| `INFO` | 1+ | bulk | Sectioned; flat keys for policy_agent; A7 `keys_{string,hash,list,zset}`/`mem_*`/`bigkey_*`; A9 `hot_soft_cap_*`. **Stable for agents:** `gets,sets,hits,misses,keys,evict,layout,used_memory,role,connected_slaves,rdb_last_save_time,slowlog_count,keys_string,keys_hash,keys_list,keys_zset` |
 | `EVICT` | 1 / 2 / 3 | bulk name / `+OK` | `EVICT` \| `EVICT <noop\|lru\|lfu\|ttl_aware\|slru\|tinylfu>` \| `EVICT samples <n>` |
 | `LAYOUT` | 1 / 2 | bulk / `+OK` | `flat` \| `hot_cold` |
 | `PIN` | 1 / 2 | list / `+OK` | `PIN` lists; `PIN key` pins |
@@ -72,12 +74,14 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLI
 | `LLEN` | 2 | integer | |
 | `LRANGE` | 4 | array | Redis index semantics (neg OK) |
 | `LINDEX` | 3 | bulk/null | |
-| `ZADD` | ≥4 even | integer added | sorted array O(n); P3.16c |
+| `LREM` | 4 | integer | count>0 head→tail, <0 tail→head, 0=all; empty list deletes key |
+| `LTRIM` | 4 | `+OK` | keep [start,stop]; empty → delete key |
+| `ZADD` | ≥4 even | integer added | sorted array O(n); hard cap 4096 members |
 | `ZSCORE` | 3 | bulk/null | score string |
 | `ZREM` | ≥3 | integer | |
 | `ZCARD` | 2 | integer | |
 | `ZRANGE` | 4–5 | array | optional WITHSCORES |
-| `ZRANGEBYSCORE` | ≥4 | array | min/max, -inf/+inf; WITHSCORES; LIMIT |
+| `ZRANGEBYSCORE` | ≥4 | array | min/max, -inf/+inf; WITHSCORES; LIMIT; match-cap 256 |
 | `MULTI` | 1 | +OK | P3.17a; subsequent cmds → +QUEUED |
 | `EXEC` | 1 | array / null array | replies; `*-1` if WATCH key dirty; error if no MULTI |
 | `DISCARD` | 1 | +OK | clear queue + watches |
@@ -110,7 +114,7 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 
 | Area | Examples |
 |------|----------|
-| Auth / admin | `SHUTDOWN`, `SLOWLOG`, `MONITOR` (AUTH/HELLO done; `CLIENT LIST/ID/SETNAME/KILL` done) |
+| Auth / admin | `MONITOR` (AUTH/HELLO/CLIENT/SLOWLOG/SHUTDOWN done) |
 | Persistence / repl | `BGREWRITEAOF`, `PSYNC` (SAVE/BGSAVE/REPLICAOF/SYNC done P2.13–14) |
 | Strings extras | `SET` GET option (`KEEPTTL`/`EXAT`/`PXAT`/`STRLEN`/`SETEX`/`PSETEX` done) |
 | Keys extras | `APPEND`/`RENAME`/`RENAMENX`/`UNLINK` done T2.10; `DBSIZE` done T2.11; `KEYS`/`SCAN` done P3.18 |

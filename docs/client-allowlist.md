@@ -2,7 +2,7 @@
 
 **Purpose:** intake filter for apps targeting aura-redis. If an app needs a rejected surface, **do not onboard** — use Redis or wait for a later tier.
 
-Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](runbook.md).
+Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](runbook.md). One-page reject gate: [`intake-reject-checklist.md`](intake-reject-checklist.md).
 
 ---
 
@@ -15,7 +15,7 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 `HSET`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`, `HSCAN`
 
 ### LIST
-`LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LLEN`, `LRANGE`, `LINDEX`
+`LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LLEN`, `LRANGE`, `LINDEX`, `LREM`, `LTRIM`
 
 ### ZSET
 `ZADD`, `ZSCORE`, `ZREM`, `ZCARD`, `ZRANGE`, `ZRANGEBYSCORE` (+ `WITHSCORES`, `LIMIT`)
@@ -27,7 +27,7 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 `SUBSCRIBE`, `UNSUBSCRIBE`, `PUBLISH` — **no `PSUBSCRIBE`**
 
 ### Ops / Aura control (operators & agent — not app hot path)
-`INFO`, `CONFIG GET/SET/REWRITE`, `CLIENT LIST/ID/SETNAME/KILL`, `SAVE`, `BGSAVE`, `EVICT`, `LAYOUT`, `PIN`, `UNPIN`, `POLICY`, `SHADOW`, `HOTCOLD`, `REPLICAOF` / `SLAVEOF`
+`INFO`, `CONFIG GET/SET/REWRITE`, `CLIENT LIST/ID/SETNAME/KILL`, `SAVE`, `BGSAVE`, `SLOWLOG GET/RESET/LEN`, `SHUTDOWN`, `EVICT`, `LAYOUT`, `PIN`, `UNPIN`, `POLICY`, `SHADOW`, `HOTCOLD`, `REPLICAOF` / `SLAVEOF`
 
 ---
 
@@ -104,7 +104,9 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 
 - Full sync emits `SET`/`HSET`/`RPUSH`/`ZADD` (+ `EXPIRE` when TTL) for existing keys.
 - Live feed propagates string writes **and** HSET/HDEL/HINCRBY/LPUSH/RPUSH/LPOP/RPOP/ZADD/ZREM.
-- Best-effort async single replica (not Redis PSYNC/Cluster); fail-closed on link loss until re-`REPLICAOF`.
+- Best-effort async **single** replica (not Redis PSYNC/Cluster/sentinel).
+- **Link loss:** fail-closed — replica stays read-only with last applied state; **no auto-reconnect**. Operator must re-issue `REPLICAOF host port` (or restart with the same). Test: `tests/test_prod_replica_failover.py`.
+- **Promote:** `REPLICAOF NO ONE` on the survivor; point clients + `policy_agent` at the new primary. Old primary should stop writes or re-attach as replica.
 
 ## CONFIG persist / CLIENT LIST caveats (Tier 2)
 
@@ -114,3 +116,10 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 - **CLIENT LIST:** Redis-ish single bulk of `id=… addr=… fd=… name=… age=… idle=… flags=… db=0 cmd=…` lines. Flags: `N` normal, `S` replica feed, `M` master link, `P` pubsub, `x` MULTI.
 - **CLIENT KILL / SETNAME / ID:** supported; no `CLIENT PAUSE` / tracking / caching.
 
+
+## ZSET scale caveats (Tier 2)
+
+- **Implementation:** sorted array (score asc, member lex) — **O(n)** insert/delete, not Redis skiplist.
+- **Hard size bar:** `AR_ZSET_MAX_MEMBERS` = **4096** members per key. `ZADD` that would grow past the bar → `ERR zset max members exceeded` + stderr WARN. Updates (same member, new score) still allowed at the bar.
+- **ZRANGEBYSCORE match-cap:** at most **256** matching members returned per call (`AR_ZSET_RANGE_MATCH_CAP`). Larger ranges need Redis or a later skiplist tier.
+- **Intake:** apps that need large leaderboards / unbounded ZADD → **reject** for Tier 2.

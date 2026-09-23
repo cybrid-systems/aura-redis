@@ -963,6 +963,10 @@ ArCore* ar_core_create(void) {
   c->timeout_sec = 0;
   c->tcp_backlog = 512;
   c->slowlog_slower_than_us = 10000;
+  c->slowlog_len = 0;
+  c->slowlog_head = 0;
+  c->slowlog_next_id = 0;
+  c->slowlog_max_len = AR_SLOWLOG_MAX;
   c->shutting_down = 0;
   /* Empty = CONFIG persist disabled until --config / AURA_REDIS_CONFIG. */
   c->config_path[0] = '\0';

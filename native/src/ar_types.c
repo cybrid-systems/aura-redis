@@ -889,6 +889,163 @@ ArList* ar_list_get(ArCore* core, const char* key, size_t klen,
   return (ArList*)e->obj;
 }
 
+/* LREM — Redis count semantics. */
+int64_t ar_list_lrem(ArCore* core, const char* key, size_t klen, int64_t count,
+                     const char* elem, size_t elen, int* wrongtype) {
+  if (wrongtype)
+    *wrongtype = 0;
+  if (!core || !elem)
+    return 0;
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e =
+      ar_entry_get_typed(core, key, klen, AR_TYPE_LIST, &b, &tier, wrongtype);
+  if (wrongtype && *wrongtype)
+    return -1;
+  if (!e)
+    return 0;
+  ArList* l = (ArList*)e->obj;
+  size_t old_pay = list_obj_bytes(l);
+  int64_t removed = 0;
+  int64_t limit = count < 0 ? -count : count; /* 0 = unlimited */
+
+  if (count >= 0) {
+    ArListNode* node = l->head;
+    while (node) {
+      ArListNode* next = node->next;
+      if (node->vlen == elen && memcmp(node->val, elem, elen) == 0) {
+        if (node->prev)
+          node->prev->next = node->next;
+        else
+          l->head = node->next;
+        if (node->next)
+          node->next->prev = node->prev;
+        else
+          l->tail = node->prev;
+        free(node->val);
+        free(node);
+        l->len--;
+        removed++;
+        if (limit && removed >= limit)
+          break;
+      }
+      node = next;
+    }
+  } else {
+    ArListNode* node = l->tail;
+    while (node) {
+      ArListNode* prev = node->prev;
+      if (node->vlen == elen && memcmp(node->val, elem, elen) == 0) {
+        if (node->prev)
+          node->prev->next = node->next;
+        else
+          l->head = node->next;
+        if (node->next)
+          node->next->prev = node->prev;
+        else
+          l->tail = node->prev;
+        free(node->val);
+        free(node);
+        l->len--;
+        removed++;
+        if (removed >= limit)
+          break;
+      }
+      node = prev;
+    }
+  }
+
+  if (l->len == 0) {
+    /* empty list → delete key (Redis) */
+    ar_entry_free_ex(core, b, tier, e);
+    ar_watch_touch(core, key, klen);
+    return removed;
+  }
+  size_t new_pay = list_obj_bytes(l);
+  if (old_pay >= new_pay) {
+    ar_mem_sub(core, old_pay - new_pay);
+    ar_type_stats_bytes_delta(core, e->type, -(int64_t)(old_pay - new_pay));
+  }
+  e->last_access = ++core->clock;
+  ar_watch_touch(core, key, klen);
+  return removed;
+}
+
+int ar_list_ltrim(ArCore* core, const char* key, size_t klen, int64_t start,
+                  int64_t stop, int* wrongtype) {
+  if (wrongtype)
+    *wrongtype = 0;
+  if (!core)
+    return 0;
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e =
+      ar_entry_get_typed(core, key, klen, AR_TYPE_LIST, &b, &tier, wrongtype);
+  if (wrongtype && *wrongtype)
+    return -1;
+  if (!e)
+    return 1; /* missing key → OK (Redis) */
+  ArList* l = (ArList*)e->obj;
+  int64_t len = (int64_t)l->len;
+  if (start < 0)
+    start = len + start;
+  if (stop < 0)
+    stop = len + stop;
+  if (start < 0)
+    start = 0;
+  if (stop >= len)
+    stop = len - 1;
+  if (start > stop || start >= len || len == 0) {
+    /* trim all → delete */
+    ar_entry_free_ex(core, b, tier, e);
+    ar_watch_touch(core, key, klen);
+    return 1;
+  }
+  size_t old_pay = list_obj_bytes(l);
+  /* drop head before start */
+  for (int64_t i = 0; i < start; ++i) {
+    ArListNode* node = l->head;
+    if (!node)
+      break;
+    l->head = node->next;
+    if (l->head)
+      l->head->prev = NULL;
+    else
+      l->tail = NULL;
+    free(node->val);
+    free(node);
+    l->len--;
+  }
+  /* drop after stop-start inclusive keep window */
+  int64_t keep = stop - start + 1;
+  while ((int64_t)l->len > keep) {
+    ArListNode* node = l->tail;
+    if (!node)
+      break;
+    l->tail = node->prev;
+    if (l->tail)
+      l->tail->next = NULL;
+    else
+      l->head = NULL;
+    free(node->val);
+    free(node);
+    l->len--;
+  }
+  if (l->len == 0) {
+    ar_entry_free_ex(core, b, tier, e);
+    ar_watch_touch(core, key, klen);
+    return 1;
+  }
+  size_t new_pay = list_obj_bytes(l);
+  if (old_pay >= new_pay) {
+    ar_mem_sub(core, old_pay - new_pay);
+    ar_type_stats_bytes_delta(core, e->type, -(int64_t)(old_pay - new_pay));
+  }
+  e->last_access = ++core->clock;
+  ar_watch_touch(core, key, klen);
+  return 1;
+}
+
 /* ---------- ZSET (sorted array) ---------- */
 
 static int zcmp(double sa, const char* ma, size_t mla, double sb,
@@ -945,6 +1102,21 @@ int ar_zset_zadd(ArCore* core, const char* key, size_t klen, int n,
     return -1;
   ArZSet* z = (ArZSet*)e->obj;
   size_t old_pay = zset_obj_bytes(z);
+  /* Pre-count how many brand-new members this ZADD would add. */
+  int new_members = 0;
+  for (int i = 0; i < n; ++i) {
+    if (zfind_member(z, members[i], mlens[i]) < 0)
+      new_members++;
+  }
+  if (new_members > 0 && z->len + (size_t)new_members > AR_ZSET_MAX_MEMBERS) {
+    fprintf(stderr,
+            "aura-redis: WARN zadd rejected: would exceed AR_ZSET_MAX_MEMBERS=%d "
+            "(sorted-array O(n); Tier-2 size bar)\n",
+            AR_ZSET_MAX_MEMBERS);
+    fflush(stderr);
+    return -2; /* oversize */
+  }
+
   int added = 0;
   for (int i = 0; i < n; ++i) {
     ssize_t idx = zfind_member(z, members[i], mlens[i]);

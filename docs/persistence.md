@@ -45,6 +45,10 @@ repeated count times:
 
 Pinned / LFU / layout tier state is **not** persisted (keys reload into flat hot tier).
 
+## RPO (honest)
+
+aura-rdb is **snapshot-only**. Recovery point ≈ time of last successful `SAVE`/`BGSAVE`. There is no AOF. Replica feed is async and **not** a substitute for scheduled dumps. See runbook §7.
+
 ## Restart semantics
 
 | Event | Without SAVE | After SAVE |
@@ -69,13 +73,14 @@ Exit criteria: strings + TTL + HASH/LIST/ZSET → `SAVE` → kill → restart �
 
 ## Replication (P2.14)
 
-Best-effort **single async replica** for string KV (not Redis Cluster / PSYNC):
+Best-effort **single async replica** for string + HASH/LIST/ZSET (not Redis Cluster / PSYNC):
 
-- Replica: `REPLICAOF <host> <port>` → connects, sends `SYNC`, applies streamed `SET`/`DEL`/`EXPIRE`/…
-- Replica clients: `GET`/`TTL`/… OK; writes → `-READONLY …`
+- Replica: `REPLICAOF <host> <port>` → connects, sends `SYNC`, applies streamed typed+string writes
+- Replica clients: reads OK; writes → `-READONLY …`
+- **No auto-reconnect** on link loss — re-`REPLICAOF` required
 - `REPLICAOF NO ONE` restores master role on that node
 - Master `INFO`: `role:master`, `connected_slaves`
-- Test: `python3 tests/test_prod_replica.py`
+- Tests: `python3 tests/test_prod_replica.py` · `tests/test_prod_replica_failover.py`
 
 ## TLS (P2.15)
 
