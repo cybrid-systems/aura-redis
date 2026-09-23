@@ -1,3 +1,5 @@
+> **Differentiation (A17/A18/A19 + moat):** [`diff-vs-redis.md`](diff-vs-redis.md) (tip `5ff7e83`, 2026-09-23 CST) — marathon adaptive **100%**/1956 vs LRU **81.8%** / LFU **36.1%**; A19 poison keep*: aura LFU **100%** vs redis LRU/LFU **0%**; A17 `POLICY EXPLAIN` mid join; A18 shadow→canary EVICT lru→lfu without restart.
+
 # aura-redis vs Redis — comprehensive comparison
 
 **Date:** 2026-09-23 09:57:16 CST (Asia/Shanghai)  

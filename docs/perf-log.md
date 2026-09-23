@@ -1,5 +1,19 @@
 # aura-redis perf log
 
+## 2026-09-23 12:50:30 CST — tip `5ff7e83` (diff-vs-redis E5 hygiene)
+
+Frozen memtier: **1c×1t**, SET:GET=**1:10**, 32B, key 1..10000 **R:R**, `-n 20000`.  
+Dataplane parity only — **not** an adaptive win. See [`diff-vs-redis.md`](diff-vs-redis.md).
+
+| Engine | pipeline | Totals ops/s | vs Redis |
+|--------|----------|--------------|----------|
+| redis:7-alpine | 1 | 41858.69 | 1.00 |
+| aura-redis C EVICT=lru | 1 | 44660.90 | **1.067** |
+| redis:7-alpine | 16 | 359977.68 | 1.00 |
+| aura-redis C EVICT=lru | 16 | 409810.87 | **1.138** |
+
+---
+
 ## 2026-09-23 09:59:12 CST — tip `ce55c70` (bench-vs-redis)
 
 Frozen memtier: **1c×1t**, SET:GET=**1:10**, 32B, key 1..10000 **R:R**.
