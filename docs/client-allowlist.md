@@ -9,7 +9,7 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 ## Allowed (Tier 2)
 
 ### Strings
-`PING`, `AUTH`, `HELLO` (stub), `QUIT`, `GET`, `SET` (+ `NX`/`XX`/`EX`/`PX`), `SETNX`, `GETSET`, `APPEND`, `MGET`, `MSET`, `DEL`, `UNLINK`, `RENAME`, `RENAMENX`, `EXISTS`, `INCR`, `DECR`, `EXPIRE`, `TTL`, `TYPE`, `FLUSHDB`, `SCAN`, `KEYS`
+`PING`, `AUTH`, `HELLO` (stub), `QUIT`, `GET`, `SET` (+ `NX`/`XX`/`EX`/`PX`), `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `APPEND`, `STRLEN`, `MGET`, `MSET`, `DEL`, `UNLINK`, `RENAME`, `RENAMENX`, `EXISTS`, `DBSIZE`, `INCR`, `DECR`, `EXPIRE`, `TTL`, `TYPE`, `FLUSHDB`, `SCAN`, `KEYS`
 
 ### HASH
 `HSET`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`
@@ -58,7 +58,7 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 
 ## SET option caveats (Tier 2)
 
-- **Allowed:** `SET key value [NX|XX] [EX seconds|PX milliseconds]`, plus `SETNX` / `GETSET`.
+- **Allowed:** `SET key value [NX|XX] [EX seconds|PX milliseconds]`, plus `SETNX` / `SETEX` / `PSETEX` / `GETSET`.
 - **NX/XX:** mutually exclusive; condition fail → null bulk (`$-1`), not an error.
 - **EX/PX:** mutually exclusive; expire `≤0` → `ERR invalid expire time`.
 - **Overwrite:** plain `SET` / `XX` replaces HASH/LIST/ZSET with a string (Redis 7); `NX`/`SETNX` leave typed keys untouched.
@@ -80,3 +80,11 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 - **RENAME:** overwrites `newkey` if present; moves any type (string/HASH/LIST/ZSET); preserves TTL/pin; `ERR no such key` if source missing; same-key is `+OK`.
 - **RENAMENX:** integer `1` if renamed, `0` if destination exists; still errors if source missing.
 - **UNLINK:** same semantics as multi-key `DEL` (returns deleted count). No background reclaim on this single-threaded server.
+
+## STRLEN / SETEX / PSETEX / DBSIZE caveats (Tier 2)
+
+- **STRLEN:** returns byte length of a string value; **0** if key missing; **WRONGTYPE** on HASH/LIST/ZSET.
+- **SETEX:** `SETEX key seconds value` (Redis argument order). Same write path as `SET … EX`; seconds ≤0 → `ERR invalid expire time`.
+- **PSETEX:** `PSETEX key milliseconds value` → same as `SET … PX`.
+- **DBSIZE:** integer count of non-expired keys (string + HASH/LIST/ZSET). **O(N)** full walk; expired keys are purged as encountered (may differ briefly from INFO `keys=` until walk/active-expire).
+

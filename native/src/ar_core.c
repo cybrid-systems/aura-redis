@@ -1296,6 +1296,26 @@ int ar_rename(ArCore* core, const char* key, size_t klen, const char* newkey,
   return 1;
 }
 
+/* STRLEN — 0 if missing; WRONGTYPE on non-string. */
+int64_t ar_strlen(ArCore* core, const char* key, size_t klen, int* wrongtype) {
+  if (wrongtype)
+    *wrongtype = 0;
+  if (!core || !key)
+    return 0;
+  core->ops++;
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
+  if (!e)
+    return 0;
+  if (e->type != AR_TYPE_STRING) {
+    if (wrongtype)
+      *wrongtype = 1;
+    return -1;
+  }
+  return (int64_t)e->vlen;
+}
+
 int ar_exists_bin(ArCore* core, const char* key, size_t klen) {
   if (!core || !key)
     return 0;
@@ -2012,6 +2032,37 @@ size_t ar_keys(ArCore* core, const char* pattern, size_t plen, char*** out_keys,
   *out_keys = keys;
   *out_klens = klens;
   return n;
+}
+
+/* DBSIZE — O(N) count; purge expired as encountered (string + typed). */
+uint64_t ar_dbsize(ArCore* core) {
+  if (!core)
+    return 0;
+  core->ops++;
+  uint64_t total = scan_total_buckets(core);
+  if (total == 0)
+    return 0;
+  uint64_t now = ar_now_ms();
+  uint64_t count = 0;
+  for (uint64_t idx = 0; idx < total; ++idx) {
+    ArEntry** table = NULL;
+    size_t bucket = 0;
+    int tier = 0;
+    if (!scan_bucket_at(core, idx, &table, &bucket, &tier))
+      continue;
+    ArEntry* e = table[bucket];
+    while (e) {
+      ArEntry* next = e->next;
+      if (e->expire_at && now >= e->expire_at) {
+        ar_entry_free_ex(core, bucket, tier, e);
+        core->expired++;
+      } else {
+        count++;
+      }
+      e = next;
+    }
+  }
+  return count;
 }
 
 /* M12 — per-prefix policy namespace */

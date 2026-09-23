@@ -397,6 +397,7 @@ static int repl_connect_master(ArCore* core, const char* host, int port) {
 
 static int cmd_is_write(const char* cmd, size_t clen) {
   return cmd_eq(cmd, clen, "set") || cmd_eq(cmd, clen, "setnx") ||
+         cmd_eq(cmd, clen, "setex") || cmd_eq(cmd, clen, "psetex") ||
          cmd_eq(cmd, clen, "getset") || cmd_eq(cmd, clen, "del") ||
          cmd_eq(cmd, clen, "unlink") || cmd_eq(cmd, clen, "append") ||
          cmd_eq(cmd, clen, "rename") || cmd_eq(cmd, clen, "renamenx") ||
@@ -1022,6 +1023,42 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     repl_propagate(core, argv, argc);
     return reply_int(c, 1);
   }
+  if (cmd_eq(cmd, clen, "setex")) {
+    /* SETEX key seconds value — Redis order; uses ar_set_bin_ex */
+    if (argc != 4)
+      return reply_err(c, "ERR wrong number of arguments for 'setex'");
+    char nbuf[32];
+    if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+      return reply_err(c, "ERR invalid expire time in 'setex'");
+    memcpy(nbuf, argv[2].p, argv[2].len);
+    nbuf[argv[2].len] = '\0';
+    int64_t sec = (int64_t)atoll(nbuf);
+    if (sec <= 0)
+      return reply_err(c, "ERR invalid expire time in 'setex'");
+    if (!ar_set_bin_ex(core, argv[1].p, argv[1].len, argv[3].p, argv[3].len,
+                       sec))
+      return reply_err(c, "ERR OOM");
+    repl_propagate(core, argv, argc);
+    return reply_ok(c);
+  }
+  if (cmd_eq(cmd, clen, "psetex")) {
+    /* PSETEX key milliseconds value — uses ar_set_bin_px */
+    if (argc != 4)
+      return reply_err(c, "ERR wrong number of arguments for 'psetex'");
+    char nbuf[32];
+    if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+      return reply_err(c, "ERR invalid expire time in 'psetex'");
+    memcpy(nbuf, argv[2].p, argv[2].len);
+    nbuf[argv[2].len] = '\0';
+    int64_t ms = (int64_t)atoll(nbuf);
+    if (ms <= 0)
+      return reply_err(c, "ERR invalid expire time in 'psetex'");
+    if (!ar_set_bin_px(core, argv[1].p, argv[1].len, argv[3].p, argv[3].len,
+                       ms))
+      return reply_err(c, "ERR OOM");
+    repl_propagate(core, argv, argc);
+    return reply_ok(c);
+  }
   if (cmd_eq(cmd, clen, "getset")) {
     /* GETSET key value — old bulk/null then SET (clears TTL) */
     if (argc != 3)
@@ -1109,6 +1146,16 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       return reply_err(c, "ERR OOM");
     repl_propagate(core, argv, argc);
     return reply_int(c, nlen);
+  }
+  if (cmd_eq(cmd, clen, "strlen")) {
+    if (argc != 2)
+      return reply_err(c, "ERR wrong number of arguments for 'strlen'");
+    int wt = 0;
+    int64_t n = ar_strlen(core, argv[1].p, argv[1].len, &wt);
+    if (wt)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    return reply_int(c, n);
   }
   if (cmd_eq(cmd, clen, "rename") || cmd_eq(cmd, clen, "renamenx")) {
     int nx = cmd_eq(cmd, clen, "renamenx");
@@ -1206,6 +1253,11 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       return reply_err(c, "ERR value is not an integer or out of range");
     repl_propagate(core, argv, argc);
     return reply_int(c, v);
+  }
+  if (cmd_eq(cmd, clen, "dbsize")) {
+    if (argc != 1)
+      return reply_err(c, "ERR wrong number of arguments for 'dbsize'");
+    return reply_int(c, (int64_t)ar_dbsize(core));
   }
   if (cmd_eq(cmd, clen, "flushdb")) {
     ar_flushdb(core);

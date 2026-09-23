@@ -258,6 +258,10 @@ int64_t ar_append(ArCore* core, const char* key, size_t klen, const char* val,
  * nx!=0 → do not overwrite destination. Moves any type; preserves TTL. */
 int ar_rename(ArCore* core, const char* key, size_t klen, const char* newkey,
               size_t nklen, int nx);
+/* STRLEN: byte length; 0 if missing; *wrongtype=1 on non-string (return -1). */
+int64_t ar_strlen(ArCore* core, const char* key, size_t klen, int* wrongtype);
+/* DBSIZE: O(N) count of non-expired keys (string + typed); purges expired. */
+uint64_t ar_dbsize(ArCore* core);
 
 #ifdef __cplusplus
 }

@@ -176,6 +176,7 @@ Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/
 | T2.8 | A11 prod-profile risk acceptance | **DONE** (Restricted still PARTIAL) | [`prod-profile.md`](prod-profile.md) |
 | T2.9 | SET NX/XX/EX/PX (+ SETNX/GETSET) | **DONE** | `native/src/ar_server.c`; `tests/test_prod_set_opts.py` |
 | T2.10 | APPEND / RENAME / UNLINK (+ RENAMENX) | **DONE** | `ar_append`/`ar_rename`; `tests/test_prod_string_keys.py` |
+| T2.11 | STRLEN / SETEX / PSETEX / DBSIZE | **DONE** | `ar_strlen`/`ar_dbsize` + SETEX/PSETEX via `ar_set_bin_ex`/`px`; `tests/test_prod_string_meta.py` |
 
 **Deferred / blocked:** A11 Restricted sandbox without Soft still needs Tenant Admin. Cluster/field-SCAN/Streams/Lua/ACL remain non-goals (keyspace SCAN/KEYS landed for Tier 2). Short `bench_hit_vs_redis` adaptive cites remain non-citeable.
 
@@ -224,3 +225,4 @@ AURA_REDIS_SOAK_SEC=60 ./scripts/soak-prod.sh
 | 2026-09-23 | **Tier 2** | GHA ci-prod + nightly bench/soak; typed RDB v2; soak-prod; runbook; allowlist; prod-profile; SSOT docs |
 | 2026-09-23 | **T2.9** | SET NX/XX/EX/PX + SETNX/GETSET; `tests/test_prod_set_opts.py`; docs + ci-prod |
 | 2026-09-23 | **T2.10** | APPEND/RENAME/UNLINK (+RENAMENX); `tests/test_prod_string_keys.py`; docs + ci-prod |
+| 2026-09-23 | **T2.11** | STRLEN/SETEX/PSETEX/DBSIZE; `tests/test_prod_string_meta.py`; docs + ci-prod |
