@@ -2,7 +2,7 @@
 
 **Status:** authoritative execution plan for the citeable Aura moat  
 **Date:** 2026-09-23 CST  
-**Tip baseline:** ~`ddcefa3` (post typo-fix)  
+**Tip baseline:** ~`0d292dd` (post A8); SN3 explore lands atop  
 **Scope:** Guard-bounded live `choose-fn` mutation under sandbox + C dumb kernels + multi-phase regret evidence — **not** Redis P3 parity.  
 **Companions:** [`aura-demand.md`](aura-demand.md) · [`aura-pain-scenarios.md`](aura-pain-scenarios.md) · [`aura-redis-match.md`](aura-redis-match.md) · [`aura-native-control.md`](aura-native-control.md) · [`mutation-gains.md`](mutation-gains.md) · [`perf-eval.md`](perf-eval.md) · [`production-plan.md`](production-plan.md) · [`architecture.md`](architecture.md) · [`high-roi-iterations.md`](high-roi-iterations.md)
 
@@ -140,7 +140,7 @@ Make ops trust live code change: durable audit, canary, prod-shaped sandbox.
 | **Exit criteria** | Heartbeat fields + bench summary |
 | **Depends-on** | A3 |
 | **Estimate** | 0.5–1d |
-| **Status** | **PARTIAL** (2026-09-23): heartbeat `applies_sec` / `polls_sec` / `info_polls` / `meta_frozen` shipped with A8; full bench summary still open |
+| **Status** | **DONE** (2026-09-23): heartbeat rates + A14 bench `OVERHEAD` summary (swaps vs hit%, weight/swarm/fiber notes) |
 
 ---
 
@@ -148,10 +148,10 @@ Make ops trust live code change: durable audit, canary, prod-shaped sandbox.
 
 | ID | Goal | Native hooks | Exit criteria | Depends-on | Estimate | Status |
 |----|------|--------------|---------------|------------|----------|--------|
-| **A13** | Signal-weight evolve (not only min-ops) | rebind body weights | `mutation_gain` under weight evolve ≥ threshold path | A1–A2 | 1–2d | TODO |
-| **A15** | Swarm/FSS/PSO evolve backend | Guard+rebind per trial; `std/swarm` surface | `evolve_gain` ≥ +8pp + swarm gen logs | A2 | 2–3d | TODO |
-| **A16** | Fiber parallel trial fitness | `fiber:spawn` / join (原生); score without C hook | Dual-body score in logs; no apply of loser | A4, A10 | 1–2d | TODO |
-| **A10** | Shadow / A/B sample | C sample hook or dual agent | Shadow regret without applying loser | A4 | 2–3d | TODO |
+| **A13** | Signal-weight evolve (not only min-ops) | rebind body weights | weight path in evolve logs; `evolve_gain` ≥ +8pp | A1–A2 | 1–2d | **DONE** (+55.7pp; w-miss/w-write/w-evict mutate) |
+| **A15** | Swarm/FSS/PSO evolve backend | Guard+rebind per trial; `std/swarm` surface | `evolve_gain` ≥ +8pp + swarm gen logs | A2 | 2–3d | **DONE** (`AURA_REDIS_EVOLVE_BACKEND=pso|fss|grid`; lazy `std/swarm`) |
+| **A16** | Fiber parallel trial fitness | `fiber:spawn` / join (原生); score without C hook | Dual-body score in logs; no apply of loser | A4, A10 | 1–2d | **DONE** (fiber proxy dual-score; no apply loser; `FIBER_SHADOW=1`) |
+| **A10** | Shadow / A/B sample | C sample hook or dual agent | Shadow regret without applying loser | A4 | 2–3d | TODO (A16 covers agent-side dual-score; C sample hook still open) |
 | **A12** | Named C kernel `slru` / TinyLFU — Aura select only | C `ArEvictOps`; Aura name pick | zipf regret ≤ LFU | explore | 2–3d | TODO |
 
 Also backlog (demand map, not SN-gated): **A7** typed pressure INFO+choose; **A9** `hot_cold` RESP knobs.
@@ -168,6 +168,10 @@ Also backlog (demand map, not SN-gated): **A7** typed pressure INFO+choose; **A9
 6. **A5** → `prefix_mix_v2` deepen + push  
 7. **A6** → policy version pin across failover + push  
 8. **A8** → auto-freeze meta-policy + push  
+9. **A13** → signal-weight evolve + push  
+10. **A15** → swarm/PSO/FSS evolve backend + push  
+11. **A16** → fiber shadow dual-score + push  
+12. **A14** → finish overhead bench summary + push  
 
 If blocked: document blocker here, push PARTIAL, continue what is possible.
 
@@ -194,3 +198,4 @@ If blocked: document blocker here, push PARTIAL, continue what is possible.
 | 2026-09-23 | A5 prefix_mix_v2 worse-tenant +96.4pp; per-prefix bags + deep compose. |
 | 2026-09-23 | A6 policy version pin across agent restart (resume + fail-safe). |
 | 2026-09-23 | A8 auto-freeze meta-policy (×6.7 poll drop) + A14-lite heartbeat rates. |
+| 2026-09-23 | SN3 explore: A13 weight evolve (+55.7pp evolve_gain), A15 PSO/`std/swarm` propose, A16 fiber-shadow, A14 overhead bench summary. |

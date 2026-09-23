@@ -27,6 +27,10 @@
 ;   AURA_REDIS_THRESH_MISS_PIN      seed miss-pin literal (default 30; evolve uses 75)
 ;   AURA_REDIS_EVOLVE_MAX_GENS      max generations (default 6)
 ;   AURA_REDIS_EVOLVE_WINDOW        ticks per fitness window (default 8)
+;   AURA_REDIS_EVOLVE_BACKEND       A15: hand|pso|fss|grid (default hand; swarm propose)
+;   AURA_REDIS_WEIGHT_EVOLVE=0|1    A13: mutate signal weights with thresholds (default 1 if evolve)
+;   AURA_REDIS_W_MISS / W_WRITE / W_EVICT  seed signal weights (defaults 10/2/10 = identity)
+;   AURA_REDIS_FIBER_SHADOW=0|1     A16: fiber dual-body score without applying loser (default 0)
 ;   AURA_REDIS_PASSWORD / REQUIREPASS  AUTH to C server when requirepass set
 ;   AURA_REDIS_POLICY_HEARTBEAT     optional file rewritten each tick (HA probe)
 ;   AURA_REDIS_POLICY_PIN          durable pin (profile/version/hash) for HA resume
@@ -140,6 +144,26 @@
 (define *evolve-keeps* 0)
 (define *evolve-reverts* 0)
 (define *evolve-logs* 0)
+; A13 - signal weights (identity 10/2/10 matches pre-A13 evolve body)
+(define *weight-evolve* #t)
+(define *w-miss* 10)
+(define *w-write* 2)
+(define *w-evict* 10)
+(define *champ-w-miss* 10)
+(define *champ-w-write* 2)
+(define *champ-w-evict* 10)
+(define *trial-w-miss* 10)
+(define *trial-w-write* 2)
+(define *trial-w-evict* 10)
+(define *weight-keeps* 0)
+; A15 - swarm/PSO/FSS evolve propose backend (lazy require)
+(define *evolve-backend* "hand") ; hand | pso | fss | grid
+(define *swarm-ready* #f)
+(define *swarm-propose-logs* 0)
+; A16 - fiber shadow dual-score (no apply of loser)
+(define *fiber-shadow* #f)
+(define *shadow-scores* 0)
+(define *shadow-wins* 0)
 ; M12/A5 - per-prefix policy hints + param bags from INFO policy_hints
 (define *policy-hints* "")
 (define *prefix-policy-on* #f)
@@ -321,6 +345,45 @@
 (let ((e (getenv "AURA_REDIS_EVOLVE_WINDOW")))
   (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
     (set! *evolve-window* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_EVOLVE_BACKEND")))
+  (if (and (string? e) (> (string-length e) 0))
+    (begin
+      (set! *evolve-backend*
+        (cond
+          ((or (string=? e "swarm") (string=? e "pso")) "pso")
+          ((string=? e "fss") "fss")
+          ((string=? e "grid") "grid")
+          (else "hand")))
+      (display "policy_agent: evolve-backend=")
+      (display *evolve-backend*)
+      (newline))
+    #t))
+(let ((e (getenv "AURA_REDIS_WEIGHT_EVOLVE")))
+  (if (and (string? e) (> (string-length e) 0))
+    (set! *weight-evolve*
+      (not (or (string=? e "0") (string=? e "false") (string=? e "no")
+               (string=? e "off"))))
+    #t))
+(let ((e (getenv "AURA_REDIS_W_MISS")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *w-miss* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_W_WRITE")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *w-write* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_W_EVICT")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *w-evict* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_FIBER_SHADOW")))
+  (if (and (string? e)
+           (or (string=? e "1") (string=? e "true") (string=? e "yes")
+               (string=? e "on")))
+    (begin
+      (set! *fiber-shadow* #t)
+      (display "policy_agent: fiber-shadow on (A16)\n"))
     #t))
 (let ((e (getenv "AURA_REDIS_PASSWORD")))
   (if (and (string? e) (> (string-length e) 0))
@@ -591,7 +654,6 @@
       (want-pin "lfu|flat|pin")
       (else ""))))
 
-
 ; ── RESP client (encode array of bulk strings; parse simple/bulk/err) ──
 (define (resp-encode-bulk s)
   (string-append "$" (number->string (string-length s)) "\r\n" s "\r\n"))
@@ -662,7 +724,6 @@
                         (set! done #t))
                       #t)))))))
         result))))
-
 
 ; ── pin helpers (best-effort; PIN list is RESP array - agent may not parse it) ──
 (define (pad4 n)
@@ -782,25 +843,40 @@
             (set! *profile-name* "thresholded")
             #t))))))
 
-;; M11 - evolve body: threshold literals only (no soft-goal; flood erate must
-;; not refuse LFU+pin while protecting hot set). Distinct from M7 one-shot.
-(define (build-evolve-body min-ops miss-pin)
+;; M11/A13 - evolve body: thresholds + signal weights (not only min-ops).
+;; Identity weights w-miss=10 w-write=2 w-evict=10 match pre-A13 semantics.
+;; A15: optional swarm/PSO/FSS propose backend (proxy fitness → trial apply).
+(define (build-evolve-body min-ops miss-pin w-miss w-write w-evict)
   ; No read-heavy→lru rule: once LFU+pin lands, stay pinned across GET measure.
   (string-append
     "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) "
     "(let ((ops (+ dgets dsets))) "
     "(if (< ops " (number->string min-ops) ") \"\" "
     "(let ((miss-pct (if (> (+ dhits dmisses) 0) "
-    "(quotient (* 100 dmisses) (+ dhits dmisses)) 0))) "
+    "(quotient (* 100 dmisses) (+ dhits dmisses)) 0)) "
+    "(w-miss " (number->string w-miss) ") "
+    "(w-write " (number->string w-write) ") "
+    "(w-evict " (number->string w-evict) ")) "
     "(cond "
-    "((and (>= dsets dgets) (> miss-pct " (number->string miss-pin) ") (> nkeys 0)) "
+    "((and (>= dsets dgets) (> (* miss-pct w-miss) (* "
+    (number->string miss-pin) " 10)) (> nkeys 0)) "
     "\"lfu|flat|pin\") "
-    "((> dsets (* dgets 2)) \"lfu|flat\") "
-    "((and (> devicted 0) (> miss-pct " (number->string (+ miss-pin 10)) ")) "
+    "((> dsets (* dgets w-write)) \"lfu|flat\") "
+    "((and (> devicted 0) (> (* miss-pct w-evict) (* "
+    (number->string (+ miss-pin 10)) " 10))) "
     "\"lfu|flat|pin\") "
     "(else \"\"))))))"))
 
-(define (evolve-apply-body! min-ops miss-pin tag)
+(define (evolve-clamp-int x lo hi)
+  (let ((n (if (number? x)
+             (inexact->exact (round x))
+             lo)))
+    (cond
+      ((< n lo) lo)
+      ((> n hi) hi)
+      (else n))))
+
+(define (evolve-apply-body! min-ops miss-pin w-miss w-write w-evict tag)
   ; A2: mutate:rebind only (avoid hot-strategy:swap! → eval-current stall).
   ; When thresholds are fireable, inline LFU+PIN like A1 fitness-swap.
   (if (not (mutate:boundary-safe?))
@@ -809,7 +885,7 @@
       #f)
     (begin
       (mutate:safety-snapshot)
-      (let ((body (build-evolve-body min-ops miss-pin))
+      (let ((body (build-evolve-body min-ops miss-pin w-miss w-write w-evict))
             (ok #f))
         (set! ok
           (try
@@ -823,6 +899,12 @@
         (display min-ops)
         (display " miss-pin=")
         (display miss-pin)
+        (display " w-miss=")
+        (display w-miss)
+        (display " w-write=")
+        (display w-write)
+        (display " w-evict=")
+        (display w-evict)
         (display " ok=")
         (display ok)
         (newline)
@@ -830,6 +912,9 @@
           (begin
             (set! *thresh-min-ops* min-ops)
             (set! *thresh-miss-pin* miss-pin)
+            (set! *w-miss* w-miss)
+            (set! *w-write* w-write)
+            (set! *w-evict* w-evict)
             (set! *profile-name* "evolved")
             (set! *swaps* (+ *swaps* 1))
             (if (and (<= min-ops 80) (number? *sock*))
@@ -849,9 +934,83 @@
             #t)
           #f)))))
 
-(define (evolve-propose-next)
+(define (evolve-ensure-swarm!)
+  ; A15: lazy require std/swarm only when backend ≠ hand (avoid boot cost).
+  (if *swarm-ready*
+    #t
+    (begin
+      (require "std/swarm" all:)
+      (let ((kind (if (string=? *evolve-backend* "hand") "pso" *evolve-backend*)))
+        (swarm:init (hash "kind" kind
+                          "dim" 5
+                          "pop" 8
+                          "bounds" (list
+                                     (list 24.0 900.0)
+                                     (list 12.0 80.0)
+                                     (list 1.0 20.0)
+                                     (list 1.0 5.0)
+                                     (list 1.0 20.0))
+                          "seed" 424242))
+        (set! *swarm-ready* #t)
+        (display "policy_agent: evolve-backend swarm-init kind=")
+        (display (swarm:kind))
+        (display " pop=")
+        (display 8)
+        (newline)
+        #t))))
+
+(define (evolve-proxy-fit ind)
+  ; Higher better: fireable (low min-ops) + strong miss/evict weights + low write ratio.
+  (let ((mn (car ind))
+        (ms (car (cdr ind)))
+        (wm (car (cdr (cdr ind))))
+        (ww (car (cdr (cdr (cdr ind)))))
+        (we (car (cdr (cdr (cdr (cdr ind)))))))
+    (+ (- 0.0 (/ mn 5.0))
+       (- 0.0 ms)
+       (* 3.0 wm)
+       (- 0.0 (* 8.0 ww))
+       (* 2.0 we))))
+
+(define (evolve-propose-swarm)
+  (evolve-ensure-swarm!)
+  (swarm:step! evolve-proxy-fit)
+  (let ((best (swarm:best)))
+    (set! *swarm-propose-logs* (+ *swarm-propose-logs* 1))
+    (display "policy_agent: evolve swarm-gen=")
+    (display (swarm:gen))
+    (display " best=")
+    (display best)
+    (display " export=")
+    (display (swarm:export))
+    (newline)
+    (set! *trial-min* (evolve-clamp-int (car best) 24 900))
+    (set! *trial-miss* (evolve-clamp-int (car (cdr best)) 12 80))
+    (set! *trial-w-miss* (evolve-clamp-int (car (cdr (cdr best))) 1 20))
+    (set! *trial-w-write* (evolve-clamp-int (car (cdr (cdr (cdr best)))) 1 5))
+    (set! *trial-w-evict* (evolve-clamp-int (car (cdr (cdr (cdr (cdr best))))) 1 20))
+    ; Prefer strictly different from champion so keep/revert has contrast
+    (if (and (= *trial-min* *champ-min*)
+             (= *trial-miss* *champ-miss*)
+             (= *trial-w-miss* *champ-w-miss*)
+             (= *trial-w-write* *champ-w-write*)
+             (= *trial-w-evict* *champ-w-evict*))
+      (begin
+        (set! *trial-min* (if (> *champ-min* 24)
+                            (let ((h (quotient *champ-min* 2)))
+                              (if (< h 24) 24 h))
+                            *champ-min*))
+        (if *weight-evolve*
+          (set! *trial-w-miss* (if (< *champ-w-miss* 20) (+ *champ-w-miss* 2) *champ-w-miss*))
+          #t)
+        (not (and (= *trial-min* *champ-min*)
+                  (= *trial-w-miss* *champ-w-miss*))))
+      #t)))
+
+(define (evolve-propose-hand)
   ; A2: aggressive step-down (halve min-ops, floor 24) so 2-3 gens reach
   ; fireable thresholds under short evolve_gain windows (was -140 → stuck >600).
+  ; A13: also mutate signal weights toward stronger miss/evict, lower write-ratio.
   (let ((nm (if (> *champ-min* 24)
               (let ((h (quotient *champ-min* 2)))
                 (if (< h 24) 24 h))
@@ -859,13 +1018,39 @@
         (ns (if (> *champ-miss* 12)
               (let ((h (quotient *champ-miss* 2)))
                 (if (< h 12) 12 h))
-              *champ-miss*)))
-    (if (and (= nm *champ-min*) (= ns *champ-miss*))
+              *champ-miss*))
+        (nwm (if (and *weight-evolve* (< *champ-w-miss* 20))
+               (+ *champ-w-miss* 2)
+               *champ-w-miss*))
+        (nww (if (and *weight-evolve* (> *champ-w-write* 1))
+               (- *champ-w-write* 1)
+               *champ-w-write*))
+        (nwe (if (and *weight-evolve* (< *champ-w-evict* 20))
+               (+ *champ-w-evict* 2)
+               *champ-w-evict*)))
+    (if (and (= nm *champ-min*) (= ns *champ-miss*)
+             (= nwm *champ-w-miss*) (= nww *champ-w-write*) (= nwe *champ-w-evict*))
       #f
       (begin
         (set! *trial-min* nm)
         (set! *trial-miss* ns)
+        (set! *trial-w-miss* nwm)
+        (set! *trial-w-write* nww)
+        (set! *trial-w-evict* nwe)
         #t))))
+
+(define (evolve-propose-next)
+  (if (string=? *evolve-backend* "hand")
+    (evolve-propose-hand)
+    (try
+      (evolve-propose-swarm)
+      (catch (e)
+        (begin
+          (display "policy_agent: evolve swarm-propose failed → hand fallback err=")
+          (display e)
+          (newline)
+          (set! *evolve-backend* "hand")
+          (evolve-propose-hand))))))
 
 (define (evolve-log! action fit)
   (display "policy_agent: evolve gen=")
@@ -876,21 +1061,76 @@
   (display *champ-fit*)
   (display " action=")
   (display action)
+  (display " backend=")
+  (display *evolve-backend*)
   (display " min-ops=")
   (display *thresh-min-ops*)
   (display " miss-pin=")
   (display *thresh-miss-pin*)
+  (display " w-miss=")
+  (display *w-miss*)
+  (display " w-write=")
+  (display *w-write*)
+  (display " w-evict=")
+  (display *w-evict*)
   (display " trial=")
   (display *trial-min*)
   (display "/")
   (display *trial-miss*)
+  (display "/w=")
+  (display *trial-w-miss*)
+  (display "/")
+  (display *trial-w-write*)
+  (display "/")
+  (display *trial-w-evict*)
   (display " champ=")
   (display *champ-min*)
   (display "/")
   (display *champ-miss*)
+  (display "/w=")
+  (display *champ-w-miss*)
+  (display "/")
+  (display *champ-w-write*)
+  (display "/")
+  (display *champ-w-evict*)
   (newline)
   (set! *evolve-logs* (+ *evolve-logs* 1))
   #t)
+
+;; A16 — fiber parallel trial fitness: score dual param bags in fibers
+;; without applying the loser (shadow). Proxy score = fireability heuristic;
+;; live window keep/revert still owns apply. No body-string eval (pipeline).
+(define (shadow-proxy-score min-ops miss-pin w-miss w-write w-evict)
+  (+ (- 0.0 (/ min-ops 5.0))
+     (- 0.0 miss-pin)
+     (* 3.0 w-miss)
+     (- 0.0 (* 8.0 w-write))
+     (* 2.0 w-evict)))
+
+(define (fiber-shadow-score! c-min c-miss c-wm c-ww c-we
+                             t-min t-miss t-wm t-ww t-we)
+  (if (not *fiber-shadow*)
+    #f
+    (begin
+      (set! *shadow-scores* (+ *shadow-scores* 1))
+      (let ((fa (fiber:spawn
+                  (lambda ()
+                    (shadow-proxy-score c-min c-miss c-wm c-ww c-we))))
+            (fb (fiber:spawn
+                  (lambda ()
+                    (shadow-proxy-score t-min t-miss t-wm t-ww t-we)))))
+        (let ((sa (fiber:join fa))
+              (sb (fiber:join fb)))
+          (display "policy_agent: fiber-shadow champ=")
+          (display sa)
+          (display " trial=")
+          (display sb)
+          (display " (no apply loser)\n")
+          (let ((trial-better (and (number? sb) (number? sa) (> sb sa))))
+            (if trial-better
+              (set! *shadow-wins* (+ *shadow-wins* 1))
+              #t)
+            trial-better))))))
 
 ;; Slow online evolve: window fitness → keep if better else revert (heal path).
 (define (maybe-evolve!)
@@ -914,10 +1154,23 @@
                (set! *champ-fit* fit)
                (set! *champ-min* *thresh-min-ops*)
                (set! *champ-miss* *thresh-miss-pin*)
+               (set! *champ-w-miss* *w-miss*)
+               (set! *champ-w-write* *w-write*)
+               (set! *champ-w-evict* *w-evict*)
                (evolve-log! "baseline" fit)
                (if (evolve-propose-next)
                  (begin
-                   (evolve-apply-body! *trial-min* *trial-miss* "evolve-trial")
+                   ; A16 optional: score trial vs champ bodies before apply
+                   (if *fiber-shadow*
+                     (fiber-shadow-score!
+                       *champ-min* *champ-miss*
+                       *champ-w-miss* *champ-w-write* *champ-w-evict*
+                       *trial-min* *trial-miss*
+                       *trial-w-miss* *trial-w-write* *trial-w-evict*)
+                     #t)
+                   (evolve-apply-body! *trial-min* *trial-miss*
+                                       *trial-w-miss* *trial-w-write* *trial-w-evict*
+                                       "evolve-trial")
                    (set! *evolve-mode* "trial")
                    (evolve-log! "propose" fit))
                  (begin
@@ -931,15 +1184,25 @@
                    (set! *champ-fit* fit)
                    (set! *champ-min* *trial-min*)
                    (set! *champ-miss* *trial-miss*)
+                   (set! *champ-w-miss* *trial-w-miss*)
+                   (set! *champ-w-write* *trial-w-write*)
+                   (set! *champ-w-evict* *trial-w-evict*)
                    (set! *evolve-keeps* (+ *evolve-keeps* 1))
+                   (if (or (not (= *trial-w-miss* 10))
+                           (not (= *trial-w-write* 2))
+                           (not (= *trial-w-evict* 10)))
+                     (set! *weight-keeps* (+ *weight-keeps* 1))
+                     #t)
                    (audit-append! "evolve-keep"
                                   (number->string *champ-min*)
                                   (number->string *trial-min*)
                                   "evolve_keep")
                    (evolve-log! "keep" fit))
                  (begin
-                   ; revert / heal to champion thresholds
-                   (evolve-apply-body! *champ-min* *champ-miss* "evolve-revert")
+                   ; revert / heal to champion thresholds+weights
+                   (evolve-apply-body! *champ-min* *champ-miss*
+                                       *champ-w-miss* *champ-w-write* *champ-w-evict*
+                                       "evolve-revert")
                    (set! *heals* (+ *heals* 1))
                    (set! *evolve-reverts* (+ *evolve-reverts* 1))
                    (evolve-log! "revert" fit)))
@@ -950,7 +1213,9 @@
                    (evolve-log! "done" fit))
                  (if (evolve-propose-next)
                    (begin
-                     (evolve-apply-body! *trial-min* *trial-miss* "evolve-trial")
+                     (evolve-apply-body! *trial-min* *trial-miss*
+                                         *trial-w-miss* *trial-w-write* *trial-w-evict*
+                                         "evolve-trial")
                      (set! *evolve-mode* "trial")
                      (evolve-log! "propose" fit))
                    (begin
@@ -1328,15 +1593,31 @@
 ; M11: seed thresholded evolve body (bad high thresholds lose until evolved)
 (set! *champ-min* *thresh-min-ops*)
 (set! *champ-miss* *thresh-miss-pin*)
+(set! *champ-w-miss* *w-miss*)
+(set! *champ-w-write* *w-write*)
+(set! *champ-w-evict* *w-evict*)
+(set! *trial-w-miss* *w-miss*)
+(set! *trial-w-write* *w-write*)
+(set! *trial-w-evict* *w-evict*)
 (if (or *evolve-on*
         (not (and (= *thresh-min-ops* 40) (= *thresh-miss-pin* 30))))
   (begin
     (display "policy_agent: evolve=")
     (display (if *evolve-on* "on" "off"))
+    (display " backend=")
+    (display *evolve-backend*)
     (display " seed-thresholds min-ops=")
     (display *thresh-min-ops*)
     (display " miss-pin=")
     (display *thresh-miss-pin*)
+    (display " w-miss=")
+    (display *w-miss*)
+    (display " w-write=")
+    (display *w-write*)
+    (display " w-evict=")
+    (display *w-evict*)
+    (display " weight-evolve=")
+    (display (if *weight-evolve* "on" "off"))
     (display " max-gens=")
     (display *evolve-max-gens*)
     (display " window=")
@@ -1345,7 +1626,8 @@
     (mutate:safety-snapshot)
     ; Prefer evolve-body (no soft-goal) whenever custom thresholds set -
     ; M11 frozen vs evolve A/B must share the same body family.
-    (let ((body (build-evolve-body *thresh-min-ops* *thresh-miss-pin*))
+    (let ((body (build-evolve-body *thresh-min-ops* *thresh-miss-pin*
+                                   *w-miss* *w-write* *w-evict*))
           (tag (if *evolve-on* "evolve-seed" "thresh-seed-frozen")))
       (let ((r (hot-strategy:swap! "choose-fn" body tag)))
         (display "policy_agent: threshold-seed → ")
@@ -1536,7 +1818,6 @@
   (write-policy-pin!)
   #t)
 
-
 ;; A3 — durable audit ring + explain schema
 ;; Line schema: ts=<ms> op=<fitness-swap|evolve-keep|evict|heal|...> from=<a> to=<b> reason=<r> version=<n>
 ;; Prefer native (query:last-mutation-provenance) when available; always write structured file.
@@ -1630,6 +1911,17 @@
                        "info_polls=" (number->string *info-polls*) "\n"
                        "freeze_count=" (number->string *freeze-count*) "\n"
                        "unfreeze_count=" (number->string *unfreeze-count*) "\n"
+                       "evolve_backend=" *evolve-backend* "\n"
+                       "w_miss=" (number->string *w-miss*) "\n"
+                       "w_write=" (number->string *w-write*) "\n"
+                       "w_evict=" (number->string *w-evict*) "\n"
+                       "evolve_gen=" (number->string *evolve-gen*) "\n"
+                       "evolve_keeps=" (number->string *evolve-keeps*) "\n"
+                       "weight_keeps=" (number->string *weight-keeps*) "\n"
+                       "swarm_proposes=" (number->string *swarm-propose-logs*) "\n"
+                       "shadow_scores=" (number->string *shadow-scores*) "\n"
+                       "hit_ewma=" (number->string *hit-ewma*) "\n"
+                       "swaps=" (number->string *swaps*) "\n"
                        "applies_sec=" (number->string
                          (let ((dt (- (monotonic-ms) *tick-wall0-ms*)))
                            (if (> dt 0)
@@ -2396,6 +2688,22 @@
 (display *evolve-reverts*)
 (display " evolve-logs=")
 (display *evolve-logs*)
+(display " evolve-backend=")
+(display *evolve-backend*)
+(display " w-miss=")
+(display *w-miss*)
+(display " w-write=")
+(display *w-write*)
+(display " w-evict=")
+(display *w-evict*)
+(display " weight-keeps=")
+(display *weight-keeps*)
+(display " swarm-proposes=")
+(display *swarm-propose-logs*)
+(display " shadow-scores=")
+(display *shadow-scores*)
+(display " shadow-wins=")
+(display *shadow-wins*)
 (display " prefix-applies=")
 (display *prefix-applies*)
 (display " canary-commits=")

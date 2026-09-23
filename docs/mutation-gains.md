@@ -123,3 +123,19 @@ re-eval stalled PIN. Fix: halve thresholds each gen (floor 24/12); `mutate:rebin
 | **adaptive_evolve** | **61.4%** | **86** | ≥2 gens + inline PIN |
 
 **Evolve-attributable Δ = +57.1pp**. Exit: `python3 scripts/bench_regret.py evolve_gain`.
+
+
+## A13 — signal-weight evolve (2026-09-23)
+
+Evolve mutates **w-miss / w-write / w-evict** alongside min-ops/miss-pin.
+Identity defaults (10/2/10) match pre-A13 body semantics; logs show `w-miss=` path.
+
+| policy | hit% | useful | notes |
+|--------|------|--------|-------|
+| adaptive_evolve_frozen | 4.3% | 6 | bad seed frozen |
+| **adaptive_evolve** | **60.0%** | **84** | weight+threshold keep; Δ=**+55.7pp** |
+
+Env: `AURA_REDIS_WEIGHT_EVOLVE=1`, `AURA_REDIS_W_MISS|W_WRITE|W_EVICT`.
+A15: `AURA_REDIS_EVOLVE_BACKEND=pso|fss|grid` → lazy `std/swarm` propose.
+A16: `AURA_REDIS_FIBER_SHADOW=1` → fiber dual proxy score (no apply loser).
+Exit: `python3 scripts/bench_regret.py evolve_gain`; `python3 tests/test_policy_weight_evolve.py`.

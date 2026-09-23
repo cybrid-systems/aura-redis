@@ -169,12 +169,12 @@ Priorities here are **P0–P2 for Aura differentiation**, independent of Redis c
 | **A10** | Shadow / A/B sample path (C hook or dual agent) | 2–3d | Shadow regret report without applying loser | A4 | |
 | **A11** | Restricted sandbox + `effect:network` grant (prod-shaped) | 1d | Doc + demo without `AURA_SANDBOX=off` when TA available | sandbox profile | **PARTIAL** (off works; Restricted needs TA) |
 | **A12** | Named kernel `slru` or approx TinyLFU (C) — Aura select only | 2–3d | zipf regret ≤ LFU | explore | |
-| **A13** | Signal-weight evolve (not only min-ops) | 1–2d | `mutation_gain` under weight evolve ≥ threshold path | A1–A2 | |
-| **A14** | Controller overhead dashboard (applies/sec, swap rate vs hitΔ) | 0.5–1d | Heartbeat fields + bench summary | A3 | |
-| **A15** | **Swarm/FSS/PSO evolve backend** — replace/augment hand threshold walk with `std/swarm` | 2–3d | `evolve_gain` ≥ +8pp + swarm gen logs | A2 | |
-| **A16** | Agent-side fiber parallel trial fitness (canary/shadow score without C hook) | 1–2d | Dual-body score in logs; no apply of loser | A4, A10 | |
+| **A13** | Signal-weight evolve (not only min-ops) | 1–2d | weight path in evolve logs; evolve_gain ≥ +8pp | A1–A2 | **DONE** +55.7pp |
+| **A14** | Controller overhead dashboard (applies/sec, swap rate vs hitΔ) | 0.5–1d | Heartbeat fields + bench summary | A3 | **DONE** |
+| **A15** | **Swarm/FSS/PSO evolve backend** — replace/augment hand threshold walk with `std/swarm` | 2–3d | `evolve_gain` ≥ +8pp + swarm gen logs | A2 | **DONE** |
+| **A16** | Agent-side fiber parallel trial fitness (canary/shadow score without C hook) | 1–2d | Dual-body score in logs; no apply of loser | A4, A10 | **DONE** |
 
-**Top 3 start next:** **A4**, **A11**, **A5** (A1–A3 DONE).
+**Top 3 start next:** **A10** (C shadow sample), **A12** (slru/TinyLFU), **A7** (typed pressure). SN3 A13/A15/A16/A14 DONE.
 
 Do **not** implement A1 in this doc-only change set unless trivially documentation.
 

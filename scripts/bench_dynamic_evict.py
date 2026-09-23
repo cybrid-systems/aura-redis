@@ -474,6 +474,12 @@ class AuraAgentController:
         # A1: clear boot-guard so agent does a real boot (not skip-reentry)
         # Agent (docker -v ROOT:/work) writes /work/.ar-agent-booted-PORT.flag
         Path(ROOT / f".ar-agent-booted-{self.port}.flag").unlink(missing_ok=True)
+        # A6/A13: clear durable pin so a prior evolve/threshold seed cannot
+        # resume over mutate seed (conservative→aggressive). Stale pin made
+        # mutation_gain Δ=0 by restoring profile=thresholded.
+        Path(ROOT / f".ar-policy-pin-{self.port}.pin").unlink(missing_ok=True)
+        for p in ROOT.glob(f".ar-policy-hb*{self.port}*"):
+            p.unlink(missing_ok=True)
         profile = os.environ.get("AURA_REDIS_POLICY_PROFILE_FILE", "")
         cmd = [
             "sudo", "docker", "run", "-d", "--network", "host", "--entrypoint", "",
@@ -496,7 +502,14 @@ class AuraAgentController:
                 "-e", "AURA_REDIS_EVOLVE=1",
                 "-e", f"AURA_REDIS_EVOLVE_MAX_GENS={self.evolve_max_gens}",
                 "-e", f"AURA_REDIS_EVOLVE_WINDOW={self.evolve_window}",
+                "-e", f"AURA_REDIS_EVOLVE_BACKEND={os.environ.get('AURA_REDIS_EVOLVE_BACKEND', 'hand')}",
+                "-e", f"AURA_REDIS_WEIGHT_EVOLVE={os.environ.get('AURA_REDIS_WEIGHT_EVOLVE', '1')}",
             ])
+            if os.environ.get("AURA_REDIS_FIBER_SHADOW", "0") in ("1", "true", "on", "yes"):
+                cmd.extend(["-e", "AURA_REDIS_FIBER_SHADOW=1"])
+            for k in ("AURA_REDIS_W_MISS", "AURA_REDIS_W_WRITE", "AURA_REDIS_W_EVICT"):
+                if os.environ.get(k):
+                    cmd.extend(["-e", f"{k}={os.environ[k]}"])
         if self.thresh_min_ops is not None:
             cmd.extend(["-e", f"AURA_REDIS_THRESH_MIN_OPS={self.thresh_min_ops}"])
         if self.thresh_miss_pin is not None:
@@ -543,7 +556,10 @@ class AuraAgentController:
                     or "hot-strategy:heal!" in ln
                     or "evolve gen=" in ln or "evolve-seed" in ln
                     or "threshold-seed" in ln
-                    or "prefix-policy" in ln):
+                    or "prefix-policy" in ln
+                    or "evolve swarm-gen=" in ln
+                    or "evolve-apply" in ln and "w-miss=" in ln
+                    or "fiber-shadow" in ln):
                 self.fitness_events.append(ln.strip())
                 self.swaps.append(ln.strip())
 
@@ -1951,7 +1967,7 @@ def print_evolve_table(results: List[RunResult]) -> None:
     """M11: adaptive_evolve vs frozen bad-thresholds on evolve_gain."""
     print()
     print("=" * 78)
-    print("EVOLVE (M11) — multi-gen threshold fitness keep/revert (evolve_gain)")
+    print("EVOLVE (M11/A13) — threshold+weight fitness keep/revert (evolve_gain)")
     print("=" * 78)
     by_wl: Dict[str, Dict[str, RunResult]] = {}
     for r in results:
@@ -1986,6 +2002,43 @@ def print_evolve_table(results: List[RunResult]) -> None:
             f"frozen {100*frozen.overall_hit_rate:.1f}%); "
             f"useful {evo.total_useful} vs {frozen.total_useful}"
         )
+    print("=" * 78)
+
+
+def print_overhead_summary(results: List[RunResult]) -> None:
+    """A14 — controller overhead dashboard: swaps vs hitΔ + heartbeat rate fields."""
+    print()
+    print("=" * 78)
+    print("OVERHEAD (A14) — controller cost vs hit-quality (bench summary)")
+    print("=" * 78)
+    print(f"  {'workload':<16} {'policy':<22} {'hit%':>7} {'swaps':>6}  notes")
+    print("  " + "-" * 66)
+    for r in results:
+        if not is_adaptive(r.policy):
+            continue
+        rate_notes = []
+        for s in r.swaps:
+            if "auto_freeze" in s or "auto_unfreeze" in s:
+                rate_notes.append(s.split("policy_agent: ", 1)[-1][:48])
+            if "w-miss=" in s and "evolve gen=" in s:
+                rate_notes.append("weight-evolve")
+            if "swarm-gen=" in s:
+                rate_notes.append("swarm-propose")
+            if "fiber-shadow" in s:
+                rate_notes.append("fiber-shadow")
+        # de-dupe preserve order
+        seen = set()
+        notes = []
+        for n in rate_notes:
+            if n not in seen:
+                seen.add(n)
+                notes.append(n)
+        print(
+            f"  {r.workload:<16} {r.policy:<22} {100*r.overall_hit_rate:6.1f}% "
+            f"{len(r.swaps):6d}  {','.join(notes[:4]) or '—'}"
+        )
+    print("  heartbeat fields (agent): applies_sec polls_sec hit_ewma swaps "
+          "w_miss evolve_gen meta_frozen")
     print("=" * 78)
 
 
@@ -2125,11 +2178,18 @@ def assert_success(results: List[RunResult]) -> None:
                     f"FAIL: evolve_gain expected multi-gen evolve logs (≥2); "
                     f"got {len(evo_logs)}: {evo_logs[:4]}"
                 )
+            # A13: weight evolve path must appear in logs (w-miss=)
+            w_logs = [s for s in evo.swaps if "w-miss=" in s]
+            if not w_logs:
+                raise SystemExit(
+                    f"FAIL: evolve_gain A13 expected weight evolve path (w-miss=); "
+                    f"swaps={evo.swaps[:8]}"
+                )
             print(
                 f"evolve_gain: evolve={100*evo.overall_hit_rate:.1f}% vs "
                 f"frozen={100*frozen.overall_hit_rate:.1f}% "
                 f"(Δ={100*(evo.overall_hit_rate-frozen.overall_hit_rate):+.1f}pp) "
-                f"evolve_logs={len(evo_logs)}"
+                f"evolve_logs={len(evo_logs)} weight_logs={len(w_logs)}"
             )
 
     by_wl: Dict[str, Dict[str, RunResult]] = {}
@@ -2331,6 +2391,7 @@ def main() -> int:
         print_soft_goal_table(results)
     if any(r.workload == 'evolve_gain' for r in results):
         print_evolve_table(results)
+    print_overhead_summary(results)
     if any(r.workload in ('prefix_mix', 'prefix_mix_v2') for r in results):
         print_prefix_table(results)
     if not args.skip_assert:
