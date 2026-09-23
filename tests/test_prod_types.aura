@@ -1,0 +1,142 @@
+; Aura TCP product-surface smoke: HASH/LIST/ZSET/TYPE/MULTI+EXEC
+; Env: AURA_REDIS_PORT (default 26990)
+; Run via: scripts/run-aura-tcp-tests.sh
+(require "std/socket" all:)
+(require "src/redis/resp" all:)
+
+(define *fails* 0)
+(define (fail msg)
+  (set! *fails* (+ *fails* 1))
+  (display "FAIL ") (display msg) (newline))
+
+(define (ok name)
+  (display "  OK ") (display name) (newline))
+
+(define port
+  (let ((e (getenv "AURA_REDIS_PORT")))
+    (if (and (string? e) (> (string-length e) 0))
+      (string->number e)
+      26990)))
+
+(define (resp-encode-cmd args)
+  (let ((items (list))
+        (xs args))
+    (while (lambda () (pair? xs))
+      (lambda ()
+        (set! items (cons (list "bulk" (car xs)) items))
+        (set! xs (cdr xs))))
+    (resp-encode-array (reverse items))))
+
+(define (redis-call sock . args)
+  (let ((wire (resp-encode-cmd args)))
+    (tcp-send sock wire)
+    (let ((buf "")
+          (done #f)
+          (result #f)
+          (guard 0))
+      (while (lambda () (and (not done) (< guard 64)))
+        (lambda ()
+          (set! guard (+ guard 1))
+          (let ((chunk (tcp-recv sock 65536)))
+            (if (or (not (string? chunk)) (= (string-length chunk) 0))
+              (begin (set! done #t) (set! result (list "error" "closed")))
+              (begin
+                (set! buf (string-append buf chunk))
+                (let ((parsed (resp-try-parse buf 0)))
+                  (if parsed
+                    (begin
+                      (set! result (car (cdr parsed)))
+                      (set! done #t))
+                    #t)))))))
+      result)))
+
+(define (tag v) (if (pair? v) (car v) ""))
+(define (payload v)
+  (if (and (pair? v) (pair? (cdr v))) (car (cdr v)) #f))
+
+(define (expect-simple name v want)
+  (if (and (string=? (tag v) "simple") (string=? (payload v) want))
+    (ok name)
+    (fail name)))
+
+(define (expect-int name v want)
+  (if (and (string=? (tag v) "int") (= (payload v) want))
+    (ok name)
+    (fail name)))
+
+(define (expect-bulk name v want)
+  (if (and (string=? (tag v) "bulk") (string=? (payload v) want))
+    (ok name)
+    (fail name)))
+
+(define (expect-null name v)
+  (if (string=? (tag v) "null")
+    (ok name)
+    (fail name)))
+
+(define (contains? s sub)
+  (let ((n (string-length s))
+        (m (string-length sub))
+        (i 0)
+        (found #f))
+    (while (lambda () (and (not found) (<= (+ i m) n)))
+      (lambda ()
+        (if (string=? (substring s i (+ i m)) sub)
+          (set! found #t)
+          (set! i (+ i 1)))))
+    found))
+
+(define (expect-error-has name v substr)
+  (if (and (string=? (tag v) "error") (contains? (payload v) substr))
+    (ok name)
+    (fail name)))
+
+(display "test_prod_types: port=") (display port) (newline)
+(define sock (tcp-connect "127.0.0.1" port))
+(if (not (number? sock))
+  (begin (fail "tcp-connect") (display "test_prod_types: FAILED\n"))
+  (begin
+    ; HASH
+    (expect-int "HSET" (redis-call sock "HSET" "h" "a" "1") 1)
+    (expect-bulk "HGET" (redis-call sock "HGET" "h" "a") "1")
+    (expect-int "HLEN" (redis-call sock "HLEN" "h") 1)
+    (expect-bulk "TYPE-hash" (redis-call sock "TYPE" "h") "hash")
+
+    ; LIST
+    (expect-int "LPUSH" (redis-call sock "LPUSH" "L" "x") 1)
+    (expect-int "RPUSH" (redis-call sock "RPUSH" "L" "y") 2)
+    (expect-bulk "LINDEX" (redis-call sock "LINDEX" "L" "0") "x")
+    (expect-bulk "TYPE-list" (redis-call sock "TYPE" "L") "list")
+
+    ; ZSET
+    (expect-int "ZADD" (redis-call sock "ZADD" "z" "1.5" "m1") 1)
+    (expect-bulk "ZSCORE" (redis-call sock "ZSCORE" "z" "m1") "1.5")
+    (expect-int "ZCARD" (redis-call sock "ZCARD" "z") 1)
+    (expect-bulk "TYPE-zset" (redis-call sock "TYPE" "z") "zset")
+
+    ; TYPE none
+    (expect-bulk "TYPE-none" (redis-call sock "TYPE" "nope") "none")
+
+    ; WRONGTYPE
+    (expect-simple "SET" (redis-call sock "SET" "s" "v") "OK")
+    (expect-error-has "WRONGTYPE-hget" (redis-call sock "HGET" "s" "f") "WRONGTYPE")
+
+    ; MULTI + EXEC
+    (expect-simple "MULTI" (redis-call sock "MULTI") "OK")
+    (expect-simple "Q-SET" (redis-call sock "SET" "mk" "mv") "QUEUED")
+    (expect-simple "Q-GET" (redis-call sock "GET" "mk") "QUEUED")
+    (define ex (redis-call sock "EXEC"))
+    (if (and (string=? (tag ex) "array")
+             (= (length (payload ex)) 2)
+             (string=? (tag (car (payload ex))) "simple")
+             (string=? (payload (car (payload ex))) "OK")
+             (string=? (tag (car (cdr (payload ex)))) "bulk")
+             (string=? (payload (car (cdr (payload ex)))) "mv"))
+      (ok "EXEC")
+      (fail "EXEC"))
+
+    (tcp-close sock)
+    (display "test_prod_types: fails=") (display *fails*) (newline)
+    (if (= *fails* 0)
+      (display "test_prod_types: OK\n")
+      (display "test_prod_types: FAILED\n"))))
