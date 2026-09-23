@@ -24,11 +24,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
 from _portutil import kill_tcp_port  # noqa: E402
+from _agentutil import (  # noqa: E402
+    agent_logs as _agent_logs,
+    start_agent as _start_agent,
+    stop_agent as _stop_agent,
+)
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26990"))
 SERVER = ROOT / "native/build/aura_redis_server"
 BUILD = ROOT / "scripts/build-native.sh"
-IMG = os.environ.get("AURA_DEV_IMAGE", "ghcr.io/cybrid-systems/dev:v1.0.7")
 SKIP_AGENT = os.environ.get("AURA_REDIS_STRONG_SKIP_AGENT", "0") == "1"
 
 
@@ -241,37 +245,26 @@ def test_canary_default_off_fitness(proc: subprocess.Popen) -> None:
     agent_log = Path(f"/tmp/ar-policy-canary-off-{port}.log")
     for p in (hb, audit, boot):
         p.unlink(missing_ok=True)
-    agent_log.write_text("")
-    cmd = [
-        "sudo", "docker", "run", "-d", "--network", "host", "--entrypoint", "",
-        "-v", f"{ROOT}:/work", "-v", "/tmp:/tmp", "-w", "/work",
-        "-e", "AURA_SANDBOX=off",
-        "-e", "AURA_PIPELINE_STRICT=0",
-        "-e", "AURA_PATH=/work/.deps/aura/lib",
-        "-e", f"AURA_REDIS_PORT={port}",
-        "-e", "AURA_REDIS_HOST=127.0.0.1",
-        "-e", "AURA_REDIS_POLICY_MS=80",
-        "-e", "AURA_REDIS_DENY_PLUGIN=1",
-        "-e", "AURA_REDIS_FITNESS_MUTATE=1",
-        # Explicitly OFF — must not enable canary
-        "-e", "AURA_REDIS_CANARY=0",
-        "-e", f"AURA_REDIS_POLICY_HEARTBEAT=/work/{hb.name}",
-        "-e", f"AURA_REDIS_POLICY_AUDIT=/work/{audit.name}",
-        IMG,
-        "/work/.deps/aura/build/aura",
-        "/work/src/redis/policy_agent.aura",
-    ]
-    cid = subprocess.check_output(cmd, text=True).strip()
+    cid = _start_agent(
+        env={
+            "AURA_REDIS_PORT": str(port),
+            "AURA_REDIS_HOST": "127.0.0.1",
+            "AURA_REDIS_POLICY_MS": "80",
+            "AURA_REDIS_DENY_PLUGIN": "1",
+            "AURA_REDIS_FITNESS_MUTATE": "1",
+            # Explicitly OFF — must not enable canary
+            "AURA_REDIS_CANARY": "0",
+        },
+        log_path=agent_log,
+        path_env={
+            "AURA_REDIS_POLICY_HEARTBEAT": hb,
+            "AURA_REDIS_POLICY_AUDIT": audit,
+        },
+    )
     try:
-        # Wait boot
+        # Wait boot (native or docker via _agentutil)
         for _ in range(100):
-            subprocess.run(
-                ["sudo", "docker", "logs", cid],
-                stdout=agent_log.open("w"),
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
-            text = agent_log.read_text(errors="replace")
+            text = _agent_logs(cid, agent_log)
             if "policy_agent:" in text or "PING" in text or boot.exists():
                 break
             time.sleep(0.15)
@@ -289,13 +282,7 @@ def test_canary_default_off_fitness(proc: subprocess.Popen) -> None:
         time.sleep(1.5)
         redis_call(s, "QUIT")
         s.close()
-        subprocess.run(
-            ["sudo", "docker", "logs", cid],
-            stdout=agent_log.open("w"),
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-        log = agent_log.read_text(errors="replace")
+        log = _agent_logs(cid, agent_log)
         # Must NOT have entered canary path
         assert "canary-start" not in log and "canary_start" not in log, log[-1500:]
         assert "canary-inject" not in log, log[-800:]
@@ -306,7 +293,7 @@ def test_canary_default_off_fitness(proc: subprocess.Popen) -> None:
             assert "canary_start" not in atxt and "canary-start" not in atxt, atxt[-800:]
         print("PASS edges: canary default-off leaves fitness path intact")
     finally:
-        subprocess.run(["sudo", "docker", "rm", "-f", cid], capture_output=True)
+        _stop_agent(cid)
 
 
 def main() -> int:
