@@ -22,7 +22,7 @@
 
 每个场景的 **§4 Aura 解法路径** 一律按：
 
-1. **A 原声（Layer A native）** — `sandbox` / `capability` Effect::Mutate·Network / `MutationBoundaryGuard` + `mutate:rebind` / `TypedMutationAudit` / `ast:snapshot|restore` / provenance / workspace / dirty→JIT invalidate / fiber（若相关）。说明**为什么不是「又一种脚本」**。  
+1. **A 原生（Layer A native）** — `sandbox` / `capability` Effect::Mutate·Network / `MutationBoundaryGuard` + `mutate:rebind` / `TypedMutationAudit` / `ast:snapshot|restore` / provenance / workspace / dirty→JIT invalidate / fiber（若相关）。说明**为什么不是「又一种脚本」**。  
 2. **B stdlib** — `std/hot-strategy`（register!/swap!/heal!/version）、`std/mutate`（safety-snapshot / boundary-safe?）、手写 fitness / evolve / POLICY（坐在 A 上的库面）。  
 3. **C 数据面** — Aura **只选名、不重写**：`lru` / `lfu` / `noop` / `ttl_aware` + `LAYOUT` + `PIN` + samples。
 
@@ -67,7 +67,7 @@
 
 #### 4. Aura 解法路径（分层）
 
-- **A 原声：** `MutationBoundaryGuard` 下 `mutate:rebind` 换 `choose-fn` **函数体**（非 CONFIG 字符串）；`mutate:safety-snapshot` / `boundary-safe?` 先探再改；失败可 `ast:restore`。Dirty propagation → JIT invalidate 证明「这次是代码代换」。Effect 上策略变更属 **Mutate**（非裸 eval）。这不是「脚本里 if」，而是 **工作区 FlatAST 的受护变异**。  
+- **A 原生：** `MutationBoundaryGuard` 下 `mutate:rebind` 换 `choose-fn` **函数体**（非 CONFIG 字符串）；`mutate:safety-snapshot` / `boundary-safe?` 先探再改；失败可 `ast:restore`。Dirty propagation → JIT invalidate 证明「这次是代码代换」。Effect 上策略变更属 **Mutate**（非裸 eval）。这不是「脚本里 if」，而是 **工作区 FlatAST 的受护变异**。  
 - **B stdlib：** `hot-strategy:swap!` profile（conservative→aggressive）+ M7 threshold body rebuild + fitness EWMA；可选 evolve（M11）。  
 - **C 数据面：** choose 输出 `"lfu|flat|pin"` / `"lru|flat"` 等 → RESP `EVICT`/`LAYOUT`/`PIN`；内核仍是 C `ArEvictOps`。
 
@@ -309,7 +309,7 @@ INFO `policy_hints` → `parse-policy-hints!` → 冲突时按 hint 偏向 sessi
 
 #### 3. 常规解法与失效点
 
-本地缓存、拆 shard、读写分离副本 — 不修复**同实例**内其它有用冷 key 的误杀；CONFIG 改 LFU 又伤 ws_shift。
+本地缓存、拆 shard、读写分离副本 — 不修复**同实例**内其他有用冷 key 的误杀；CONFIG 改 LFU 又伤 ws_shift。
 
 #### 4. Aura 解法路径（分层）
 
@@ -393,7 +393,7 @@ Promote 后短暂 hit 差；policy-pin 日志 version 重置；C 侧可能仍持
 
 #### 4. Aura 解法路径（分层）
 
-- **A：** 进程内 version/provenance；跨机需 **针**（heartbeat / note）— 原声不自动跨进程复制 workspace。  
+- **A：** 进程内 version/provenance；跨机需 **针**（heartbeat / note）— 原生不自动跨进程复制 workspace。  
 - **B：** `hot-strategy:version` + `log-policy-pin!`；reconnect 重申 last EVICT/LAYOUT；**A6** promote 后 reseed 同代。  
 - **C：** 保留 last kernel → 策略冷时数据面不立刻 noop。
 

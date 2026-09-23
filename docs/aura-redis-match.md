@@ -24,7 +24,7 @@
 
 ## 2. Aura capability catalog
 
-Two layers. **Layer A = language/runtime/compiler native (原声/原生).** **Layer B = stdlib** sitting on A. For each: **Aura-native?** · **Used by aura-redis?** · pointer.
+Two layers. **Layer A = language/runtime/compiler native (原生).** **Layer B = stdlib** sitting on A. For each: **Aura-native?** · **Used by aura-redis?** · pointer.
 
 ### 2.A Language & runtime native (non-stdlib-first)
 
