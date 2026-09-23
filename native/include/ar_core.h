@@ -141,6 +141,21 @@ uint64_t ar_core_pinned_keys(ArCore* core);
 size_t ar_core_list_pinned(ArCore* core, char** out_keys, size_t max_out);
 uint64_t ar_core_nkeys(ArCore* core);
 
+/* A7 — typed pressure signals (INFO; policy may react; kernels stay C) */
+uint64_t ar_core_type_keys(ArCore* core, int type);   /* 0=string..3=zset */
+uint64_t ar_core_type_bytes(ArCore* core, int type);
+uint64_t ar_core_bigkey_bytes(ArCore* core);
+const char* ar_core_bigkey_type_name(ArCore* core);
+
+/* A9 — hot_cold promote/demote / soft-cap knobs (CONFIG/RESP) */
+int ar_core_set_hot_soft_cap_pct(ArCore* core, int pct); /* 1..100; default 25 */
+int ar_core_hot_soft_cap_pct(ArCore* core);
+int ar_core_set_hot_soft_cap_min(ArCore* core, int n); /* 0..1M; default 256 */
+int ar_core_hot_soft_cap_min(ArCore* core);
+int ar_core_set_hot_promote_on_get(ArCore* core, int on); /* 0/1; default 1 */
+int ar_core_hot_promote_on_get(ArCore* core);
+uint64_t ar_core_hot_soft_cap(ArCore* core); /* effective current soft-cap */
+
 /* A10 — shadow / A/B sample (CONFIG/INFO; agent dry-run never applies loser) */
 int ar_core_set_shadow_policy(ArCore* core, const char* name); /* "" clears */
 const char* ar_core_shadow_policy(ArCore* core);

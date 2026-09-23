@@ -1125,7 +1125,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       memcpy(pat, argv[2].p, pl);
       pat[pl] = '\0';
       /* Collect matching pairs into temp buffer as RESP array */
-      char pairs[1024];
+      char pairs[2048];
       int pn = 0;
       int nitems = 0;
       char tmp[256];
@@ -1196,6 +1196,18 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         snprintf(vbuf, sizeof(vbuf), "%d", ar_core_shadow_sample_pct(core));
         AR_CFG_ADD("shadow-sample-pct", "%s", vbuf);
       }
+      {
+        char vbuf[32];
+        snprintf(vbuf, sizeof(vbuf), "%d", ar_core_hot_soft_cap_pct(core));
+        AR_CFG_ADD("hot-soft-cap-pct", "%s", vbuf);
+      }
+      {
+        char vbuf[32];
+        snprintf(vbuf, sizeof(vbuf), "%d", ar_core_hot_soft_cap_min(core));
+        AR_CFG_ADD("hot-soft-cap-min", "%s", vbuf);
+      }
+      AR_CFG_ADD("hot-promote-on-get", "%s",
+                 ar_core_hot_promote_on_get(core) ? "yes" : "no");
 #undef AR_CFG_ADD
       char hdr[32];
       int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", nitems);
@@ -1285,6 +1297,25 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
           return reply_err(c, "ERR config set shadow-sample-pct");
         return reply_ok(c);
       }
+      if (cmd_eq(argv[2].p, argv[2].len, "hot-soft-cap-pct")) {
+        int n = atoi(val);
+        if (!ar_core_set_hot_soft_cap_pct(core, n))
+          return reply_err(c, "ERR config set hot-soft-cap-pct");
+        return reply_ok(c);
+      }
+      if (cmd_eq(argv[2].p, argv[2].len, "hot-soft-cap-min")) {
+        int n = atoi(val);
+        if (!ar_core_set_hot_soft_cap_min(core, n))
+          return reply_err(c, "ERR config set hot-soft-cap-min");
+        return reply_ok(c);
+      }
+      if (cmd_eq(argv[2].p, argv[2].len, "hot-promote-on-get")) {
+        int on = !(strcmp(val, "no") == 0 || strcmp(val, "0") == 0 ||
+                   strcmp(val, "false") == 0);
+        if (!ar_core_set_hot_promote_on_get(core, on))
+          return reply_err(c, "ERR config set hot-promote-on-get");
+        return reply_ok(c);
+      }
       return reply_err(c, "ERR Unknown option or number of arguments for CONFIG "
                           "SET");
     }
@@ -1299,7 +1330,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     for (int i = 0; i < AR_MAX_CONN; ++i)
       if (core->conns[i].in_use && core->conns[i].is_replica)
         connected_slaves_count++;
-    char buf[4096];
+    char buf[5120];
     int n = snprintf(
         buf, sizeof(buf),
         "# Server\n"
@@ -1361,6 +1392,20 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         "hot_keys:%llu\n"
         "cold_keys:%llu\n"
         "policy_hints:%s\n"
+        "keys_string:%llu\n"
+        "keys_hash:%llu\n"
+        "keys_list:%llu\n"
+        "keys_zset:%llu\n"
+        "mem_string:%llu\n"
+        "mem_hash:%llu\n"
+        "mem_list:%llu\n"
+        "mem_zset:%llu\n"
+        "bigkey_bytes:%llu\n"
+        "bigkey_type:%s\n"
+        "hot_soft_cap_pct:%d\n"
+        "hot_soft_cap_min:%d\n"
+        "hot_promote_on_get:%s\n"
+        "hot_soft_cap:%llu\n"
         "shadow_policy:%s\n"
         "shadow_sample_pct:%d\n"
         "shadow_samples:%llu\n"
@@ -1418,6 +1463,20 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         (unsigned long long)ar_core_hot_keys(core),
         (unsigned long long)ar_core_cold_keys(core),
         hints,
+        (unsigned long long)ar_core_type_keys(core, 0),
+        (unsigned long long)ar_core_type_keys(core, 1),
+        (unsigned long long)ar_core_type_keys(core, 2),
+        (unsigned long long)ar_core_type_keys(core, 3),
+        (unsigned long long)ar_core_type_bytes(core, 0),
+        (unsigned long long)ar_core_type_bytes(core, 1),
+        (unsigned long long)ar_core_type_bytes(core, 2),
+        (unsigned long long)ar_core_type_bytes(core, 3),
+        (unsigned long long)ar_core_bigkey_bytes(core),
+        ar_core_bigkey_type_name(core),
+        ar_core_hot_soft_cap_pct(core),
+        ar_core_hot_soft_cap_min(core),
+        ar_core_hot_promote_on_get(core) ? "yes" : "no",
+        (unsigned long long)ar_core_hot_soft_cap(core),
         ar_core_shadow_policy(core),
         ar_core_shadow_sample_pct(core),
         (unsigned long long)ar_core_shadow_samples(core),
@@ -1476,6 +1535,62 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       return reply_ok(c);
     }
     return reply_err(c, "ERR wrong number of arguments for 'shadow'");
+  }
+  /* A9: HOTCOLD [soft-cap-pct <n>|soft-cap-min <n>|promote-on-get <yes|no>] */
+  if (cmd_eq(cmd, clen, "hotcold") || cmd_eq(cmd, clen, "hot_cold")) {
+    if (argc == 1) {
+      char buf[320];
+      int n = snprintf(
+          buf, sizeof(buf),
+          "soft_cap_pct:%d soft_cap_min:%d promote_on_get:%s soft_cap:%llu "
+          "hot_keys:%llu cold_keys:%llu demotions:%llu promotions:%llu\n",
+          ar_core_hot_soft_cap_pct(core), ar_core_hot_soft_cap_min(core),
+          ar_core_hot_promote_on_get(core) ? "yes" : "no",
+          (unsigned long long)ar_core_hot_soft_cap(core),
+          (unsigned long long)ar_core_hot_keys(core),
+          (unsigned long long)ar_core_cold_keys(core),
+          (unsigned long long)ar_metric_demotions(core),
+          (unsigned long long)ar_metric_promotions(core));
+      if (n < 0)
+        return reply_err(c, "ERR hotcold");
+      return reply_bulk(c, buf, (size_t)n);
+    }
+    if (argc == 3 && (cmd_eq(argv[1].p, argv[1].len, "soft-cap-pct") ||
+                      cmd_eq(argv[1].p, argv[1].len, "soft_cap_pct"))) {
+      char nbuf[32];
+      if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+        return reply_err(c, "ERR bad soft-cap-pct");
+      memcpy(nbuf, argv[2].p, argv[2].len);
+      nbuf[argv[2].len] = '\0';
+      if (!ar_core_set_hot_soft_cap_pct(core, atoi(nbuf)))
+        return reply_err(c, "ERR bad soft-cap-pct");
+      return reply_ok(c);
+    }
+    if (argc == 3 && (cmd_eq(argv[1].p, argv[1].len, "soft-cap-min") ||
+                      cmd_eq(argv[1].p, argv[1].len, "soft_cap_min"))) {
+      char nbuf[32];
+      if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+        return reply_err(c, "ERR bad soft-cap-min");
+      memcpy(nbuf, argv[2].p, argv[2].len);
+      nbuf[argv[2].len] = '\0';
+      if (!ar_core_set_hot_soft_cap_min(core, atoi(nbuf)))
+        return reply_err(c, "ERR bad soft-cap-min");
+      return reply_ok(c);
+    }
+    if (argc == 3 && (cmd_eq(argv[1].p, argv[1].len, "promote-on-get") ||
+                      cmd_eq(argv[1].p, argv[1].len, "promote_on_get"))) {
+      char vbuf[16];
+      if (argv[2].len >= sizeof(vbuf))
+        return reply_err(c, "ERR bad promote-on-get");
+      memcpy(vbuf, argv[2].p, argv[2].len);
+      vbuf[argv[2].len] = '\0';
+      int on = !(strcmp(vbuf, "no") == 0 || strcmp(vbuf, "0") == 0 ||
+                 strcmp(vbuf, "false") == 0);
+      if (!ar_core_set_hot_promote_on_get(core, on))
+        return reply_err(c, "ERR bad promote-on-get");
+      return reply_ok(c);
+    }
+    return reply_err(c, "ERR wrong number of arguments for 'hotcold'");
   }
   /* M12: POLICY prefix profile | POLICY (list hints) */
   if (cmd_eq(cmd, clen, "policy")) {

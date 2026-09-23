@@ -148,6 +148,17 @@ struct ArCore {
   uint64_t maxmemory; /* 0 = unlimited */
   uint64_t used_memory;
 
+  /* A7 — typed pressure: per-type key counts + memory shares + cheap bigkey */
+  uint64_t type_nkeys[4];  /* string,hash,list,zset */
+  uint64_t type_bytes[4];  /* attributed used_memory share */
+  uint64_t bigkey_bytes;   /* max payload seen */
+  uint8_t bigkey_type;     /* ArType of bigkey_bytes */
+
+  /* A9 — hot_cold layout knobs (soft-cap demote + promote-on-GET) */
+  int hot_soft_cap_pct;    /* 1..100; default 25 (~nkeys/4) */
+  int hot_soft_cap_min;    /* floor keys in hot; default 256 */
+  int hot_promote_on_get;  /* 1=promote cold→hot on GET; default 1 */
+
   /* A10 — shadow / A/B sample path (best-effort; does not dual-store) */
   char shadow_policy[32]; /* alternate policy name for agent dual-score */
   int shadow_sample_pct;  /* 0..100; sample GET hit/miss under live champ */
@@ -307,6 +318,12 @@ size_t ar_fnv_hash(const char* s, size_t n);
 char* ar_xmemdup(const char* s, size_t n);
 void ar_mem_add(ArCore* core, size_t n);
 void ar_mem_sub(ArCore* core, size_t n);
+/* A7 typed pressure accounting */
+void ar_type_stats_add_key(ArCore* core, uint8_t type, size_t bytes);
+void ar_type_stats_sub_key(ArCore* core, uint8_t type, size_t bytes);
+void ar_type_stats_bytes_delta(ArCore* core, uint8_t type, int64_t delta);
+void ar_type_stats_note_bigkey(ArCore* core, uint8_t type, size_t payload);
+void ar_type_stats_reset(ArCore* core);
 void ar_maybe_evict_pub(ArCore* core);
 
 #endif

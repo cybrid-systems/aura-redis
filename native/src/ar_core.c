@@ -542,6 +542,8 @@ void ar_entry_free_ex(ArCore* core, size_t bucket, int tier, ArEntry* e) {
   unlink_entry(table, bucket, e);
   size_t pay = ar_entry_payload_bytes(e);
   size_t total = e->klen + pay + sizeof(ArEntry);
+  uint8_t t = e->type;
+  ar_type_stats_sub_key(core, t, total);
   if (core->used_memory >= total)
     core->used_memory -= total;
   else
@@ -570,12 +572,16 @@ void ar_entry_free(ArCore* core, size_t bucket, ArEntry* e) {
   ar_entry_free_ex(core, bucket, 0, e);
 }
 
-/* Soft cap for hot tier: keep ~1/4 of keys hot (floor 256).
- * Independent of nbuckets so rehash cannot disable demotion. */
+/* Soft cap for hot tier: pct of nkeys (default 25 ≈ /4), floor hot_soft_cap_min.
+ * A9: both knobs CONFIG/RESP-tunable. Independent of nbuckets. */
 static size_t hot_soft_cap(ArCore* core) {
-  size_t cap = core->nkeys / 4;
-  if (cap < 256)
-    cap = 256;
+  int pct = core->hot_soft_cap_pct > 0 ? core->hot_soft_cap_pct : 25;
+  if (pct > 100)
+    pct = 100;
+  size_t cap = (core->nkeys * (size_t)pct) / 100;
+  size_t floor = core->hot_soft_cap_min > 0 ? (size_t)core->hot_soft_cap_min : 0;
+  if (cap < floor)
+    cap = floor;
   return cap;
 }
 
@@ -622,8 +628,9 @@ static void maybe_demote_hot(ArCore* core) {
 
 void ar_touch_get(ArCore* core, ArEntry* e, size_t bucket, int tier) {
   e->last_access = ++core->clock;
-  if (core->layout == AR_LAYOUT_HOT_COLD && tier == 1 && core->cold_buckets) {
-    /* Promote cold → hot */
+  if (core->layout == AR_LAYOUT_HOT_COLD && tier == 1 && core->cold_buckets &&
+      core->hot_promote_on_get) {
+    /* Promote cold → hot (A9: hot-promote-on-get knob) */
     unlink_entry(core->cold_buckets, bucket, e);
     if (core->cold_nkeys)
       core->cold_nkeys--;
@@ -682,19 +689,27 @@ int ar_entry_set_ex(ArCore* core, const char* key, size_t klen, const char* val,
     /* SET replaces any type with string (Redis). */
     if (e->type != AR_TYPE_STRING) {
       size_t old_pay = ar_entry_payload_bytes(e);
+      size_t old_tot = e->klen + old_pay + sizeof(ArEntry);
+      uint8_t old_t = e->type;
+      ar_type_stats_sub_key(core, old_t, old_tot);
       ar_entry_free_obj(e);
       ar_mem_sub(core, old_pay);
       e->type = AR_TYPE_STRING;
       e->val = NULL;
       e->vlen = 0;
+      /* re-attribute key shell as string; value added below */
+      ar_type_stats_add_key(core, AR_TYPE_STRING, e->klen + sizeof(ArEntry));
     }
     core->used_memory -= e->vlen;
+    ar_type_stats_bytes_delta(core, AR_TYPE_STRING, -(int64_t)e->vlen);
     free(e->val);
     e->val = nv;
     e->vlen = vlen;
     e->type = AR_TYPE_STRING;
     e->obj = NULL;
     core->used_memory += vlen;
+    ar_type_stats_bytes_delta(core, AR_TYPE_STRING, (int64_t)vlen);
+    ar_type_stats_note_bigkey(core, AR_TYPE_STRING, vlen);
     e->last_access = ++core->clock;
     entry_set_expire_at(core, e, expire_at);
     /* Updates land in hot: promote if currently cold */
@@ -731,7 +746,12 @@ int ar_entry_set_ex(ArCore* core, const char* key, size_t klen, const char* val,
   core->nkeys++;
   if (core->layout == AR_LAYOUT_HOT_COLD)
     core->hot_nkeys++;
-  core->used_memory += klen + vlen + sizeof(ArEntry);
+  {
+    size_t tot = klen + vlen + sizeof(ArEntry);
+    core->used_memory += tot;
+    ar_type_stats_add_key(core, AR_TYPE_STRING, tot);
+    ar_type_stats_note_bigkey(core, AR_TYPE_STRING, vlen);
+  }
   entry_set_expire_at(core, ne, expire_at);
   if (core->evict && core->evict->on_set)
     core->evict->on_set(core, ne);
@@ -926,6 +946,10 @@ ArCore* ar_core_create(void) {
   c->tls_key_file[0] = '\0';
   c->tls_ca_file[0] = '\0';
   c->ssl_ctx = NULL;
+  /* A9 defaults: soft-cap ≈ nkeys/4 with floor 256; promote on GET */
+  c->hot_soft_cap_pct = 25;
+  c->hot_soft_cap_min = 256;
+  c->hot_promote_on_get = 1;
   return c;
 }
 
@@ -1247,6 +1271,7 @@ void ar_flushdb(ArCore* core) {
   core->used_memory = 0;
   core->keys_with_ttl = 0;
   core->expire_at_sum = 0;
+  ar_type_stats_reset(core);
   core->ops++;
 }
 
@@ -1421,6 +1446,68 @@ int ar_core_has_evict_plugin(ArCore* core) {
 
 /* --- MVP M4: samples + pin set --- */
 
+
+/* --- A7 typed pressure --- */
+uint64_t ar_core_type_keys(ArCore* core, int type) {
+  if (!core || type < 0 || type > 3)
+    return 0;
+  return core->type_nkeys[type];
+}
+uint64_t ar_core_type_bytes(ArCore* core, int type) {
+  if (!core || type < 0 || type > 3)
+    return 0;
+  return core->type_bytes[type];
+}
+uint64_t ar_core_bigkey_bytes(ArCore* core) {
+  return core ? core->bigkey_bytes : 0;
+}
+const char* ar_core_bigkey_type_name(ArCore* core) {
+  if (!core)
+    return "none";
+  return ar_type_name(core->bigkey_type);
+}
+
+/* --- A9 hot_cold layout knobs --- */
+int ar_core_set_hot_soft_cap_pct(ArCore* core, int pct) {
+  if (!core)
+    return 0;
+  if (pct < 1)
+    pct = 1;
+  if (pct > 100)
+    pct = 100;
+  core->hot_soft_cap_pct = pct;
+  maybe_demote_hot(core);
+  return 1;
+}
+int ar_core_hot_soft_cap_pct(ArCore* core) {
+  return core ? (core->hot_soft_cap_pct > 0 ? core->hot_soft_cap_pct : 25) : 25;
+}
+int ar_core_set_hot_soft_cap_min(ArCore* core, int n) {
+  if (!core)
+    return 0;
+  if (n < 0)
+    n = 0;
+  if (n > 1000000)
+    n = 1000000;
+  core->hot_soft_cap_min = n;
+  maybe_demote_hot(core);
+  return 1;
+}
+int ar_core_hot_soft_cap_min(ArCore* core) {
+  return core ? core->hot_soft_cap_min : 256;
+}
+int ar_core_set_hot_promote_on_get(ArCore* core, int on) {
+  if (!core)
+    return 0;
+  core->hot_promote_on_get = on ? 1 : 0;
+  return 1;
+}
+int ar_core_hot_promote_on_get(ArCore* core) {
+  return core ? (core->hot_promote_on_get ? 1 : 0) : 1;
+}
+uint64_t ar_core_hot_soft_cap(ArCore* core) {
+  return core ? (uint64_t)hot_soft_cap(core) : 0;
+}
 
 /* --- A10 shadow / A/B sample --- */
 int ar_core_set_shadow_policy(ArCore* core, const char* name) {

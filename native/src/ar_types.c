@@ -39,6 +39,60 @@ void ar_mem_sub(ArCore* core, size_t n) {
     core->used_memory = 0;
 }
 
+void ar_type_stats_reset(ArCore* core) {
+  if (!core)
+    return;
+  for (int i = 0; i < 4; ++i) {
+    core->type_nkeys[i] = 0;
+    core->type_bytes[i] = 0;
+  }
+  core->bigkey_bytes = 0;
+  core->bigkey_type = AR_TYPE_STRING;
+}
+
+void ar_type_stats_note_bigkey(ArCore* core, uint8_t type, size_t payload) {
+  if (!core)
+    return;
+  if (payload > core->bigkey_bytes) {
+    core->bigkey_bytes = payload;
+    core->bigkey_type = type;
+  }
+}
+
+void ar_type_stats_bytes_delta(ArCore* core, uint8_t type, int64_t delta) {
+  if (!core || type > AR_TYPE_ZSET)
+    return;
+  if (delta >= 0)
+    core->type_bytes[type] += (uint64_t)delta;
+  else {
+    uint64_t sub = (uint64_t)(-delta);
+    if (core->type_bytes[type] >= sub)
+      core->type_bytes[type] -= sub;
+    else
+      core->type_bytes[type] = 0;
+  }
+}
+
+void ar_type_stats_add_key(ArCore* core, uint8_t type, size_t bytes) {
+  if (!core || type > AR_TYPE_ZSET)
+    return;
+  core->type_nkeys[type]++;
+  core->type_bytes[type] += bytes;
+  if (bytes > sizeof(ArEntry))
+    ar_type_stats_note_bigkey(core, type, bytes - sizeof(ArEntry));
+}
+
+void ar_type_stats_sub_key(ArCore* core, uint8_t type, size_t bytes) {
+  if (!core || type > AR_TYPE_ZSET)
+    return;
+  if (core->type_nkeys[type])
+    core->type_nkeys[type]--;
+  if (core->type_bytes[type] >= bytes)
+    core->type_bytes[type] -= bytes;
+  else
+    core->type_bytes[type] = 0;
+}
+
 /* maybe_evict is static in ar_core.c — call via over_maxmemory + evict_one loop */
 void ar_maybe_evict_pub(ArCore* core) {
   if (!core || !core->evict || !core->evict->should_evict)
@@ -293,7 +347,12 @@ ArEntry* ar_entry_get_or_create(ArCore* core, const char* key, size_t klen,
   core->nkeys++;
   if (core->layout == AR_LAYOUT_HOT_COLD)
     core->hot_nkeys++;
-  ar_mem_add(core, klen + sizeof(ArEntry) + ar_entry_payload_bytes(ne));
+  {
+    size_t tot = klen + sizeof(ArEntry) + ar_entry_payload_bytes(ne);
+    ar_mem_add(core, tot);
+    ar_type_stats_add_key(core, type, tot);
+    ar_type_stats_note_bigkey(core, type, ar_entry_payload_bytes(ne));
+  }
   if (core->evict && core->evict->on_set)
     core->evict->on_set(core, ne);
   ar_rehash_if_needed(core);
@@ -388,10 +447,14 @@ int ar_hash_hset(ArCore* core, const char* key, size_t klen, int nfields,
     }
   }
   size_t new_pay = hash_obj_bytes(h);
-  if (new_pay >= old_pay)
+  if (new_pay >= old_pay) {
     ar_mem_add(core, new_pay - old_pay);
-  else
+    ar_type_stats_bytes_delta(core, e->type, (int64_t)(new_pay - old_pay));
+    ar_type_stats_note_bigkey(core, e->type, new_pay);
+  } else {
     ar_mem_sub(core, old_pay - new_pay);
+    ar_type_stats_bytes_delta(core, e->type, -(int64_t)(old_pay - new_pay));
+  }
   e->last_access = ++core->clock;
   ar_maybe_evict_pub(core);
   return added;
@@ -445,8 +508,10 @@ int ar_hash_hdel(ArCore* core, const char* key, size_t klen, int nfields,
     }
   }
   size_t new_pay = hash_obj_bytes(h);
-  if (old_pay >= new_pay)
+  if (old_pay >= new_pay) {
     ar_mem_sub(core, old_pay - new_pay);
+    ar_type_stats_bytes_delta(core, e->type, -(int64_t)(old_pay - new_pay));
+  }
   /* delete empty hash key */
   if (h->nfields == 0) {
     size_t b = 0;
@@ -538,10 +603,14 @@ int64_t ar_hash_hincrby(ArCore* core, const char* key, size_t klen,
   f->val = nv;
   f->vlen = (size_t)n;
   size_t new_pay = hash_obj_bytes(h);
-  if (new_pay >= old_pay)
+  if (new_pay >= old_pay) {
     ar_mem_add(core, new_pay - old_pay);
-  else
+    ar_type_stats_bytes_delta(core, e->type, (int64_t)(new_pay - old_pay));
+    ar_type_stats_note_bigkey(core, e->type, new_pay);
+  } else {
     ar_mem_sub(core, old_pay - new_pay);
+    ar_type_stats_bytes_delta(core, e->type, -(int64_t)(old_pay - new_pay));
+  }
   e->last_access = ++core->clock;
   ar_maybe_evict_pub(core);
   return v;
@@ -594,10 +663,14 @@ int64_t ar_list_push(ArCore* core, const char* key, size_t klen, int left,
     l->len++;
   }
   size_t new_pay = list_obj_bytes(l);
-  if (new_pay >= old_pay)
+  if (new_pay >= old_pay) {
     ar_mem_add(core, new_pay - old_pay);
-  else
+    ar_type_stats_bytes_delta(core, e->type, (int64_t)(new_pay - old_pay));
+    ar_type_stats_note_bigkey(core, e->type, new_pay);
+  } else {
     ar_mem_sub(core, old_pay - new_pay);
+    ar_type_stats_bytes_delta(core, e->type, -(int64_t)(old_pay - new_pay));
+  }
   e->last_access = ++core->clock;
   ar_maybe_evict_pub(core);
   return (int64_t)l->len;
@@ -639,8 +712,10 @@ char* ar_list_pop(ArCore* core, const char* key, size_t klen, int left,
   node->val = NULL;
   free(node);
   size_t new_pay = list_obj_bytes(l);
-  if (old_pay >= new_pay)
+  if (old_pay >= new_pay) {
     ar_mem_sub(core, old_pay - new_pay);
+    ar_type_stats_bytes_delta(core, e->type, -(int64_t)(old_pay - new_pay));
+  }
   if (l->len == 0) {
     /* free empty list key — transfer ownership of out first */
     if (out_len)
@@ -792,10 +867,14 @@ int ar_zset_zadd(ArCore* core, const char* key, size_t klen, int n,
     z->len++;
   }
   size_t new_pay = zset_obj_bytes(z);
-  if (new_pay >= old_pay)
+  if (new_pay >= old_pay) {
     ar_mem_add(core, new_pay - old_pay);
-  else
+    ar_type_stats_bytes_delta(core, e->type, (int64_t)(new_pay - old_pay));
+    ar_type_stats_note_bigkey(core, e->type, new_pay);
+  } else {
     ar_mem_sub(core, old_pay - new_pay);
+    ar_type_stats_bytes_delta(core, e->type, -(int64_t)(old_pay - new_pay));
+  }
   e->last_access = ++core->clock;
   ar_maybe_evict_pub(core);
   return added;
@@ -849,8 +928,10 @@ int ar_zset_zrem(ArCore* core, const char* key, size_t klen, int n,
     removed++;
   }
   size_t new_pay = zset_obj_bytes(z);
-  if (old_pay >= new_pay)
+  if (old_pay >= new_pay) {
     ar_mem_sub(core, old_pay - new_pay);
+    ar_type_stats_bytes_delta(core, e->type, -(int64_t)(old_pay - new_pay));
+  }
   if (z->len == 0)
     ar_entry_free_ex(core, b, tier, e);
   return removed;

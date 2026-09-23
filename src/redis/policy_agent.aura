@@ -34,6 +34,9 @@
 ;   AURA_REDIS_SHADOW_AB=0|1         A10: dual choose dry-run + C sample; never EVICT loser
 ;   AURA_REDIS_SHADOW_PROFILE        challenger choose body (default inverted)
 ;   AURA_REDIS_SHADOW_SAMPLE_PCT     C GET sample % for shadow_* INFO (default 10)
+;   AURA_REDIS_TYPED_PRESSURE=0|1    A7: react to INFO type shares (default 1)
+;   AURA_REDIS_HOTCOLD_TUNE=0|1      A9: optional CONFIG soft-cap when LAYOUT hot_cold
+;   AURA_REDIS_HOT_SOFT_CAP_PCT      A9: soft-cap pct when tuning (default 25)
 ;   AURA_REDIS_PREFER_SLRU=0|1       A12: zipf/miss_spike prefer slru over lfu
 ;   AURA_REDIS_PASSWORD / REQUIREPASS  AUTH to C server when requirepass set
 ;   AURA_REDIS_POLICY_HEARTBEAT     optional file rewritten each tick (HA probe)
@@ -177,6 +180,18 @@
 (define *shadow-ab-blocked* 0)
 (define *shadow-c-ready* #f)
 (define *prefer-slru* #f)
+; A7 — typed pressure (HASH/LIST/ZSET shares from INFO)
+(define *typed-pressure-on* #t)
+(define *typed-pressure* #f)
+(define *last-keys-hash* 0)
+(define *last-mem-hash* 0)
+(define *last-keys-string* 0)
+(define *last-hash-share* 0)
+(define *typed-pressure-applies* 0)
+; A9 — optional hot_cold soft-cap tune via CONFIG/RESP
+(define *hotcold-tune* #f)
+(define *hot-soft-cap-pct* 25)
+(define *hotcold-tuned* #f)
 ; M12/A5 - per-prefix policy hints + param bags from INFO policy_hints
 (define *policy-hints* "")
 (define *prefix-policy-on* #f)
@@ -413,6 +428,26 @@
 (let ((e (getenv "AURA_REDIS_SHADOW_SAMPLE_PCT")))
   (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
     (set! *shadow-sample-pct* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_TYPED_PRESSURE")))
+  (if (and (string? e)
+           (or (string=? e "0") (string=? e "false") (string=? e "no")
+               (string=? e "off")))
+    (begin
+      (set! *typed-pressure-on* #f)
+      (display "policy_agent: typed-pressure off\n"))
+    #t))
+(let ((e (getenv "AURA_REDIS_HOTCOLD_TUNE")))
+  (if (and (string? e)
+           (or (string=? e "1") (string=? e "true") (string=? e "yes")
+               (string=? e "on")))
+    (begin
+      (set! *hotcold-tune* #t)
+      (display "policy_agent: hotcold-tune on (A9)\n"))
+    #t))
+(let ((e (getenv "AURA_REDIS_HOT_SOFT_CAP_PCT")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *hot-soft-cap-pct* (string->number e))
     #t))
 (let ((e (getenv "AURA_REDIS_PREFER_SLRU")))
   (if (and (string? e)
@@ -2016,6 +2051,9 @@
                        "shadow_ab_ticks=" (number->string *shadow-ab-ticks*) "\n"
                        "shadow_ab_diverges=" (number->string *shadow-ab-diverges*) "\n"
                        "shadow_ab_blocked=" (number->string *shadow-ab-blocked*) "\n"
+                       "typed_pressure=" (if *typed-pressure* "1" "0") "\n"
+                       "hash_share=" (number->string *last-hash-share*) "\n"
+                       "keys_hash=" (number->string *last-keys-hash*) "\n"
                        "hit_ewma=" (number->string *hit-ewma*) "\n"
                        "swaps=" (number->string *swaps*) "\n"
                        "applies_sec=" (number->string
@@ -2505,6 +2543,49 @@
                       (display choice)
                       (newline))
                     #t)
+                  ; A7 typed pressure: HASH/ZSET memory flood -> pin strings + flat
+                  (if *typed-pressure-on*
+                    (begin
+                      (set! *last-keys-hash* (info-num info "keys_hash"))
+                      (set! *last-mem-hash* (info-num info "mem_hash"))
+                      (set! *last-keys-string* (info-num info "keys_string"))
+                      (let ((um (info-num info "used_memory"))
+                            (ks *last-keys-string*)
+                            (kh *last-keys-hash*)
+                            (mh *last-mem-hash*)
+                            (bk (info-num info "bigkey_bytes"))
+                            (hshare 0))
+                        (set! hshare
+                          (if (> um 0)
+                            (quotient (* 100 mh) um)
+                            (if (> nk 0) (quotient (* 100 kh) nk) 0)))
+                        (set! *last-hash-share* hshare)
+                        (set! *typed-pressure*
+                          (and (or (>= hshare 35)
+                                   (and (> kh 0) (>= kh ks))
+                                   (and (> bk 800) (>= hshare 20)))
+                               (> ks 0)
+                               (> nk 8)))
+                        (if *typed-pressure*
+                          (begin
+                            (set! choice "lfu|flat|pin")
+                            (if (= *typed-pressure-applies* 0)
+                              (begin
+                                (display "policy_agent: typed-pressure hash_share=")
+                                (display hshare)
+                                (display " keys_hash=")
+                                (display kh)
+                                (display " keys_string=")
+                                (display ks)
+                                (display " -> lfu|flat|pin\n")
+                                (audit-append! "typed_pressure"
+                                               (number->string hshare)
+                                               "lfu|flat|pin" "typed_pressure")
+                                (set! *typed-pressure-applies* 1))
+                              #t))
+                          #t))
+                    )
+                    #t)
                   ; A10 shadow A/B dry-run (never EVICT loser)
                   (if *shadow-ab*
                     (begin
@@ -2604,7 +2685,22 @@
                               (newline)
                               (redis-call! *sock* "LAYOUT" ly-name)
                               (set! *last-layout* ly-name)
-                              (set! *applies* (+ *applies* 1)))
+                              (set! *applies* (+ *applies* 1))
+                              ; A9 optional: tune hot_cold soft-cap via CONFIG
+                              (if (and *hotcold-tune*
+                                       (or (string=? ly-name "hot_cold")
+                                           (string=? ly-name "hot-cold"))
+                                       (not *hotcold-tuned*))
+                                (begin
+                                  (redis-call! *sock* "CONFIG" "SET"
+                                               "hot-soft-cap-pct"
+                                               (number->string *hot-soft-cap-pct*))
+                                  (display "policy_agent: hotcold-tune soft-cap-pct=")
+                                  (display *hot-soft-cap-pct*)
+                                  (newline)
+                                  (set! *hotcold-tuned* #t)
+                                  (set! *applies* (+ *applies* 1)))
+                                #t))
                             #t)
                           ; On LRU swap-in: drop stale pins so WS shift is not glued to set A
                           (if (and (string=? ev-name "lru")
@@ -2643,7 +2739,12 @@
                                 (begin
                                   (display "policy_agent: PIN hot set + samples=64\n")
                                   (pin-prefix-set! *sock* "hot" 40)
-                                  (pin-prefix-set! *sock* "z" 24)))
+                                  (pin-prefix-set! *sock* "z" 24)
+                                  (if *typed-pressure*
+                                    (begin
+                                      (display "policy_agent: PIN prot set (typed-pressure)\n")
+                                      (pin-prefix-set! *sock* "prot" 24))
+                                    #t)))
                               (set! *applies* (+ *applies* 1))
                               #t)
                             #t))))
