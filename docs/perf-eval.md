@@ -1,5 +1,9 @@
 # aura-redis end-to-end performance evaluation
 
+> **Citeable Redis dual scoreboard (throughput + hit quality):** [`redis-compare.md`](redis-compare.md) (2026-09-23 CST).
+> Fresh marathon: adaptive **100%** / 1956 vs LRU **81.8%** / LFU **36.1%** (+18.2pp / +63.9pp). Throughput p=1 aura-lru **1.065×** redis; p=16 **1.115×**.
+
+
 **Date:** 2026-09-23 06:55:00 CST (Asia/Shanghai)  
 **SHA:** `b64fd21` (`b64fd2171257eb50cae7fc248b69f196f4b0d7d2`) — post P2 TLS tip  
 **Host:** Linux x86_64, 8 CPUs, `Intel(R) Xeon(R) Processor` (KVM)  

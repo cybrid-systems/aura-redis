@@ -1,5 +1,30 @@
 # aura-redis perf log
 
+## 2026-09-23 09:57:16 CST — tip `abfd3f8` (bench-vs-redis dual scoreboard)
+
+Frozen memtier: **1c×1t**, SET:GET=**1:10**, 32B, key 1..10000 **R:R**, `-n 20000`.  
+Redis: `redis:7-alpine`. DENY_PLUGIN=1.
+
+| Engine | pipeline | Totals ops/s | vs Redis |
+|--------|----------|--------------|----------|
+| redis:7-alpine | 1 | 42739.15 | 1.00 |
+| aura-redis C EVICT=lru | 1 | 45527.60 | **1.065** |
+| aura-redis C EVICT=lfu | 1 | 46623.20 | **1.091** |
+| aura-redis C EVICT=slru | 1 | 45543.04 | **1.066** |
+| redis:7-alpine | 16 | 398446.06 | 1.00 |
+| aura-redis C EVICT=lru | 16 | 444099.03 | **1.115** |
+| aura-redis C EVICT=lfu | 16 | 430061.28 | **1.079** |
+| aura-redis C EVICT=slru | 16 | 361925.44 | **0.908** |
+
+**Expanded (lru vs redis):** n=100k p=1 **1.042×**; n=100k p=16 **1.162×**; p=8 **0.950×**; 4c×4t **1.055×**.
+
+Hit-quality headline (Aura `policy_agent`): `phase_marathon` adaptive **100%** / 1956 vs LRU **81.8%** / LFU **36.1%** (+18.2pp / +63.9pp).  
+Redis side-by-side (fixed policy): see [`redis-compare.md`](redis-compare.md).
+
+Reproduce: `./scripts/bench-vs-redis.sh` · `python3 scripts/bench_regret.py phase_marathon`.
+
+---
+
 ## 2026-09-23 06:55:00 CST (Asia/Shanghai) — tip `b64fd21`
 
 **SHA:** `b64fd2171257eb50cae7fc248b69f196f4b0d7d2` (post P2 TLS)  
