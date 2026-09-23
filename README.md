@@ -23,6 +23,49 @@ Runtime mutation exploration: [`docs/runtime-mutation-explore.md`](docs/runtime-
 ---
 
 
+## Aura showcase demo / Aura 展示剧本（约 15–20 分钟）
+
+**Audience / 受众:** Aura language or infra tech day — prove an **Aura control plane** (sandbox mutate / canary / explain), not “another Redis”.  
+**Script / 一键复现:** `AURA_REDIS_DENY_PLUGIN=1 ./scripts/bench-diff-vs-redis.sh` → cite [`docs/diff-vs-redis.md`](docs/diff-vs-redis.md).  
+**SSOT:** adaptive hit-quality = `python3 scripts/bench_regret.py phase_marathon` only. Never cite short-harness adaptive rows or adaptive memtier ops/s.  
+**Trust profile:** Soft sandbox + `DENY_PLUGIN=1`. Say out loud: **Soft ≠ Restricted** ([`docs/prod-profile.md`](docs/prod-profile.md), [`docs/commercial-fit.md`](docs/commercial-fit.md)).
+
+| Act | What you show | Narration (EN) | 旁白（中文） | Evidence |
+|-----|---------------|----------------|--------------|----------|
+| **1. Setup** | Fixed policies fight each other | “Redis can hang only one `maxmemory-policy`. Same load, LRU and LFU disagree hard.” | 「Redis 只能挂一个淘汰策略；同一负载下 LRU/LFU 会互相打脸。」 | E1b: e.g. hot_protect redis LFU **100%** vs LRU **~19%** |
+| **2. Moat** | Aura adaptive across phases | “Under phase shifts, Aura mutates policy code and tracks the better kernel — cumulative useful-GET hit%.” | 「相位切换时 Aura 变异策略代码、跟上更好的核——看累积有用命中，不是 QPS。」 | E1 marathon: adaptive **100%** / 1956 useful vs LRU **81.8%** / LFU **36.1%**（**+18.2pp / +63.9pp**） |
+| **3. Extreme** | Poison unique-SET flood | “Under a unique-key write storm, fixed Redis keep* collapses; Aura can detect the storm, switch defense, and leave a mutation id.” | 「唯一 key 写风暴下 Redis keep* 可被打穿；Aura 能认风暴、切防守，并留下 mutation id。」 | E2: Redis keep* **0%**; aura LFU / adaptive_poison_on keep* **100%**; `unique_set_storm` + `explain_mid` |
+| **4. Trust** | Shadow→canary + EXPLAIN | “Policy can promote without restart (demo-only; **default OFF** in prod). Operators get `mid→reason→kernel`, not only `CONFIG GET`.” | 「策略可无重启晋升（演示可开，**生产默认关**）。运维拿到 `mid→原因→内核`，不只是 CONFIG。」 | E3: EVICT lru→lfu, no restart; E4: `POLICY EXPLAIN` mid join |
+| **Coda** | Dataplane hygiene | “We are not slower: C dataplane ~1.07–1.14× Redis memtier (lru). Speed is hygiene; the product is governed adaptation.” | 「我们没更慢：C 数据面 memtier 约 1.07–1.14× Redis。快是入场券；产品是可治理的自适应。」 | E5 ratios only |
+
+### Live commands / 现场命令
+
+```bash
+export AURA_REDIS_DENY_PLUGIN=1
+./scripts/build-native.sh
+
+# Full four-act refresh (writes docs/diff-vs-redis.md)
+./scripts/bench-diff-vs-redis.sh
+
+# Or act-by-act:
+python3 scripts/bench_regret.py phase_marathon          # Act 2 SSOT
+python3 scripts/bench_poison_vs_redis.py --headroom 45000  # Act 3
+python3 scripts/bench_explain_canary_capture.py         # Acts 3–4 artifacts
+```
+
+Optional: open `POLICY EXPLAIN` / `INFO explain_*` on a live agent session after Act 3/4.
+
+### What not to claim / 不要这样讲
+
+- Not a Redis-7 drop-in (no Cluster / Lua / Streams / ACL as product goals).  
+- Soft sandbox is **not** Restricted multi-tenant isolation (A11 still needs Tenant Admin).  
+- Do not cite adaptive **memtier** wins; do not cite short `bench_hit_vs_redis` adaptive rows.  
+- PLUGIN/.so is an escape hatch — demo profile keeps `AURA_REDIS_DENY_PLUGIN=1`.
+
+Fit / early-no customers: [`docs/commercial-fit.md`](docs/commercial-fit.md) · intake: [`docs/intake-reject-checklist.md`](docs/intake-reject-checklist.md).
+
+---
+
 ## Hybrid engine (C data plane) / 混合引擎
 
 | Env | Meaning |
@@ -56,6 +99,10 @@ python3 tests/test_layout.py                # flat↔hot_cold migrate under load
 
 
 ### Demo MVP (distinctive story)
+
+For the **Aura language / tech-day four-act script** (Redis fight → marathon → poison → explain/canary), see **[Aura showcase demo](#aura-showcase-demo--aura-展示剧本约-1520-分钟)** above and [`docs/diff-vs-redis.md`](docs/diff-vs-redis.md).
+
+### Demo MVP (short / MVP path)
 
 ```bash
 ./scripts/build-native.sh
