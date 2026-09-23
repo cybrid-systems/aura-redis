@@ -31,6 +31,11 @@
 ;   AURA_REDIS_POLICY_HEARTBEAT     optional file rewritten each tick (HA probe)
 ;   AURA_REDIS_POLICY_FORCE_RECONNECT_AFTER  test hook: drop TCP after N ticks
 ;   AURA_REDIS_POLICY_BACKOFF_CAP_MS  reconnect backoff cap (default 4000)
+;   AURA_REDIS_CANARY=0|1            A4: trial choose-fn N ticks then commit/heal
+;   AURA_REDIS_CANARY_TICKS          trial window ticks (default 5)
+;   AURA_REDIS_CANARY_INJECT         start one canary trial of named profile
+;                                   (broken|inverted|aggressive|…) after warm-up
+;   AURA_REDIS_CANARY_DROP_PP        EWMA drop vs baseline to heal (default 12)
 
 (require "std/mutate" all:)
 (require "std/hot-strategy" all:)
@@ -171,6 +176,22 @@
 (define *last-audit-version* 0)
 (define *last-audit-ts* 0)
 (define *last-explain* "")
+; A4: canary choose-fn trial window (commit or heal!)
+(define *canary-on* #f)
+(define *canary-ticks-n* 5)
+(define *canary-mode* "idle") ; idle | trial
+(define *canary-ticks* 0)
+(define *canary-from* "")
+(define *canary-to* "")
+(define *canary-baseline-ewma* 0)
+(define *canary-fit-sum* 0)
+(define *canary-fit-n* 0)
+(define *canary-commits* 0)
+(define *canary-heals* 0)
+(define *canary-inject* "")
+(define *canary-inject-done* #f)
+(define *canary-drop-pp* 12)
+(define *canary-warm-ticks* 3)
 (define *password* "")
 (define *force-reconnect-after* 0)
 (define *tick-count* 0)
@@ -268,6 +289,29 @@
       (display "policy_agent: audit-file=")
       (display *audit-file*)
       (newline))))
+(let ((e (getenv "AURA_REDIS_CANARY")))
+  (if (and (string? e)
+           (or (string=? e "1") (string=? e "true") (string=? e "yes")
+               (string=? e "on")))
+    (set! *canary-on* #t)
+    #t))
+(let ((e (getenv "AURA_REDIS_CANARY_TICKS")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *canary-ticks-n* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_CANARY_INJECT")))
+  (if (and (string? e) (> (string-length e) 0))
+    (begin
+      (set! *canary-inject* e)
+      (set! *canary-on* #t)
+      (display "policy_agent: canary-inject=")
+      (display *canary-inject*)
+      (newline))
+    #t))
+(let ((e (getenv "AURA_REDIS_CANARY_DROP_PP")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *canary-drop-pp* (string->number e))
+    #t))
 (let ((e (getenv "AURA_REDIS_POLICY_FORCE_RECONNECT_AFTER")))
   (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
     (set! *force-reconnect-after* (string->number e))
@@ -753,6 +797,17 @@
     (else "normal")))
 
 (define (do-fitness-swap! to-name reason)
+  ; A4: when canary enabled and idle, trial via canary-start! instead of
+  ; immediate commit. During an active canary trial, skip further swaps.
+  (if (canary-active?)
+    (begin
+      (display "policy_agent: skip fitness-swap (canary trial active)\n")
+      #f)
+    (if (and *canary-on* (not (canary-active?)))
+      (canary-start! to-name reason)
+      (do-fitness-swap-commit! to-name reason))))
+
+(define (do-fitness-swap-commit! to-name reason)
   ; A1: use mutate:rebind ONLY - hot-strategy:swap! also eval-current, which
   ; re-enters this file and stalls/resets the live tick loop (mutate≈frozen).
   ; denseness still via mutate:rebind of choose-fn body string.
@@ -809,6 +864,13 @@
           #f)))))
 
 (define (do-fitness-heal! reason)
+  (if (canary-active?)
+    (begin
+      (display "policy_agent: fitness-heal deferred to canary\n")
+      (canary-heal! reason))
+    (do-fitness-heal-inner! reason)))
+
+(define (do-fitness-heal-inner! reason)
   (display "policy_agent: fitness-heal! reason=")
   (display reason)
   (display " from=")
@@ -1148,7 +1210,11 @@
                        "last_audit_to=" *last-audit-to* "\n"
                        "last_audit_reason=" *last-audit-reason* "\n"
                        "last_audit_version=" (number->string *last-audit-version*) "\n"
-                       "last_explain=" *last-explain* "\n")))
+                       "last_explain=" *last-explain* "\n"
+                       "canary_mode=" *canary-mode* "\n"
+                       "canary_ticks=" (number->string *canary-ticks*) "\n"
+                       "canary_commits=" (number->string *canary-commits*) "\n"
+                       "canary_heals=" (number->string *canary-heals*) "\n")))
         (write-file *heartbeat-file* payload)
         (display "policy_agent: heartbeat wrote path=")
         (display *heartbeat-file*)
@@ -1156,6 +1222,181 @@
         (display (string-length payload))
         (newline)
         #t))))
+
+;; A4 — canary choose-fn: trial body N ticks → commit or heal!
+;; Native-safe: mutate:boundary-safe? + mutate:safety-snapshot before trial;
+;; audit reasons: canary_start / canary_commit / canary_heal.
+(define (canary-active?)
+  (string=? *canary-mode* "trial"))
+
+(define (canary-heal! detail)
+  (display "policy_agent: canary-heal! from=")
+  (display *canary-to*)
+  (display " back=")
+  (display *canary-from*)
+  (display " detail=")
+  (display detail)
+  (newline)
+  (display "policy_agent: hot-strategy:heal! (canary)\n")
+  (hot-strategy:heal!)
+  (set! *heals* (+ *heals* 1))
+  (set! *canary-heals* (+ *canary-heals* 1))
+  (set! *profile-name* *canary-from*)
+  (if (and (string? *canary-from*) (> (string-length *canary-from*) 0))
+    (set! *last-good-profile* *canary-from*)
+    #t)
+  (audit-append! "canary-heal" *canary-to* *canary-from* "canary_heal")
+  (set! *canary-mode* "idle")
+  (set! *canary-ticks* 0)
+  (set! *canary-fit-sum* 0)
+  (set! *canary-fit-n* 0)
+  (set! *ticks-since-fitness* 0)
+  (set! *post-swap-bad* 0)
+  (set! *ticks-bad* 0)
+  #t)
+
+(define (canary-commit!)
+  (display "policy_agent: canary-commit! profile=")
+  (display *canary-to*)
+  (display " ticks=")
+  (display *canary-ticks*)
+  (newline)
+  (set! *canary-commits* (+ *canary-commits* 1))
+  (set! *last-good-profile* *canary-to*)
+  (set! *profile-name* *canary-to*)
+  (audit-append! "canary-commit" *canary-from* *canary-to* "canary_commit")
+  ; Refresh safety snapshot so future heal! lands on committed body
+  (if (mutate:boundary-safe?)
+    (mutate:safety-snapshot)
+    #t)
+  (set! *canary-mode* "idle")
+  (set! *canary-ticks* 0)
+  (set! *canary-fit-sum* 0)
+  (set! *canary-fit-n* 0)
+  (set! *ticks-since-fitness* 0)
+  #t)
+
+(define (canary-start! to-name reason)
+  (if (canary-active?)
+    (begin
+      (display "policy_agent: canary-start skipped (already in trial)\n")
+      #f)
+    (if (not (mutate:boundary-safe?))
+      (begin
+        (display "policy_agent: skip canary-start (boundary not safe)\n")
+        #f)
+      (begin
+        (mutate:safety-snapshot)
+        (let ((from *profile-name*)
+              (body (body-for-profile to-name))
+              (ok #f))
+          (set! ok
+            (try
+              (begin
+                (mutate:rebind "choose-fn" body (string-append "canary-" to-name))
+                #t)
+              (catch (e) #f)))
+          (display "policy_agent: canary-start ")
+          (display from)
+          (display "→")
+          (display to-name)
+          (display " reason=")
+          (display reason)
+          (display " result=")
+          (display ok)
+          (newline)
+          (if ok
+            (begin
+              (set! *canary-from* from)
+              (set! *canary-to* to-name)
+              (set! *canary-mode* "trial")
+              (set! *canary-ticks* 0)
+              (set! *canary-baseline-ewma* *hit-ewma*)
+              (set! *canary-fit-sum* 0)
+              (set! *canary-fit-n* 0)
+              (set! *profile-name* to-name)
+              (set! *swaps* (+ *swaps* 1))
+              (set! *force-rechoose* #t)
+              (audit-append! "canary-start" from to-name "canary_start")
+              ; Immediate probe: broken body → heal without waiting full window
+              (let ((probe (try (choose-fn 20 10 5 15 0 30 0 0 0)
+                                (catch (e) "FAIL"))))
+                (if (or (not (string? probe)) (string=? probe "FAIL")
+                        (= (string-length probe) 0))
+                  (begin
+                    (display "policy_agent: canary probe fail → heal\n")
+                    (canary-heal! "probe_fail"))
+                  #t))
+              #t)
+            #f))))))
+
+(define (canary-tick! dhits dmisses)
+  (if (not (canary-active?))
+    #f
+    (begin
+      (set! *canary-ticks* (+ *canary-ticks* 1))
+      (let ((win (+ dhits dmisses))
+            (poisoned (or (string=? *canary-to* "inverted")
+                          (string=? *canary-to* "broken")))
+            (inst 0)
+            (avg 0)
+            (drop 0))
+        (if (> win 0)
+          (begin
+            (set! inst (quotient (* 100 dhits) win))
+            (set! *canary-fit-sum* (+ *canary-fit-sum* inst))
+            (set! *canary-fit-n* (+ *canary-fit-n* 1)))
+          #t)
+        (set! avg (if (> *canary-fit-n* 0)
+                    (quotient *canary-fit-sum* *canary-fit-n*)
+                    *hit-ewma*))
+        (set! drop (if (> *canary-baseline-ewma* 0)
+                     (- *canary-baseline-ewma* *hit-ewma*)
+                     0))
+        (display "policy_agent: canary-tick n=")
+        (display *canary-ticks*)
+        (display "/")
+        (display *canary-ticks-n*)
+        (display " ewma=")
+        (display *hit-ewma*)
+        (display " avg=")
+        (display avg)
+        (display " drop=")
+        (display drop)
+        (display " to=")
+        (display *canary-to*)
+        (newline)
+        (cond
+          ; poison profiles: heal quickly (within T)
+          ((and poisoned (>= *canary-ticks* 1))
+           (canary-heal! "poison_profile"))
+          ; fitness drop vs baseline
+          ((and (>= *canary-fit-n* 2)
+                (>= drop *canary-drop-pp*)
+                (or (< *hit-ewma* 55) (< avg 50)))
+           (canary-heal! "fitness_drop"))
+          ; window complete
+          ((>= *canary-ticks* *canary-ticks-n*)
+           (if (or poisoned (< avg 45) (and (> *canary-baseline-ewma* 60)
+                                            (< avg (- *canary-baseline-ewma* *canary-drop-pp*))))
+             (canary-heal! "window_reject")
+             (canary-commit!)))
+          (else #t))))))
+
+(define (maybe-canary-inject!)
+  (if (or *canary-inject-done*
+          (not (string? *canary-inject*))
+          (= (string-length *canary-inject*) 0)
+          (canary-active?))
+    #f
+    (if (>= *tick-count* *canary-warm-ticks*)
+      (begin
+        (set! *canary-inject-done* #t)
+        (display "policy_agent: canary-inject firing profile=")
+        (display *canary-inject*)
+        (newline)
+        (canary-start! *canary-inject* "inject"))
+      #f)))
 
 (define (reapply-last-policy!)
   ; After reconnect: INFO then re-assert last chosen EVICT/LAYOUT if known.
@@ -1545,7 +1786,10 @@
                               #t)
                             #t))))
                     #t))
-                (maybe-fitness-mutate! dgets dsets dhits dmisses devicted)
+                (maybe-canary-inject!)
+                (if (canary-active?)
+                  (canary-tick! dhits dmisses)
+                  (maybe-fitness-mutate! dgets dsets dhits dmisses devicted))
                 (if *force-rechoose*
                   (begin
                     (set! *force-rechoose* #f)
@@ -1705,6 +1949,12 @@
 (display *evolve-logs*)
 (display " prefix-applies=")
 (display *prefix-applies*)
+(display " canary-commits=")
+(display *canary-commits*)
+(display " canary-heals=")
+(display *canary-heals*)
+(display " canary-mode=")
+(display *canary-mode*)
 (display " profile=")
 (display *profile-name*)
 (newline)

@@ -81,7 +81,7 @@ Make ops trust live code change: durable audit, canary, prod-shaped sandbox.
 | **Exit criteria** | `tests/test_policy_canary.py` — bad trial auto-heals within T ticks |
 | **Depends-on** | A3 |
 | **Estimate** | 2–3d |
-| **Status** | **TODO** |
+| **Status** | **DONE** (2026-09-23): trial N ticks → commit or `heal!`; audit canary_start/commit/heal; bad→heal + good→commit green |
 
 #### SN5 / A11 — Restricted sandbox + Network grant
 
@@ -163,8 +163,10 @@ Also backlog (demand map, not SN-gated): **A7** typed pressure INFO+choose; **A9
 1. **A1** → green exit + push  
 2. **A2** → green exit + push (keep A1)  
 3. **A3** → audit test + explain + push  
+4. **A4** → canary choose-fn + `test_policy_canary.py` + push  
+5. **A11** → Restricted sandbox profile (honest PARTIAL if TA blocked) + push  
 
-If A2 or A3 blocked: document blocker here, push partial, continue what is possible.
+If A2/A3/A4/A11 blocked: document blocker here, push partial, continue what is possible.
 
 ---
 
@@ -184,3 +186,4 @@ If A2 or A3 blocked: document blocker here, push partial, continue what is possi
 |------------|-------|
 | 2026-09-23 | Initial native-first strong-narrative plan (SN0–SN3 / A1–A16). |
 | 2026-09-23 | A1 +27.9pp, A2 +57.1pp, A3 audit ring + test green on main. |
+| 2026-09-23 | A4 canary choose-fn (auto-heal / commit) + test green on main. |

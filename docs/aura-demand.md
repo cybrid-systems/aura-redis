@@ -47,7 +47,7 @@ Redis-compatible cache (RESP, maxmemory kernels, string/typed KV) is **table sta
 | **Typed (HASH/LIST/ZSET) in policy** | Type-aware eviction/layout pressure | **GAP** | P3.16 types in C; choose-fn / INFO have **no** type-mix signals |
 | **Multi-tenant policy isolation** | Per-prefix choose-fn / pin budget / sandbox | **GAP** | `POLICY` is hint-level override, shared global choose-fn |
 | **Mutation audit trail** | Ops-visible why/when body changed | **SHIPPED** | A3: audit file ring + heartbeat last_audit_*; `tests/test_policy_audit.py` |
-| **Canary / rollback of choose-fn** | Trial apply before commit; timed rollback | **GAP** | `heal!` is last-good only; no canary window / A/B |
+| **Canary / rollback of choose-fn** | Trial apply before commit; timed rollback | **SHIPPED** | A4: `AURA_REDIS_CANARY` + inject; `tests/test_policy_canary.py` |
 | **A/B shadow traffic** | Dual policy on sampled GETs | **GAP** | Not in data plane; needs C sample hook or dual agent |
 | **Explainability of EVICT/LAYOUT flips** | Structured reason codes for ops | **PARTIAL** | Agent logs signals inline; no `INFO policy_explain` / stable schema |
 | **Policy version pin across replica failover** | Same choose generation on promote | **GAP** | P2.14 replica exists; `hot-strategy:version` is agent-local, not replicated |
@@ -160,7 +160,7 @@ Priorities here are **P0–P2 for Aura differentiation**, independent of Redis c
 | **A1** | **Close `mutation_gain` Δ>0** — longer flash phase / colder conservative seed / require fitness-swap log | 1–2d | `python3 scripts/bench_regret.py mutation_gain` mutate−frozen ≥ +8pp + fitness-swap log | — | **DONE** (+27.9pp) |
 | **A2** | **Close `evolve_gain` Δ>0** — window/gen tuning; keep≥1 gen; assert evolve logs | 1–2d | `python3 scripts/bench_regret.py evolve_gain` ≥ +8pp + ≥2 evolve gens | — | **DONE** (+57.1pp) |
 | **A3** | **Mutation audit + explain schema** — ring of {ts, op, from, to, reason, version}; INFO or heartbeat | 1–2d | New `tests/test_policy_audit.py`; explain reasons on `phase_marathon` | — | **DONE** |
-| **A4** | Canary choose-fn — trial body N ticks; auto `heal!` if fitness drops | 2–3d | `tests/test_policy_canary.py` | A3 | |
+| **A4** | Canary choose-fn — trial body N ticks; auto `heal!` if fitness drops | 2–3d | `tests/test_policy_canary.py` | A3 | **DONE** |
 | **A5** | Deep prefix isolation — per-prefix choose body or param bag via multi `register!` | 2–3d | Conflicting-optima `prefix_mix_v2` ≥ +20pp on victim tenant | M12 | |
 | **A6** | Policy version pin across replica promote | 1–2d | Extend `tests/test_prod_policy_ha.py` + replica | P2.14, P1.9 | |
 | **A7** | Typed pressure signals in INFO + choose | 2–3d | `typed_pressure` harness PASS | P3.16 | |
@@ -174,7 +174,7 @@ Priorities here are **P0–P2 for Aura differentiation**, independent of Redis c
 | **A15** | **Swarm/FSS/PSO evolve backend** — replace/augment hand threshold walk with `std/swarm` | 2–3d | `evolve_gain` ≥ +8pp + swarm gen logs | A2 | |
 | **A16** | Agent-side fiber parallel trial fitness (canary/shadow score without C hook) | 1–2d | Dual-body score in logs; no apply of loser | A4, A10 | |
 
-**Top 3 start next:** **A1**, **A2**, **A3**.
+**Top 3 start next:** **A4**, **A11**, **A5** (A1–A3 DONE).
 
 Do **not** implement A1 in this doc-only change set unless trivially documentation.
 

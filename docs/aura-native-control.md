@@ -71,6 +71,7 @@ PLUGIN [path]      → escape hatch; **denied** when AURA_REDIS_DENY_PLUGIN=1
 3. Parse `|` fields → apply `EVICT` and optional `LAYOUT` / pin hint.
 4. When agent owns layout, leave `AURA_REDIS_LAYOUT_ADAPTIVE` **off**.
 5. On policy update: `mutate:safety-snapshot` → `hot-strategy:swap!` → heal on failure.
+6. **A4 canary (optional):** `AURA_REDIS_CANARY=1` → trial body N ticks (`AURA_REDIS_CANARY_TICKS`); fitness drop / poison → `heal!` + audit `canary_heal`; else `canary_commit`. Inject: `AURA_REDIS_CANARY_INJECT=broken|inverted|aggressive`.
 
 Policy bodies: `choose_normal` / `choose_aggressive` / `choose_conservative`
 (+ inverted / broken for demos). See [`mvp-plan.md`](mvp-plan.md).
