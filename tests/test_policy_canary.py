@@ -22,9 +22,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
 from _portutil import kill_tcp_port  # noqa: E402
+from _agentutil import (  # noqa: E402
+    agent_logs as _agent_logs,
+    start_agent as _start_agent,
+    stop_agent as _stop_agent,
+)
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26953"))
-IMG = os.environ.get("AURA_DEV_IMAGE", "ghcr.io/cybrid-systems/dev:v1.0.7")
 SERVER = ROOT / "native/build/aura_redis_server"
 BUILD = ROOT / "scripts/build-native.sh"
 CANARY_TICKS = 5
@@ -68,39 +72,32 @@ def start_agent(tag: str, inject: str, seed: str = "normal") -> str:
     p["hb"].unlink(missing_ok=True)
     p["audit"].unlink(missing_ok=True)
     p["boot"].unlink(missing_ok=True)
-    p["agent_log"].write_text("")
-    cmd = [
-        "sudo", "docker", "run", "-d", "--network", "host", "--entrypoint", "",
-        "-v", f"{ROOT}:/work", "-v", "/tmp:/tmp", "-w", "/work",
-        "-e", "AURA_SANDBOX=off",
-        "-e", "AURA_PIPELINE_STRICT=0",
-        "-e", "AURA_PATH=/work/.deps/aura/lib",
-        "-e", f"AURA_REDIS_PORT={PORT}",
-        "-e", "AURA_REDIS_HOST=127.0.0.1",
-        "-e", "AURA_REDIS_POLICY_MS=80",
-        "-e", "AURA_REDIS_DENY_PLUGIN=1",
-        "-e", "AURA_REDIS_FITNESS_MUTATE=0",
-        "-e", f"AURA_REDIS_SEED_PROFILE={seed}",
-        "-e", "AURA_REDIS_CANARY=1",
-        "-e", f"AURA_REDIS_CANARY_TICKS={CANARY_TICKS}",
-        "-e", f"AURA_REDIS_CANARY_INJECT={inject}",
-        "-e", f"AURA_REDIS_POLICY_HEARTBEAT=/work/{p['hb'].name}",
-        "-e", f"AURA_REDIS_POLICY_AUDIT=/work/{p['audit'].name}",
-        IMG,
-        "/work/.deps/aura/build/aura",
-        "/work/src/redis/policy_agent.aura",
-    ]
-    cid = subprocess.check_output(cmd, text=True).strip()
-    for _ in range(80):
-        subprocess.run(
-            ["sudo", "docker", "logs", cid],
-            stdout=p["agent_log"].open("w"), stderr=subprocess.STDOUT, check=False,
-        )
-        text = p["agent_log"].read_text(errors="replace")
-        if "PING" in text or "PONG" in text:
+    cid = _start_agent(
+        env={
+            "AURA_REDIS_PORT": str(PORT),
+            "AURA_REDIS_HOST": "127.0.0.1",
+            "AURA_REDIS_POLICY_MS": "80",
+            "AURA_REDIS_DENY_PLUGIN": "1",
+            "AURA_REDIS_FITNESS_MUTATE": "0",
+            "AURA_REDIS_SEED_PROFILE": seed,
+            "AURA_REDIS_CANARY": "1",
+            "AURA_REDIS_CANARY_TICKS": str(CANARY_TICKS),
+            "AURA_REDIS_CANARY_INJECT": inject,
+        },
+        log_path=p["agent_log"],
+        path_env={
+            "AURA_REDIS_POLICY_HEARTBEAT": p["hb"],
+            "AURA_REDIS_POLICY_AUDIT": p["audit"],
+        },
+    )
+    t0 = time.time()
+    last = ""
+    while time.time() - t0 < 12:
+        last = _agent_logs(cid, p["agent_log"])
+        if "PING" in last or "PONG" in last:
             return cid
         time.sleep(0.15)
-    raise TimeoutError(f"agent did not PING; log:\n{p['agent_log'].read_text(errors='replace')}")
+    raise TimeoutError(f"agent did not PING; log:\n{last}")
 
 
 def drive_load(rounds: int = 40) -> None:
@@ -136,7 +133,7 @@ def _parse_audit(path: Path) -> list[dict]:
 
 def _stop(srv, cid):
     if cid:
-        subprocess.run(["sudo", "docker", "rm", "-f", cid], capture_output=True)
+        _stop_agent(cid)
     import signal as _sig
     try:
         srv.send_signal(_sig.SIGTERM)
@@ -161,11 +158,7 @@ def test_canary_bad_trial_heals() -> None:
         healed = False
         while time.time() < deadline:
             drive_load(12)
-            subprocess.run(
-                ["sudo", "docker", "logs", cid],
-                stdout=p["agent_log"].open("w"), stderr=subprocess.STDOUT, check=False,
-            )
-            log = p["agent_log"].read_text(errors="replace")
+            log = _agent_logs(cid, p["agent_log"])
             audit = _parse_audit(p["audit"])
             reasons = {a["reason"] for a in audit}
             ops = {a["op"] for a in audit}
@@ -181,11 +174,7 @@ def test_canary_bad_trial_heals() -> None:
                     break
             time.sleep(0.15)
 
-        subprocess.run(
-            ["sudo", "docker", "logs", cid],
-            stdout=p["agent_log"].open("w"), stderr=subprocess.STDOUT, check=False,
-        )
-        log = p["agent_log"].read_text(errors="replace")
+        log = _agent_logs(cid, p["agent_log"])
         audit = _parse_audit(p["audit"])
         assert any(a["op"] == "canary-start" for a in audit) or "canary-start" in log, (
             f"missing canary-start; audit={audit}\nlog:\n{log[-1500:]}"
@@ -220,21 +209,14 @@ def test_canary_good_trial_commits() -> None:
         committed = False
         while time.time() < deadline:
             drive_load(16)
-            subprocess.run(
-                ["sudo", "docker", "logs", cid],
-                stdout=p["agent_log"].open("w"), stderr=subprocess.STDOUT, check=False,
-            )
+            _agent_logs(cid, p["agent_log"])
             audit = _parse_audit(p["audit"])
             if any(a["op"] == "canary-commit" and a["reason"] == "canary_commit" for a in audit):
                 committed = True
                 break
             time.sleep(0.15)
 
-        subprocess.run(
-            ["sudo", "docker", "logs", cid],
-            stdout=p["agent_log"].open("w"), stderr=subprocess.STDOUT, check=False,
-        )
-        log = p["agent_log"].read_text(errors="replace")
+        log = _agent_logs(cid, p["agent_log"])
         audit = _parse_audit(p["audit"])
         assert any(a["op"] == "canary-start" for a in audit), (
             f"missing canary-start; audit={audit}\nlog:\n{log[-1500:]}"

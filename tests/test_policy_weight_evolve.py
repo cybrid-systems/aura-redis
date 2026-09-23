@@ -20,9 +20,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
 from _portutil import kill_tcp_port  # noqa: E402
+from _agentutil import (  # noqa: E402
+    agent_logs as _agent_logs,
+    start_agent as _start_agent,
+    stop_agent as _stop_agent,
+)
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26973"))
-IMG = os.environ.get("AURA_DEV_IMAGE", "ghcr.io/cybrid-systems/dev:v1.0.7")
 SERVER = ROOT / "native/build/aura_redis_server"
 BUILD = ROOT / "scripts/build-native.sh"
 BOOT = ROOT / f".ar-agent-booted-{PORT}.flag"
@@ -60,45 +64,32 @@ def start_server() -> subprocess.Popen:
 def start_agent() -> str:
     BOOT.unlink(missing_ok=True)
     (ROOT / f".ar-policy-pin-{PORT}.pin").unlink(missing_ok=True)
-    AGENT_LOG.write_text("")
-    cmd = [
-        "sudo", "docker", "run", "-d", "--network", "host", "--entrypoint", "",
-        "-v", f"{ROOT}:/work", "-v", "/tmp:/tmp", "-w", "/work",
-        "-e", "AURA_SANDBOX=off",
-        "-e", "AURA_PIPELINE_STRICT=0",
-        "-e", "AURA_PATH=/work/.deps/aura/lib",
-        "-e", f"AURA_REDIS_PORT={PORT}",
-        "-e", "AURA_REDIS_HOST=127.0.0.1",
-        "-e", "AURA_REDIS_POLICY_MS=80",
-        "-e", "AURA_REDIS_DENY_PLUGIN=1",
-        "-e", "AURA_REDIS_FITNESS_MUTATE=0",
-        "-e", "AURA_REDIS_EVOLVE=1",
-        "-e", "AURA_REDIS_EVOLVE_MAX_GENS=4",
-        "-e", "AURA_REDIS_EVOLVE_WINDOW=3",
-        "-e", "AURA_REDIS_THRESH_MIN_OPS=200",
-        "-e", "AURA_REDIS_THRESH_MISS_PIN=40",
-        "-e", "AURA_REDIS_WEIGHT_EVOLVE=1",
-        "-e", f"AURA_REDIS_EVOLVE_BACKEND={BACKEND}",
-        "-e", f"AURA_REDIS_FIBER_SHADOW={FIBER}",
-        IMG,
-        "/work/.deps/aura/build/aura",
-        "/work/src/redis/policy_agent.aura",
-    ]
-    cid = subprocess.check_output(cmd, text=True).strip()
-    for _ in range(120):
-        subprocess.run(
-            ["sudo", "docker", "logs", cid],
-            stdout=AGENT_LOG.open("w"),
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-        text = AGENT_LOG.read_text(errors="replace")
-        if "PING" in text or "evolve=" in text:
+    cid = _start_agent(
+        env={
+            "AURA_REDIS_PORT": str(PORT),
+            "AURA_REDIS_HOST": "127.0.0.1",
+            "AURA_REDIS_POLICY_MS": "80",
+            "AURA_REDIS_DENY_PLUGIN": "1",
+            "AURA_REDIS_FITNESS_MUTATE": "0",
+            "AURA_REDIS_EVOLVE": "1",
+            "AURA_REDIS_EVOLVE_MAX_GENS": "4",
+            "AURA_REDIS_EVOLVE_WINDOW": "3",
+            "AURA_REDIS_THRESH_MIN_OPS": "200",
+            "AURA_REDIS_THRESH_MISS_PIN": "40",
+            "AURA_REDIS_WEIGHT_EVOLVE": "1",
+            "AURA_REDIS_EVOLVE_BACKEND": BACKEND,
+            "AURA_REDIS_FIBER_SHADOW": FIBER,
+        },
+        log_path=AGENT_LOG,
+    )
+    t0 = time.time()
+    last = ""
+    while time.time() - t0 < 18:
+        last = _agent_logs(cid, AGENT_LOG)
+        if "PING" in last or "evolve=" in last:
             return cid
         time.sleep(0.15)
-    raise TimeoutError(
-        f"agent did not boot; log:\n{AGENT_LOG.read_text(errors='replace')[-2000:]}"
-    )
+    raise TimeoutError(f"agent did not boot; log:\n{last[-2000:]}")
 
 
 def drive_traffic(rounds: int = 10) -> None:
@@ -125,13 +116,7 @@ def main() -> int:
         drive_traffic()
         # PSO lazy-require + step can take several seconds
         time.sleep(8.0 if BACKEND in ("pso", "fss", "grid", "swarm") else 2.0)
-        subprocess.run(
-            ["sudo", "docker", "logs", cid],
-            stdout=AGENT_LOG.open("w"),
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-        text = AGENT_LOG.read_text(errors="replace")
+        text = _agent_logs(cid, AGENT_LOG)
         print("--- agent log (tail) ---")
         print("\n".join(text.splitlines()[-40:]))
 
@@ -167,9 +152,7 @@ def main() -> int:
         return 0
     finally:
         if cid:
-            subprocess.run(
-                ["sudo", "docker", "rm", "-f", cid], capture_output=True
-            )
+            _stop_agent(cid)
         if proc:
             proc.terminate()
             try:

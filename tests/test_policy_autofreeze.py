@@ -20,16 +20,19 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
 from _portutil import kill_tcp_port  # noqa: E402
+from _agentutil import (  # noqa: E402
+    agent_logs as _agent_logs,
+    start_agent as _start_agent,
+    stop_agent as _stop_agent,
+    wait_log as _wait_log,
+)
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26963"))
-IMG = os.environ.get("AURA_DEV_IMAGE", "ghcr.io/cybrid-systems/dev:v1.0.7")
 SERVER = ROOT / "native/build/aura_redis_server"
 BUILD = ROOT / "scripts/build-native.sh"
 HB = ROOT / f".ar-policy-hb-autofreeze-{PORT}"
 AUDIT = ROOT / f".ar-policy-audit-autofreeze-{PORT}.log"
 BOOT = ROOT / f".ar-agent-booted-{PORT}.flag"
-HB_DOCKER = f"/work/.ar-policy-hb-autofreeze-{PORT}"
-AUDIT_DOCKER = f"/work/.ar-policy-audit-autofreeze-{PORT}.log"
 AGENT_LOG = Path(f"/tmp/ar-policy-autofreeze-{PORT}.log")
 BASE_MS = 80
 FREEZE_MS = 800  # 10× → polls/sec drop ≥5×
@@ -61,59 +64,39 @@ def start_server() -> subprocess.Popen:
 def start_agent() -> str:
     for p in (HB, AUDIT, BOOT):
         p.unlink(missing_ok=True)
-    AGENT_LOG.write_text("")
-    cmd = [
-        "sudo", "docker", "run", "-d", "--network", "host", "--entrypoint", "",
-        "-v", f"{ROOT}:/work", "-v", "/tmp:/tmp", "-w", "/work",
-        "-e", "AURA_SANDBOX=off",
-        "-e", "AURA_PIPELINE_STRICT=0",
-        "-e", "AURA_PATH=/work/.deps/aura/lib",
-        "-e", f"AURA_REDIS_PORT={PORT}",
-        "-e", "AURA_REDIS_HOST=127.0.0.1",
-        "-e", f"AURA_REDIS_POLICY_MS={BASE_MS}",
-        "-e", "AURA_REDIS_DENY_PLUGIN=1",
-        "-e", "AURA_REDIS_FITNESS_MUTATE=0",
-        "-e", "AURA_REDIS_FROZEN=1",
-        "-e", "AURA_REDIS_SEED_PROFILE=normal",
-        "-e", "AURA_REDIS_AUTO_FREEZE=1",
-        "-e", "AURA_REDIS_AUTO_FREEZE_STABLE_TICKS=6",
-        "-e", "AURA_REDIS_AUTO_FREEZE_EWMA_MIN=70",
-        "-e", f"AURA_REDIS_AUTO_FREEZE_TICK_MS={FREEZE_MS}",
-        "-e", "AURA_REDIS_AUTO_UNFREEZE_MISS_PP=30",
-        "-e", f"AURA_REDIS_POLICY_HEARTBEAT={HB_DOCKER}",
-        "-e", f"AURA_REDIS_POLICY_AUDIT={AUDIT_DOCKER}",
-        IMG, "/work/.deps/aura/build/aura", "/work/src/redis/policy_agent.aura",
-    ]
-    return subprocess.check_output(cmd, text=True).strip()
+    return _start_agent(
+        env={
+            "AURA_REDIS_PORT": str(PORT),
+            "AURA_REDIS_HOST": "127.0.0.1",
+            "AURA_REDIS_POLICY_MS": str(BASE_MS),
+            "AURA_REDIS_DENY_PLUGIN": "1",
+            "AURA_REDIS_FITNESS_MUTATE": "0",
+            "AURA_REDIS_FROZEN": "1",
+            "AURA_REDIS_SEED_PROFILE": "normal",
+            "AURA_REDIS_AUTO_FREEZE": "1",
+            "AURA_REDIS_AUTO_FREEZE_STABLE_TICKS": "6",
+            "AURA_REDIS_AUTO_FREEZE_EWMA_MIN": "70",
+            "AURA_REDIS_AUTO_FREEZE_TICK_MS": str(FREEZE_MS),
+            "AURA_REDIS_AUTO_UNFREEZE_MISS_PP": "30",
+        },
+        log_path=AGENT_LOG,
+        path_env={
+            "AURA_REDIS_POLICY_HEARTBEAT": HB,
+            "AURA_REDIS_POLICY_AUDIT": AUDIT,
+        },
+    )
 
 
 def stop_agent(cid: str) -> None:
-    subprocess.run(["sudo", "docker", "kill", cid], capture_output=True)
-    subprocess.run(["sudo", "docker", "rm", "-f", cid], capture_output=True)
+    _stop_agent(cid)
 
 
 def agent_logs(cid: str) -> str:
-    out = subprocess.check_output(
-        ["sudo", "docker", "logs", cid], text=True, stderr=subprocess.STDOUT
-    )
-    AGENT_LOG.write_text(out)
-    return out
+    return _agent_logs(cid, AGENT_LOG)
 
 
 def wait_log(cid: str, needles: list[str], timeout: float = 30.0) -> str:
-    t0 = time.time()
-    last = ""
-    while time.time() - t0 < timeout:
-        last = agent_logs(cid)
-        if all(n in last for n in needles):
-            return last
-        running = subprocess.check_output(
-            ["sudo", "docker", "inspect", "-f", "{{.State.Running}}", cid], text=True
-        ).strip()
-        if running != "true":
-            raise RuntimeError(f"agent dead:\n{last[-3000:]}")
-        time.sleep(0.12)
-    raise TimeoutError(f"missing {needles}:\n{last[-3000:]}")
+    return _wait_log(cid, needles, timeout=timeout, log_path=AGENT_LOG, poll=0.12)
 
 
 def parse_hb() -> dict:

@@ -15,15 +15,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
 from _portutil import kill_tcp_port  # noqa: E402
+from _agentutil import (  # noqa: E402
+    agent_logs as _agent_logs,
+    start_agent as _start_agent,
+    stop_agent as _stop_agent,
+    wait_log as _wait_log,
+)
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26919"))
-IMG = os.environ.get("AURA_DEV_IMAGE", "ghcr.io/cybrid-systems/dev:v1.0.7")
 HEARTBEAT = Path(f"/tmp/aura-redis-policy-hb-{PORT}")
 AGENT_LOG = Path(f"/tmp/aura-redis-policy-ha-{PORT}.log")
 SERVER = ROOT / "native/build/aura_redis_server"
 BUILD = ROOT / "scripts/build-native.sh"
-AURA_BIN = "/work/.deps/aura/build/aura"
-AGENT_AURA = "/work/src/redis/policy_agent.aura"
 
 
 def info_field(sock: socket.socket, key: str) -> str:
@@ -89,69 +92,43 @@ def test_failsafe_no_agent() -> None:
 PIN = Path(f"/tmp/aura-redis-policy-pin-{PORT}.pin")
 
 
-def _rm(path: Path) -> None:
-    subprocess.run(["sudo", "rm", "-f", str(path)], capture_output=True)
-
-
 def start_agent(*, force_after: int, clear_pin: bool = True, clear_hb: bool = True) -> str:
     if clear_hb:
-        _rm(HEARTBEAT)
+        HEARTBEAT.unlink(missing_ok=True)
     if clear_pin:
-        _rm(PIN)
+        PIN.unlink(missing_ok=True)
     boot = ROOT / f".ar-agent-booted-{PORT}.flag"
     boot.unlink(missing_ok=True)
-    AGENT_LOG.write_text("")
-    cmd = [
-        "sudo", "docker", "run", "-d", "--network", "host", "--entrypoint", "",
-        "-v", f"{ROOT}:/work", "-v", "/tmp:/tmp", "-w", "/work",
-        "-e", "AURA_SANDBOX=off",
-        "-e", "AURA_PIPELINE_STRICT=0",
-        "-e", "AURA_PATH=/work/.deps/aura/lib",
-        "-e", f"AURA_REDIS_PORT={PORT}",
-        "-e", "AURA_REDIS_HOST=127.0.0.1",
-        "-e", "AURA_REDIS_POLICY_MS=100",
-        "-e", "AURA_REDIS_DENY_PLUGIN=1",
-        "-e", "AURA_REDIS_FROZEN=1",
-        "-e", "AURA_REDIS_FITNESS_MUTATE=0",
-        "-e", "AURA_REDIS_SEED_PROFILE=aggressive",
-        "-e", f"AURA_REDIS_POLICY_HEARTBEAT={HEARTBEAT}",
-        "-e", f"AURA_REDIS_POLICY_PIN={PIN}",
-        "-e", f"AURA_REDIS_POLICY_FORCE_RECONNECT_AFTER={force_after}",
-        "-e", "AURA_REDIS_POLICY_BACKOFF_CAP_MS=500",
-        IMG, AURA_BIN, AGENT_AURA,
-    ]
-    return subprocess.check_output(cmd, text=True).strip()
+    return _start_agent(
+        env={
+            "AURA_REDIS_PORT": str(PORT),
+            "AURA_REDIS_HOST": "127.0.0.1",
+            "AURA_REDIS_POLICY_MS": "100",
+            "AURA_REDIS_DENY_PLUGIN": "1",
+            "AURA_REDIS_FROZEN": "1",
+            "AURA_REDIS_FITNESS_MUTATE": "0",
+            "AURA_REDIS_SEED_PROFILE": "aggressive",
+            "AURA_REDIS_POLICY_FORCE_RECONNECT_AFTER": str(force_after),
+            "AURA_REDIS_POLICY_BACKOFF_CAP_MS": "500",
+        },
+        log_path=AGENT_LOG,
+        path_env={
+            "AURA_REDIS_POLICY_HEARTBEAT": HEARTBEAT,
+            "AURA_REDIS_POLICY_PIN": PIN,
+        },
+    )
 
 
 def agent_logs(cid: str) -> str:
-    out = subprocess.check_output(
-        ["sudo", "docker", "logs", cid], text=True, stderr=subprocess.STDOUT
-    )
-    AGENT_LOG.write_text(out)
-    return out
+    return _agent_logs(cid, AGENT_LOG)
 
 
 def stop_agent(cid: str) -> None:
-    subprocess.run(["sudo", "docker", "kill", cid], capture_output=True)
-    subprocess.run(["sudo", "docker", "rm", "-f", cid], capture_output=True)
+    _stop_agent(cid)
 
 
 def wait_log(cid: str, needles: list[str], timeout: float = 20.0) -> str:
-    t0 = time.time()
-    last = ""
-    while time.time() - t0 < timeout:
-        last = agent_logs(cid)
-        if all(n in last for n in needles):
-            return last
-        running = subprocess.check_output(
-            ["sudo", "docker", "inspect", "-f", "{{.State.Running}}", cid], text=True
-        ).strip()
-        if running != "true" and all(n in last for n in needles):
-            return last
-        if running != "true":
-            raise RuntimeError(f"agent not running:\n{last[-3000:]}")
-        time.sleep(0.15)
-    raise TimeoutError(f"missing {needles}:\n{last[-3000:]}")
+    return _wait_log(cid, needles, timeout=timeout, log_path=AGENT_LOG)
 
 
 def test_agent_reconnect_reapply() -> None:
@@ -248,18 +225,10 @@ def test_kill_agent_kernel_stays() -> None:
 def _parse_kv_file(path: Path) -> dict:
     out = {}
     try:
-        text = subprocess.check_output(
-            ["sudo", "cat", str(path)], text=True, stderr=subprocess.DEVNULL
-        )
-    except Exception:
+        text = path.read_text(errors="replace")
+    except OSError:
         return out
     for line in text.splitlines():
-        if "=" in line:
-            k, v = line.split("=", 1)
-            out[k.strip()] = v.strip()
-    return out
-
-    for line in path.read_text(errors="replace").splitlines():
         if "=" in line:
             k, v = line.split("=", 1)
             out[k.strip()] = v.strip()

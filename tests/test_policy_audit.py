@@ -24,9 +24,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
 from _portutil import kill_tcp_port  # noqa: E402
+from _agentutil import (  # noqa: E402
+    agent_logs as _agent_logs,
+    start_agent as _start_agent,
+    stop_agent as _stop_agent,
+    wait_log as _wait_log,
+)
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26943"))
-IMG = os.environ.get("AURA_DEV_IMAGE", "ghcr.io/cybrid-systems/dev:v1.0.7")
 SERVER = ROOT / "native/build/aura_redis_server"
 BUILD = ROOT / "scripts/build-native.sh"
 HEARTBEAT = ROOT / f".ar-policy-hb-audit-{PORT}"
@@ -61,36 +66,30 @@ def start_agent() -> str:
     HEARTBEAT.unlink(missing_ok=True)
     AUDIT.unlink(missing_ok=True)
     (ROOT / f".ar-agent-booted-{PORT}.flag").unlink(missing_ok=True)
-    AGENT_LOG.write_text("")
-    cmd = [
-        "sudo", "docker", "run", "-d", "--network", "host", "--entrypoint", "",
-        "-v", f"{ROOT}:/work", "-v", "/tmp:/tmp", "-w", "/work",
-        "-e", "AURA_SANDBOX=off",
-        "-e", "AURA_PIPELINE_STRICT=0",
-        "-e", "AURA_PATH=/work/.deps/aura/lib",
-        "-e", f"AURA_REDIS_PORT={PORT}",
-        "-e", "AURA_REDIS_HOST=127.0.0.1",
-        "-e", "AURA_REDIS_POLICY_MS=100",
-        "-e", "AURA_REDIS_DENY_PLUGIN=1",
-        "-e", "AURA_REDIS_FITNESS_MUTATE=1",
-        "-e", "AURA_REDIS_SEED_PROFILE=conservative",
-        "-e", f"AURA_REDIS_POLICY_HEARTBEAT=/work/{HEARTBEAT.name}",
-        "-e", f"AURA_REDIS_POLICY_AUDIT=/work/{AUDIT.name}",
-        IMG,
-        "/work/.deps/aura/build/aura",
-        "/work/src/redis/policy_agent.aura",
-    ]
-    cid = subprocess.check_output(cmd, text=True).strip()
-    for _ in range(80):
-        subprocess.run(
-            ["sudo", "docker", "logs", cid],
-            stdout=AGENT_LOG.open("w"), stderr=subprocess.STDOUT, check=False,
-        )
-        text = AGENT_LOG.read_text(errors="replace")
-        if "PING" in text or "PONG" in text:
+    cid = _start_agent(
+        env={
+            "AURA_REDIS_PORT": str(PORT),
+            "AURA_REDIS_HOST": "127.0.0.1",
+            "AURA_REDIS_POLICY_MS": "100",
+            "AURA_REDIS_DENY_PLUGIN": "1",
+            "AURA_REDIS_FITNESS_MUTATE": "1",
+            "AURA_REDIS_SEED_PROFILE": "conservative",
+        },
+        log_path=AGENT_LOG,
+        path_env={
+            "AURA_REDIS_POLICY_HEARTBEAT": HEARTBEAT,
+            "AURA_REDIS_POLICY_AUDIT": AUDIT,
+        },
+    )
+    # Either needle is enough for boot; wait_log needs all — poll manually.
+    t0 = time.time()
+    last = ""
+    while time.time() - t0 < 12:
+        last = _agent_logs(cid, AGENT_LOG)
+        if "PING" in last or "PONG" in last:
             return cid
         time.sleep(0.15)
-    raise TimeoutError(f"agent did not PING; log:\n{AGENT_LOG.read_text(errors='replace')}")
+    raise TimeoutError(f"agent did not PING; log:\n{last}")
 
 
 def drive_miss_spike(rounds: int = 50) -> None:
@@ -123,11 +122,7 @@ def test_policy_audit_ring_and_explain() -> None:
     try:
         cid = start_agent()
         drive_miss_spike()
-        subprocess.run(
-            ["sudo", "docker", "logs", cid],
-            stdout=AGENT_LOG.open("w"), stderr=subprocess.STDOUT, check=False,
-        )
-        log = AGENT_LOG.read_text(errors="replace")
+        log = _agent_logs(cid, AGENT_LOG)
         assert "audit-file=" in log or AUDIT.exists(), f"no audit path in log:\n{log[-800:]}"
 
         # Wait for audit file
@@ -192,7 +187,7 @@ def test_policy_audit_ring_and_explain() -> None:
         print(f"  heartbeat last_explain={dict(x.split('=',1) for x in hb.splitlines() if '=' in x).get('last_explain')}")
     finally:
         if cid:
-            subprocess.run(["sudo", "docker", "rm", "-f", cid], capture_output=True)
+            _stop_agent(cid)
         import signal as _sig
         try:
             srv.send_signal(_sig.SIGTERM)

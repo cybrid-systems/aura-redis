@@ -3,7 +3,8 @@
 # Long regret benches live in scripts/ci-bench.sh / bench-vs-redis.sh.
 # Env:
 #   AURA_REDIS_STRONG_TIMEOUT_SEC  per-test wall (default 180; agent suites need headroom)
-#   AURA_REDIS_STRONG_SKIP_AGENT=1 skip Docker agent suites (audit/canary/autofreeze/…)
+#   AURA_REDIS_STRONG_SKIP_AGENT=1 skip agent suites (audit/canary/autofreeze/…)
+#   Agent suites use tests/_agentutil.py (native in GHA container; docker locally).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

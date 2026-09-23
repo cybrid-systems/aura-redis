@@ -20,11 +20,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from smoke_client import redis_call  # noqa: E402
 from _portutil import kill_tcp_port  # noqa: E402
+from _agentutil import (  # noqa: E402
+    agent_logs as _agent_logs,
+    start_agent as _start_agent,
+    stop_agent as _stop_agent,
+)
 
 PORT = int(os.environ.get("AURA_REDIS_TEST_PORT", "26982"))
 SERVER = ROOT / "native/build/aura_redis_server"
 BUILD = ROOT / "scripts/build-native.sh"
-IMG = os.environ.get("AURA_DEV_IMAGE", "ghcr.io/cybrid-systems/dev:v1.0.7")
 BOOT = ROOT / f".ar-agent-booted-{PORT}.flag"
 AGENT_LOG = Path(f"/tmp/ar-policy-shadow-ab-{PORT}.log")
 
@@ -99,46 +103,30 @@ def test_c_shadow_hook() -> None:
 def start_agent() -> str:
     BOOT.unlink(missing_ok=True)
     (ROOT / f".ar-policy-pin-{PORT}.pin").unlink(missing_ok=True)
-    AGENT_LOG.write_text("")
-    hb = str(ROOT / f".ar-shadow-hb-{PORT}.hb")
-    try:
-        Path(hb).unlink(missing_ok=True)
-    except OSError:
-        pass
-    cmd = [
-        "sudo", "docker", "run", "-d", "--network", "host", "--entrypoint", "",
-        "-v", f"{ROOT}:/work", "-v", "/tmp:/tmp", "-w", "/work",
-        "-e", "AURA_SANDBOX=off",
-        "-e", "AURA_PIPELINE_STRICT=0",
-        "-e", "AURA_PATH=/work/.deps/aura/lib",
-        "-e", f"AURA_REDIS_PORT={PORT}",
-        "-e", "AURA_REDIS_HOST=127.0.0.1",
-        "-e", "AURA_REDIS_POLICY_MS=80",
-        "-e", "AURA_REDIS_DENY_PLUGIN=1",
-        "-e", "AURA_REDIS_FITNESS_MUTATE=1",
-        "-e", "AURA_REDIS_SHADOW_AB=1",
-        "-e", "AURA_REDIS_SHADOW_PROFILE=aggressive",
-        "-e", "AURA_REDIS_SHADOW_SAMPLE_PCT=50",
-        "-e", f"AURA_REDIS_POLICY_HEARTBEAT={hb}",
-        IMG,
-        "/work/.deps/aura/build/aura",
-        "/work/src/redis/policy_agent.aura",
-    ]
-    cid = subprocess.check_output(cmd, text=True).strip()
-    for _ in range(120):
-        subprocess.run(
-            ["sudo", "docker", "logs", cid],
-            stdout=AGENT_LOG.open("w"),
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-        text = AGENT_LOG.read_text(errors="replace")
-        if "shadow-ab on" in text or "PING" in text or "policy_agent:" in text:
+    hb_path = ROOT / f".ar-shadow-hb-{PORT}.hb"
+    hb_path.unlink(missing_ok=True)
+    cid = _start_agent(
+        env={
+            "AURA_REDIS_PORT": str(PORT),
+            "AURA_REDIS_HOST": "127.0.0.1",
+            "AURA_REDIS_POLICY_MS": "80",
+            "AURA_REDIS_DENY_PLUGIN": "1",
+            "AURA_REDIS_FITNESS_MUTATE": "1",
+            "AURA_REDIS_SHADOW_AB": "1",
+            "AURA_REDIS_SHADOW_PROFILE": "aggressive",
+            "AURA_REDIS_SHADOW_SAMPLE_PCT": "50",
+        },
+        log_path=AGENT_LOG,
+        path_env={"AURA_REDIS_POLICY_HEARTBEAT": hb_path},
+    )
+    t0 = time.time()
+    last = ""
+    while time.time() - t0 < 18:
+        last = _agent_logs(cid, AGENT_LOG)
+        if "shadow-ab on" in last or "PING" in last or "policy_agent:" in last:
             return cid
         time.sleep(0.15)
-    raise TimeoutError(
-        f"agent did not boot; log:\n{AGENT_LOG.read_text(errors='replace')[-2000:]}"
-    )
+    raise TimeoutError(f"agent did not boot; log:\n{last[-2000:]}")
 
 
 def test_agent_shadow_dryrun(cid: str) -> None:
@@ -158,13 +146,7 @@ def test_agent_shadow_dryrun(cid: str) -> None:
     redis_call(s, "QUIT")
     s.close()
 
-    subprocess.run(
-        ["sudo", "docker", "logs", cid],
-        stdout=AGENT_LOG.open("w"),
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
-    text = AGENT_LOG.read_text(errors="replace")
+    text = _agent_logs(cid, AGENT_LOG)
     assert "shadow-ab on (A10)" in text, text[-2000:]
     diverges = [
         ln for ln in text.splitlines()
@@ -193,7 +175,7 @@ def main() -> int:
         return 0
     finally:
         if cid:
-            subprocess.run(["sudo", "docker", "rm", "-f", cid], capture_output=True)
+            _stop_agent(cid)
         if proc:
             proc.terminate()
             try:
