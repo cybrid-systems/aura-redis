@@ -3,11 +3,13 @@
 **Status:** authoritative (Aura differentiation track)  
 **Tip baseline:** ~`c1e7abb` (main)  
 **Scope:** What a Redis-*compatible* cache uniquely needs from **Aura** — not generic Redis feature parity.  
-**Companions:** [`aura-redis-match.md`](aura-redis-match.md) · [`aura-pain-scenarios.md`](aura-pain-scenarios.md) · [`aura-native-control.md`](aura-native-control.md) · [`mutation-gains.md`](mutation-gains.md) · [`runtime-mutation-explore.md`](runtime-mutation-explore.md) · [`high-roi-iterations.md`](high-roi-iterations.md) · [`mvp-plan.md`](mvp-plan.md) · [`architecture.md`](architecture.md) · [`workloads.md`](workloads.md) · [`production-plan.md`](production-plan.md) · [`perf-eval.md`](perf-eval.md)
+**Companions:** [`aura-redis-match.md`](aura-redis-match.md) · [`aura-pain-scenarios.md`](aura-pain-scenarios.md) · [`aura-native-control.md`](aura-native-control.md) · [`mutation-gains.md`](mutation-gains.md) · [`runtime-mutation-explore.md`](runtime-mutation-explore.md) · [`high-roi-iterations.md`](high-roi-iterations.md) · [`mvp-plan.md`](mvp-plan.md) · [`architecture.md`](architecture.md) · [`workloads.md`](workloads.md) · [`production-plan.md`](production-plan.md) · [`perf-eval.md`](perf-eval.md) · [`strong-narrative-plan.md`](strong-narrative-plan.md)
 
 **See also matching matrix:** [`aura-redis-match.md`](aura-redis-match.md) — comprehensive Aura capability catalog ↔ Redis production pain matrix (STRONG/MEDIUM/WEAK/NONE + anti-matches). Broader than this demand-mining doc; use it when judging fit honesty.
 
 **Scenario deep-dive:** [`aura-pain-scenarios.md`](aura-pain-scenarios.md) — per-pain ops narrative + how Aura solves (Layer A native → B stdlib → C kernels), verify exits tied to A1–An.
+
+**Execution plan (native-first):** [`strong-narrative-plan.md`](strong-narrative-plan.md) — Wave SN0–SN3; start A1→A2→A3.
 
 **Invariant:** Redis-specific work stays in **this** repo. Aura compiler/runtime opts must stay **generic** (language-wide). Do not propose Redis-shaped Aura core patches unless framed as generic primitives Redis happens to use. `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos — `PLUGIN` / `.so` is escape hatch, not moat.
 
@@ -201,7 +203,7 @@ Wire-in:
 
 - [`production-plan.md`](production-plan.md) — “Aura differentiation track” pointer.
 - [`iteration-plan.md`](iteration-plan.md) — post-P3 active track → this doc.
-- Execution detail for M6–M12 remains [`high-roi-iterations.md`](high-roi-iterations.md); new work uses **A1–A14** IDs above.
+- Execution detail for M6–M12 remains [`high-roi-iterations.md`](high-roi-iterations.md); new work uses **A1–A16** IDs; wave order in [`strong-narrative-plan.md`](strong-narrative-plan.md).
 
 ---
 
@@ -209,6 +211,7 @@ Wire-in:
 
 | Date (CST) | Notes |
 |------------|-------|
+| 2026-09-23 | Link [`strong-narrative-plan.md`](strong-narrative-plan.md) native-first execution waves.
 | 2026-09-23 | Link [`aura-pain-scenarios.md`](aura-pain-scenarios.md) scenario deep-dive.
 | 2026-09-23 | Link [`aura-redis-match.md`](aura-redis-match.md); add **A15** swarm/FSS evolve backend, **A16** fiber trial fitness from matching pass. |
 | 2026-09-23 | Initial authoritative demand map from deep read of control / mutation / MVP / arch / workloads / prod / perf + `policy_agent.aura` / `policy/*.aura` / regret benches. |

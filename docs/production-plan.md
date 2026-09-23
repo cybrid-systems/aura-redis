@@ -3,7 +3,7 @@
 **Status:** authoritative production roadmap (v1).  
 **Reality check:** tip ~`d9f98e4`++ is ~2.2k LOC C data plane + Aura `policy_agent` control plane — a **string KV / adaptive cache** with RESP2, maxmemory eviction, and Aura-mutated policy. It is **not** Redis Cluster, modules, or full command compatibility. Production here means *production for this product*, not “become Redis overnight.”
 
-**Companions:** [`iteration-plan.md`](iteration-plan.md) · [`mvp-plan.md`](mvp-plan.md) · [`aura-native-control.md`](aura-native-control.md) · [`commands.md`](commands.md) · [`mutation-gains.md`](mutation-gains.md)
+**Companions:** [`iteration-plan.md`](iteration-plan.md) · [`mvp-plan.md`](mvp-plan.md) · [`aura-native-control.md`](aura-native-control.md) · [`commands.md`](commands.md) · [`mutation-gains.md`](mutation-gains.md) · [`aura-demand.md`](aura-demand.md) · [`strong-narrative-plan.md`](strong-narrative-plan.md)
 
 **Invariant:** Aura `policy_agent` stays the product control plane. `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Redis-specific work stays in **this** repo; do not grow aura-grok / Aura core for Redis-shaped prims.
 
@@ -150,7 +150,9 @@ Production P0–P3 (single-node RESP cache/KV) is **complete**. Compatibility wo
 
 **Next active track:** Aura-unique closed-loop policy — sandbox + `hot-strategy` mutate/heal + fitness/evolve against live INFO — scored by multi-phase regret / hit quality (`phase_marathon`), **not** memtier ops/s.
 
-→ **[`aura-demand.md`](aura-demand.md)** — authoritative demand map, capability status (SHIPPED / PARTIAL / GAP), mined demands A–I, ranked backlog **A1–A14** (start next: A1 mutation_gain Δ>0, A2 evolve_gain Δ>0, A3 mutation audit/explain).
+→ **[`aura-demand.md`](aura-demand.md)** — authoritative demand map, capability status (SHIPPED / PARTIAL / GAP), mined demands A–I, ranked backlog **A1–A16** (start next: A1 mutation_gain Δ>0, A2 evolve_gain Δ>0, A3 mutation audit/explain).
+
+→ **[`strong-narrative-plan.md`](strong-narrative-plan.md)** — native-first execution waves (SN0 evidence restore → SN1 trust surface → SN2 isolation → SN3 explore). Aura differentiation pointer for citeable moat work.
 
 Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/.so as the moat. Redis-shaped Aura core patches stay out of scope.
 
@@ -181,3 +183,4 @@ Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/
 | 2026-09-23 | **P3.17b** | SUBSCRIBE/UNSUBSCRIBE/PUBLISH; no PSUBSCRIBE; `tests/test_prod_pubsub.py` |
 | 2026-09-23 | **P3 COMPLETE** | HASH+LIST+ZSET+MULTI+Pub/Sub on main |
 | 2026-09-23 | **Aura demand map** | [`docs/aura-demand.md`](aura-demand.md) — Aura differentiation track after P0–P3; mutation/evolve Δ=0 as open demand |
+| 2026-09-23 | **Strong-narrative plan** | [`docs/strong-narrative-plan.md`](strong-narrative-plan.md) — native-first SN0–SN3 execution |

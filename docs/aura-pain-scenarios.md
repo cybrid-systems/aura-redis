@@ -2,9 +2,11 @@
 
 **Status:** authoritative scenario deep-dive（痛点展开 + Aura 解法路径）  
 **Date:** 2026-09-23 CST  
-**Companions:** [`aura-redis-match.md`](aura-redis-match.md) · [`aura-demand.md`](aura-demand.md) · [`aura-native-control.md`](aura-native-control.md) · [`mutation-gains.md`](mutation-gains.md) · [`workloads.md`](workloads.md) · [`architecture.md`](architecture.md) · [`perf-eval.md`](perf-eval.md)  
+**Companions:** [`aura-redis-match.md`](aura-redis-match.md) · [`aura-demand.md`](aura-demand.md) · [`aura-native-control.md`](aura-native-control.md) · [`mutation-gains.md`](mutation-gains.md) · [`workloads.md`](workloads.md) · [`architecture.md`](architecture.md) · [`perf-eval.md`](perf-eval.md) · [`strong-narrative-plan.md`](strong-narrative-plan.md)  
 **Control plane SSOT:** `src/redis/policy_agent.aura`（DEFAULT；`AURA_REDIS_DENY_PLUGIN=1`）  
 **Evidence rule:** 仅引用本仓库已有 bench / demo（`perf-eval.md`、`mutation-gains.md`、`workloads.md`）；**不编造**公司级 % / SLA。
+
+**迭代执行：** 强叙事原生优先见 [`strong-narrative-plan.md`](strong-narrative-plan.md)（SN0 证据恢复 A1/A2 → SN1 可信 A3/A4/A11 → …）。
 
 ---
 
