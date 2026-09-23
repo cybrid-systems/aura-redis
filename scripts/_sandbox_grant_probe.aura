@@ -1,0 +1,17 @@
+; A11 grant probe — lines parsed by smoke-sandbox-profile.sh
+(display "PROBE_ENV_SANDBOX=")
+(display (let ((e (getenv "AURA_SANDBOX"))) (if (and (string? e) (> (string-length e) 0)) e "UNSET")))
+(newline)
+(define gnet
+  (try (security:grant-effect! "network" 16)
+       (catch (e) #f)))
+(display "PROBE_GRANT_NETWORK=")
+(display (if gnet "true" "false"))
+(newline)
+(define gmut
+  (try (security:grant-effect! "mutate" 8)
+       (catch (e) #f)))
+(display "PROBE_GRANT_MUTATE=")
+(display (if gmut "true" "false"))
+(newline)
+(display "PROBE_DONE\n")

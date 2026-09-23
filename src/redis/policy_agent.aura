@@ -326,6 +326,31 @@
   (set! *fitness-on* #f)
   #t)
 
+; A11: when running Restricted (AURA_SANDBOX unset) or TRY_RESTRICTED_GRANTS,
+; attempt explicit Network+Mutate grants (no Ffi). On this Aura pin without
+; Tenant Admin, grant-effect! returns #f — agent then needs AURA_SANDBOX=off.
+(let ((try-g (getenv "AURA_REDIS_TRY_RESTRICTED_GRANTS"))
+      (sb (getenv "AURA_SANDBOX")))
+  (if (or (and (string? try-g)
+               (or (string=? try-g "1") (string=? try-g "true") (string=? try-g "yes")))
+          (not (and (string? sb) (> (string-length sb) 0))))
+    (begin
+      (display "policy_agent: A11 try grant-effect network/mutate (no ffi)\n")
+      (let ((gn (try (security:grant-effect! "network" 16) (catch (e) #f)))
+            (gm (try (security:grant-effect! "mutate" 8) (catch (e) #f))))
+        (display "policy_agent: grant-effect network=")
+        (display gn)
+        (display " mutate=")
+        (display gm)
+        (newline)
+        (if (not gn)
+          (display "policy_agent: A11 PARTIAL — network grant refused (need Tenant Admin or AURA_SANDBOX=off)\n")
+          #t)
+        #t))
+    (begin
+      (display "policy_agent: A11 sandbox profile Soft/off (grants implicit)\n")
+      #t)))
+
 ; ── tiny string helpers ──
 (define (find-substr s pat start)
   (let ((n (string-length s))

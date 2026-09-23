@@ -167,7 +167,7 @@ Priorities here are **P0–P2 for Aura differentiation**, independent of Redis c
 | **A8** | Auto-freeze meta-policy (cost gate) | 1–2d | Stable-load INFO rate ↓ ≥5×; hit% within 2pp | A1 | |
 | **A9** | `hot_cold` promote/demote RESP knobs + Aura mutate | 1–2d | Microbench large-value locality | layout | |
 | **A10** | Shadow / A/B sample path (C hook or dual agent) | 2–3d | Shadow regret report without applying loser | A4 | |
-| **A11** | Restricted sandbox + `effect:network` grant (prod-shaped) | 1d | Doc + demo without `AURA_SANDBOX=off` when TA available | sandbox profile | |
+| **A11** | Restricted sandbox + `effect:network` grant (prod-shaped) | 1d | Doc + demo without `AURA_SANDBOX=off` when TA available | sandbox profile | **PARTIAL** (off works; Restricted needs TA) |
 | **A12** | Named kernel `slru` or approx TinyLFU (C) — Aura select only | 2–3d | zipf regret ≤ LFU | explore | |
 | **A13** | Signal-weight evolve (not only min-ops) | 1–2d | `mutation_gain` under weight evolve ≥ threshold path | A1–A2 | |
 | **A14** | Controller overhead dashboard (applies/sec, swap rate vs hitΔ) | 0.5–1d | Heartbeat fields + bench summary | A3 | |

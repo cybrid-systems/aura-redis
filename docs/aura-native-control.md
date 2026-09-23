@@ -76,15 +76,18 @@ PLUGIN [path]      → escape hatch; **denied** when AURA_REDIS_DENY_PLUGIN=1
 Policy bodies: `choose_normal` / `choose_aggressive` / `choose_conservative`
 (+ inverted / broken for demos). See [`mvp-plan.md`](mvp-plan.md).
 
-## Sandbox profile
+## Sandbox profile (A11)
 
-See `scripts/sandbox-policy-profile.sh`:
+See `scripts/sandbox-policy-profile.sh` and `scripts/smoke-sandbox-profile.sh`:
 
-- Demo/dev: `AURA_SANDBOX=off` (Soft) so TCP works without tenant authority.
-- Always set `AURA_REDIS_DENY_PLUGIN=1` for the Aura-native story so `.so`
-  reload cannot silently become the adaptation path.
-- Restricted + `security:grant-effect!` for `network` (not `ffi`) is the
-  production-shaped target when TA is available.
+| Profile | How | Result on current Aura pin |
+|---------|-----|----------------------------|
+| **off** (default demos/CI) | `AURA_SANDBOX=off` | Soft: `grant-effect!` network(16)+mutate(8) succeed; TCP agent runs |
+| **restricted** (prod-shaped) | unset `AURA_SANDBOX` + `AURA_REDIS_TRY_RESTRICTED_GRANTS=1` | **PARTIAL**: `grant-effect!` returns `#f` without Tenant Admin; `std/socket` / live agent cannot start |
+
+- Always set `AURA_REDIS_DENY_PLUGIN=1` — adaptation remains Aura choose-fn, not `.so` / `effect:ffi`.
+- Agent logs grant attempts when `AURA_REDIS_TRY_RESTRICTED_GRANTS=1`.
+- **Blocker to full Restricted:** Tenant Admin / explicit tenant principal for `security:grant-effect!` (see Aura capability model). Until then, maximum safe mode = Soft/off + DENY_PLUGIN + no ffi.
 
 ## Contrast vs PLUGIN.so
 

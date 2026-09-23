@@ -92,7 +92,7 @@ Make ops trust live code change: durable audit, canary, prod-shaped sandbox.
 | **Exit criteria** | Doc + demo path without `AURA_SANDBOX=off` when TA available; `scripts/sandbox-policy-profile.sh` updated |
 | **Depends-on** | sandbox profile |
 | **Estimate** | 1d |
-| **Status** | **TODO** |
+| **Status** | **PARTIAL** (2026-09-23): profile `off|restricted` + `smoke-sandbox-profile.sh`; live agent still needs `AURA_SANDBOX=off` — Restricted `grant-effect!` returns #f without Tenant Admin on this Aura pin |
 
 ---
 
@@ -187,3 +187,4 @@ If A2/A3/A4/A11 blocked: document blocker here, push partial, continue what is p
 | 2026-09-23 | Initial native-first strong-narrative plan (SN0–SN3 / A1–A16). |
 | 2026-09-23 | A1 +27.9pp, A2 +57.1pp, A3 audit ring + test green on main. |
 | 2026-09-23 | A4 canary choose-fn (auto-heal / commit) + test green on main. |
+| 2026-09-23 | A11 Restricted sandbox profile PARTIAL (TA blocker); smoke + docs. |

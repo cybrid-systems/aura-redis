@@ -30,3 +30,14 @@ python3 tests/test_prod_types_edge.py
 
 Test servers set `AURA_REDIS_DENY_PLUGIN=1`. Host Aura may need GLIBCXX from the
 dev image; runners fall back to `ghcr.io/cybrid-systems/dev:v1.0.7` when needed.
+
+## Sandbox profile (A11)
+
+```bash
+./scripts/smoke-sandbox-profile.sh   # off grants true; Restricted grants false (TA blocker)
+source scripts/sandbox-policy-profile.sh   # default PROFILE=off
+AURA_REDIS_SANDBOX_PROFILE=restricted source scripts/sandbox-policy-profile.sh
+```
+
+Live `policy_agent` demos still use `AURA_SANDBOX=off` until Tenant Admin unlocks Restricted grants.
+
