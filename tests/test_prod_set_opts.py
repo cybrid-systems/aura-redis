@@ -136,8 +136,24 @@ def main() -> None:
             assert "invalid expire" in err_str(r).lower(), r
             r = call(sock, "SET", "bad", "v", "PX", "-1")
             assert "invalid expire" in err_str(r).lower(), r
-            r = call(sock, "SET", "bad", "v", "KEEPTTL")
+            r = call(sock, "SET", "bad", "v", "KEEPTTL", "EX", "1")
             assert "syntax" in err_str(r).lower(), r
+
+            # --- KEEPTTL / EXAT / PXAT ---
+            assert call(sock, "SET", "kt", "1", "EX", "5") == "OK"
+            assert call(sock, "SET", "kt", "2", "KEEPTTL") == "OK"
+            assert call(sock, "GET", "kt") == "2"
+            ttl_kt = call(sock, "TTL", "kt")
+            assert isinstance(ttl_kt, int) and 1 <= ttl_kt <= 5, ttl_kt
+            import time as _time
+            now_ms = int(_time.time() * 1000)
+            assert call(sock, "SET", "pxat", "v", "PXAT", str(now_ms + 2000)) == "OK"
+            pttl = call(sock, "PTTL", "pxat")
+            assert isinstance(pttl, int) and 500 <= pttl <= 2000, pttl
+            now_sec = int(_time.time())
+            assert call(sock, "SET", "exat", "v", "EXAT", str(now_sec + 3)) == "OK"
+            ttl_ex = call(sock, "TTL", "exat")
+            assert isinstance(ttl_ex, int) and 1 <= ttl_ex <= 3, ttl_ex
 
             # --- SET overwrites typed keys (Redis 7) ---
             assert call(sock, "HSET", "typed", "f", "1") == 1

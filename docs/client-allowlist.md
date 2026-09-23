@@ -9,10 +9,10 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 ## Allowed (Tier 2)
 
 ### Strings
-`PING`, `AUTH`, `HELLO` (stub), `QUIT`, `GET`, `SET` (+ `NX`/`XX`/`EX`/`PX`), `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `APPEND`, `STRLEN`, `MGET`, `MSET`, `DEL`, `UNLINK`, `RENAME`, `RENAMENX`, `EXISTS`, `DBSIZE`, `INCR`, `DECR`, `EXPIRE`, `TTL`, `TYPE`, `FLUSHDB`, `SCAN`, `KEYS`
+`PING`, `AUTH`, `HELLO` (stub), `QUIT`, `GET`, `SET` (+ `NX`/`XX`/`EX`/`PX`/`EXAT`/`PXAT`/`KEEPTTL`), `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `APPEND`, `STRLEN`, `MGET`, `MSET`, `DEL`, `UNLINK`, `RENAME`, `RENAMENX`, `EXISTS`, `DBSIZE`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `TTL`, `PTTL`, `TYPE`, `FLUSHDB`, `SCAN`, `KEYS`
 
 ### HASH
-`HSET`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`
+`HSET`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`, `HSCAN`
 
 ### LIST
 `LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LLEN`, `LRANGE`, `LINDEX`
@@ -35,7 +35,7 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 
 | Surface | Examples | Why |
 |---------|----------|-----|
-| **Field SCAN** | `HSCAN`, `SSCAN`, `ZSCAN` | Not implemented (keyspace `SCAN`/`KEYS` allowed) |
+| **Field SCAN** | `SSCAN`, `ZSCAN` | Not implemented (`HSCAN` allowed; keyspace `SCAN`/`KEYS` allowed) |
 | **Streams** | `XADD`, `XREAD`, `XGROUP`, … | Not implemented |
 | **Cluster** | `CLUSTER`, slot migration, redirects | Explicit non-goal |
 | **Lua** | `EVAL`, `EVALSHA`, `SCRIPT` | Not implemented |
@@ -50,18 +50,22 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 
 1. Does the app only need the allowlisted string/hash/list/zset/MULTI subset?  
 2. Can it tolerate cache-only restart **or** explicit SAVE warm-start (not Redis RDB)?  
-3. Does it require Cluster, Lua, Streams, field-SCAN (`HSCAN`/…), or ACL? → **reject**. (`SCAN`/`KEYS` OK for Tier 2; prefer SCAN; KEYS is O(N).)  
+3. Does it require Cluster, Lua, Streams, `SSCAN`/`ZSCAN`, or ACL? → **reject**. (`SCAN`/`KEYS`/`HSCAN` OK for Tier 2; prefer SCAN; KEYS is O(N).)  
 4. Will `policy_agent` be the only writer of `EVICT`/`LAYOUT`/`PIN`? (Apps should not fight the agent.)
 
 ---
 
 ## SET option caveats (Tier 2)
 
-- **Allowed:** `SET key value [NX|XX] [EX seconds|PX milliseconds]`, plus `SETNX` / `SETEX` / `PSETEX` / `GETSET`.
+- **Allowed:** `SET key value [NX|XX] [EX seconds|PX milliseconds|EXAT unix-sec|PXAT unix-ms|KEEPTTL]`, plus `SETNX` / `SETEX` / `PSETEX` / `GETSET`.
 - **NX/XX:** mutually exclusive; condition fail → null bulk (`$-1`), not an error.
-- **EX/PX:** mutually exclusive; expire `≤0` → `ERR invalid expire time`.
+- **EX/PX/EXAT/PXAT/KEEPTTL:** mutually exclusive expire modes; expire `≤0` → `ERR invalid expire time`.
+- **KEEPTTL:** overwrite value but preserve existing TTL (no-op if key had none).
 - **Overwrite:** plain `SET` / `XX` replaces HASH/LIST/ZSET with a string (Redis 7); `NX`/`SETNX` leave typed keys untouched.
-- **Not yet:** `GET` option on SET, `KEEPTTL`, `EXAT`/`PXAT`.
+- **Not yet:** `GET` option on SET.
+- **MGET:** missing **or** typed (HASH/LIST/ZSET) slots return null bulk (Redis parity); `GET` still WRONGTYPE on typed.
+- **PTTL/PEXPIRE/EXPIREAT/PEXPIREAT:** millisecond / absolute-unix variants of TTL/EXPIRE.
+- **INCRBY/DECRBY:** integer delta; preserve TTL (same as INCR/DECR).
 
 ## SCAN / KEYS caveats (Tier 2)
 
@@ -71,7 +75,8 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 - **COUNT:** hint for buckets examined per call (default 10); not a hard return size.
 - **Cursor:** opaque integer (bucket index across hot+cold tables). Concurrent SET/DEL/rehash/layout migrate may skip or duplicate keys across pages — same class of caveat as Redis SCAN. A full iteration until cursor `0` is best-effort complete for a quiescent store.
 - **KEYS:** returns all matches in one reply (**O(N)**). Prefer SCAN for large keyspaces; OK for small Tier-2 caches.
-- **Still reject:** `HSCAN` / `SSCAN` / `ZSCAN`.
+- **HSCAN:** `HSCAN key cursor [MATCH pattern] [COUNT count]` — cursor over hash **fields**; reply `[cursor, [field, value, …]]`. Same MATCH (`*`/`?`) + COUNT hint as SCAN. Missing key → `["0", []]`. WRONGTYPE on non-hash.
+- **Still reject:** `SSCAN` / `ZSCAN`.
 
 ## APPEND / RENAME / UNLINK caveats (Tier 2)
 

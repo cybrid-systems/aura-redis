@@ -306,6 +306,12 @@ int64_t ar_hash_hlen(ArCore* core, const char* key, size_t klen, int* wrongtype)
 int64_t ar_hash_hincrby(ArCore* core, const char* key, size_t klen,
                         const char* field, size_t flen, int64_t incr,
                         int* wrongtype, int* notint);
+/* HSCAN — cursor over hash field buckets; flat field/value elems; MATCH star/question glob + COUNT.
+ * Missing key → 0 elems, next_cursor 0. WRONGTYPE → *wrongtype=1. Free via ar_hscan_free. */
+void ar_hscan_free(char** elems, size_t* elens, size_t n);
+size_t ar_hscan(ArCore* core, const char* key, size_t klen, uint64_t cursor,
+                const char* pattern, size_t plen, int count, char*** out_elems,
+                size_t** out_elens, uint64_t* next_cursor, int* wrongtype);
 /* HGETALL / HMGET helpers: callback or fill arrays — see ar_types.c + server */
 
 ArEntry* ar_entry_get_typed(ArCore* core, const char* key, size_t klen,

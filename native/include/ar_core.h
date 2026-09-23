@@ -66,6 +66,12 @@ int ar_set_bin_px(ArCore* core, const char* key, size_t klen, const char* val,
 int ar_expire(ArCore* core, const char* key, size_t klen, int64_t seconds);
 /* TTL: -2 missing, -1 no expire, else remaining seconds. */
 int64_t ar_ttl(ArCore* core, const char* key, size_t klen);
+/* PEXPIRE / PTTL — millisecond variants. */
+int ar_pexpire(ArCore* core, const char* key, size_t klen, int64_t ms);
+int64_t ar_pttl(ArCore* core, const char* key, size_t klen);
+/* EXPIREAT / PEXPIREAT — absolute unix time (seconds / milliseconds). */
+int ar_expireat(ArCore* core, const char* key, size_t klen, int64_t unix_sec);
+int ar_pexpireat(ArCore* core, const char* key, size_t klen, int64_t unix_ms);
 /* Returns malloc'd value (caller frees via ar_free) or NULL if missing. */
 char* ar_get(ArCore* core, const char* key);
 /* Binary get: *out_len set; caller frees via ar_free. NULL if missing. */
@@ -255,6 +261,13 @@ size_t ar_scan(ArCore* core, uint64_t cursor, const char* pattern, size_t plen,
 /* KEYS — full keyspace scan (O(N)); same match/free contract as ar_scan. */
 size_t ar_keys(ArCore* core, const char* pattern, size_t plen, char*** out_keys,
                size_t** out_klens);
+
+/* HSCAN — hash field cursor (MATCH star/question glob + COUNT); flat field/value pairs.
+ * Free elems via ar_hscan_free. WRONGTYPE → *wrongtype=1, return 0. */
+void ar_hscan_free(char** elems, size_t* elens, size_t n);
+size_t ar_hscan(ArCore* core, const char* key, size_t klen, uint64_t cursor,
+                const char* pattern, size_t plen, int count, char*** out_elems,
+                size_t** out_elens, uint64_t* next_cursor, int* wrongtype);
 
 /* Tier-2 string/key ops */
 /* APPEND: new length; *wrongtype=1 on non-string; -1 on OOM/wrongtype. */

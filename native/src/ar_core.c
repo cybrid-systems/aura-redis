@@ -1112,6 +1112,77 @@ int64_t ar_ttl(ArCore* core, const char* key, size_t klen) {
   return (int64_t)((e->expire_at - now + 999) / 1000);
 }
 
+int ar_pexpire(ArCore* core, const char* key, size_t klen, int64_t ms) {
+  if (!core || !key)
+    return 0;
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
+  if (!e)
+    return 0;
+  if (ms <= 0) {
+    entry_clear_expire(core, e);
+    ar_watch_touch(core, key, klen);
+    return 1;
+  }
+  entry_set_expire_at(core, e, ar_now_ms() + (uint64_t)ms);
+  ar_watch_touch(core, key, klen);
+  return 1;
+}
+
+int64_t ar_pttl(ArCore* core, const char* key, size_t klen) {
+  if (!core || !key)
+    return -2;
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
+  if (!e)
+    return -2;
+  if (!e->expire_at)
+    return -1;
+  uint64_t now = ar_now_ms();
+  if (now >= e->expire_at)
+    return -2;
+  return (int64_t)(e->expire_at - now);
+}
+
+/* EXPIREAT / PEXPIREAT — absolute unix time (sec / ms). */
+int ar_expireat(ArCore* core, const char* key, size_t klen, int64_t unix_sec) {
+  if (!core || !key)
+    return 0;
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
+  if (!e)
+    return 0;
+  if (unix_sec <= 0) {
+    entry_clear_expire(core, e);
+    ar_watch_touch(core, key, klen);
+    return 1;
+  }
+  entry_set_expire_at(core, e, (uint64_t)unix_sec * 1000ull);
+  ar_watch_touch(core, key, klen);
+  return 1;
+}
+
+int ar_pexpireat(ArCore* core, const char* key, size_t klen, int64_t unix_ms) {
+  if (!core || !key)
+    return 0;
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
+  if (!e)
+    return 0;
+  if (unix_ms <= 0) {
+    entry_clear_expire(core, e);
+    ar_watch_touch(core, key, klen);
+    return 1;
+  }
+  entry_set_expire_at(core, e, (uint64_t)unix_ms);
+  ar_watch_touch(core, key, klen);
+  return 1;
+}
+
 /* P0.3: sample random buckets; free expired keys (active expire). */
 int ar_core_active_expire(ArCore* core, int effort) {
   if (!core || effort <= 0 || core->nkeys == 0)
@@ -1400,8 +1471,11 @@ int64_t ar_incr(ArCore* core, const char* key, size_t klen, int64_t delta,
     return 0;
   core->ops++;
   core->sets++;
-  ArEntry* e = ar_find_entry(core, key, klen, NULL);
+  size_t b = 0;
+  int tier = 0;
+  ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
   int64_t v = 0;
+  uint64_t keep_exp = 0;
   if (e) {
     if (e->type != AR_TYPE_STRING) {
       if (ok)
@@ -1423,11 +1497,12 @@ int64_t ar_incr(ArCore* core, const char* key, size_t klen, int64_t delta,
         *ok = 0;
       return 0;
     }
+    keep_exp = e->expire_at; /* Redis INCR/INCRBY preserve TTL */
   }
   v += delta;
   char buf[32];
   int n = snprintf(buf, sizeof(buf), "%lld", (long long)v);
-  if (n < 0 || !ar_entry_set(core, key, klen, buf, (size_t)n)) {
+  if (n < 0 || !ar_entry_set_ex(core, key, klen, buf, (size_t)n, keep_exp)) {
     if (ok)
       *ok = 0;
     return 0;

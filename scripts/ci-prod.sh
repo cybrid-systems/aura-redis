@@ -38,6 +38,8 @@ run P3.16-edge tests/test_prod_types_edge.py
 run P3.17a tests/test_prod_multi.py
 run P3.17b tests/test_prod_pubsub.py
 run P3.18-scan tests/test_prod_scan.py
+run T2.hscan tests/test_prod_hscan.py
+run T2.ms-ttl-incr tests/test_prod_ms_ttl_incr.py
 run T2.9-set-opts tests/test_prod_set_opts.py
 run T2.10-string-keys tests/test_prod_string_keys.py
 run T2.11-string-meta tests/test_prod_string_meta.py

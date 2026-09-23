@@ -513,9 +513,12 @@ static int cmd_is_write(const char* cmd, size_t clen) {
          cmd_eq(cmd, clen, "getset") || cmd_eq(cmd, clen, "del") ||
          cmd_eq(cmd, clen, "unlink") || cmd_eq(cmd, clen, "append") ||
          cmd_eq(cmd, clen, "rename") || cmd_eq(cmd, clen, "renamenx") ||
-         cmd_eq(cmd, clen, "expire") || cmd_eq(cmd, clen, "flushdb") ||
+         cmd_eq(cmd, clen, "expire") || cmd_eq(cmd, clen, "pexpire") ||
+         cmd_eq(cmd, clen, "expireat") || cmd_eq(cmd, clen, "pexpireat") ||
+         cmd_eq(cmd, clen, "flushdb") ||
          cmd_eq(cmd, clen, "mset") || cmd_eq(cmd, clen, "incr") ||
-         cmd_eq(cmd, clen, "decr") || cmd_eq(cmd, clen, "pin") ||
+         cmd_eq(cmd, clen, "decr") || cmd_eq(cmd, clen, "incrby") ||
+         cmd_eq(cmd, clen, "decrby") || cmd_eq(cmd, clen, "pin") ||
          cmd_eq(cmd, clen, "unpin") || cmd_eq(cmd, clen, "policy") ||
          cmd_eq(cmd, clen, "evict") || cmd_eq(cmd, clen, "layout") ||
          cmd_eq(cmd, clen, "plugin") || cmd_eq(cmd, clen, "save") ||
@@ -1121,12 +1124,14 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     return reply_bulk(c, v, vl);
   }
   if (cmd_eq(cmd, clen, "set")) {
-    /* SET key value [NX|XX] [EX seconds|PX milliseconds] — Redis cache subset */
+    /* SET key value [NX|XX] [EX|PX|EXAT|PXAT|KEEPTTL] — Redis cache subset (no GET) */
     if (argc < 3)
       return reply_err(c, "ERR wrong number of arguments for 'set'");
-    int nx = 0, xx = 0;
+    int nx = 0, xx = 0, keepttl = 0;
     int64_t ex_sec = -1; /* -1 = unset */
     int64_t px_ms = -1;
+    int64_t exat_sec = -1;
+    int64_t pxat_ms = -1;
     for (int oi = 3; oi < argc; ) {
       if (cmd_eq(argv[oi].p, argv[oi].len, "nx")) {
         if (xx)
@@ -1138,10 +1143,15 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
           return reply_err(c, "ERR syntax error");
         xx = 1;
         oi++;
+      } else if (cmd_eq(argv[oi].p, argv[oi].len, "keepttl")) {
+        if (ex_sec >= 0 || px_ms >= 0 || exat_sec >= 0 || pxat_ms >= 0)
+          return reply_err(c, "ERR syntax error");
+        keepttl = 1;
+        oi++;
       } else if (cmd_eq(argv[oi].p, argv[oi].len, "ex")) {
         if (oi + 1 >= argc)
           return reply_err(c, "ERR syntax error");
-        if (ex_sec >= 0 || px_ms >= 0)
+        if (ex_sec >= 0 || px_ms >= 0 || exat_sec >= 0 || pxat_ms >= 0 || keepttl)
           return reply_err(c, "ERR syntax error");
         char nbuf[32];
         if (argv[oi + 1].len == 0 || argv[oi + 1].len >= sizeof(nbuf))
@@ -1155,7 +1165,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       } else if (cmd_eq(argv[oi].p, argv[oi].len, "px")) {
         if (oi + 1 >= argc)
           return reply_err(c, "ERR syntax error");
-        if (ex_sec >= 0 || px_ms >= 0)
+        if (ex_sec >= 0 || px_ms >= 0 || exat_sec >= 0 || pxat_ms >= 0 || keepttl)
           return reply_err(c, "ERR syntax error");
         char nbuf[32];
         if (argv[oi + 1].len == 0 || argv[oi + 1].len >= sizeof(nbuf))
@@ -1164,6 +1174,34 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         nbuf[argv[oi + 1].len] = '\0';
         px_ms = (int64_t)atoll(nbuf);
         if (px_ms <= 0)
+          return reply_err(c, "ERR invalid expire time in 'set'");
+        oi += 2;
+      } else if (cmd_eq(argv[oi].p, argv[oi].len, "exat")) {
+        if (oi + 1 >= argc)
+          return reply_err(c, "ERR syntax error");
+        if (ex_sec >= 0 || px_ms >= 0 || exat_sec >= 0 || pxat_ms >= 0 || keepttl)
+          return reply_err(c, "ERR syntax error");
+        char nbuf[32];
+        if (argv[oi + 1].len == 0 || argv[oi + 1].len >= sizeof(nbuf))
+          return reply_err(c, "ERR invalid expire time in 'set'");
+        memcpy(nbuf, argv[oi + 1].p, argv[oi + 1].len);
+        nbuf[argv[oi + 1].len] = '\0';
+        exat_sec = (int64_t)atoll(nbuf);
+        if (exat_sec <= 0)
+          return reply_err(c, "ERR invalid expire time in 'set'");
+        oi += 2;
+      } else if (cmd_eq(argv[oi].p, argv[oi].len, "pxat")) {
+        if (oi + 1 >= argc)
+          return reply_err(c, "ERR syntax error");
+        if (ex_sec >= 0 || px_ms >= 0 || exat_sec >= 0 || pxat_ms >= 0 || keepttl)
+          return reply_err(c, "ERR syntax error");
+        char nbuf[32];
+        if (argv[oi + 1].len == 0 || argv[oi + 1].len >= sizeof(nbuf))
+          return reply_err(c, "ERR invalid expire time in 'set'");
+        memcpy(nbuf, argv[oi + 1].p, argv[oi + 1].len);
+        nbuf[argv[oi + 1].len] = '\0';
+        pxat_ms = (int64_t)atoll(nbuf);
+        if (pxat_ms <= 0)
           return reply_err(c, "ERR invalid expire time in 'set'");
         oi += 2;
       } else {
@@ -1182,7 +1220,28 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     else if (px_ms > 0)
       ok = ar_set_bin_px(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len,
                          px_ms);
-    else {
+    else if (exat_sec > 0) {
+      core->ops++;
+      core->sets++;
+      ok = ar_entry_set_ex(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len,
+                           (uint64_t)exat_sec * 1000ull);
+    } else if (pxat_ms > 0) {
+      core->ops++;
+      core->sets++;
+      ok = ar_entry_set_ex(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len,
+                           (uint64_t)pxat_ms);
+    } else if (keepttl) {
+      uint64_t keep = 0;
+      size_t b0 = 0;
+      int tier0 = 0;
+      ArEntry* e0 = ar_find_entry_ex(core, argv[1].p, argv[1].len, &b0, &tier0);
+      if (e0)
+        keep = e0->expire_at;
+      core->ops++;
+      core->sets++;
+      ok = ar_entry_set_ex(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len,
+                           keep);
+    } else {
       core->ops++;
       core->sets++;
       ok = ar_entry_set(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len);
@@ -1298,6 +1357,58 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     core->ops++;
     return reply_int(c, ttl);
   }
+  if (cmd_eq(cmd, clen, "pttl")) {
+    if (argc != 2)
+      return reply_err(c, "ERR wrong number of arguments for 'pttl'");
+    int64_t ttl = ar_pttl(core, argv[1].p, argv[1].len);
+    core->ops++;
+    return reply_int(c, ttl);
+  }
+  if (cmd_eq(cmd, clen, "pexpire")) {
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'pexpire'");
+    char nbuf[32];
+    if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[2].p, argv[2].len);
+    nbuf[argv[2].len] = '\0';
+    int64_t ms = (int64_t)atoll(nbuf);
+    int ok = ar_pexpire(core, argv[1].p, argv[1].len, ms);
+    core->ops++;
+    if (ok)
+      repl_propagate(core, argv, argc);
+    return reply_int(c, ok ? 1 : 0);
+  }
+  if (cmd_eq(cmd, clen, "expireat")) {
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'expireat'");
+    char nbuf[32];
+    if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[2].p, argv[2].len);
+    nbuf[argv[2].len] = '\0';
+    int64_t sec = (int64_t)atoll(nbuf);
+    int ok = ar_expireat(core, argv[1].p, argv[1].len, sec);
+    core->ops++;
+    if (ok)
+      repl_propagate(core, argv, argc);
+    return reply_int(c, ok ? 1 : 0);
+  }
+  if (cmd_eq(cmd, clen, "pexpireat")) {
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'pexpireat'");
+    char nbuf[32];
+    if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[2].p, argv[2].len);
+    nbuf[argv[2].len] = '\0';
+    int64_t ms = (int64_t)atoll(nbuf);
+    int ok = ar_pexpireat(core, argv[1].p, argv[1].len, ms);
+    core->ops++;
+    if (ok)
+      repl_propagate(core, argv, argc);
+    return reply_int(c, ok ? 1 : 0);
+  }
   if (cmd_eq(cmd, clen, "del") || cmd_eq(cmd, clen, "unlink")) {
     /* UNLINK: Redis async delete; single-threaded → DEL-equivalent, return count */
     const char* cname = cmd_eq(cmd, clen, "unlink") ? "unlink" : "del";
@@ -1374,17 +1485,10 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     return reply_int(c, n);
   }
   if (cmd_eq(cmd, clen, "mget")) {
+    /* Redis parity: missing OR typed (HASH/LIST/ZSET) → null bulk per slot,
+     * not WRONGTYPE on the whole command. */
     if (argc < 2)
       return reply_err(c, "ERR wrong number of arguments for 'mget'");
-    for (int i = 1; i < argc; ++i) {
-      size_t b0 = 0;
-      int tier0 = 0;
-      ArEntry* e0 = ar_find_entry_ex(core, argv[i].p, argv[i].len, &b0, &tier0);
-      if (e0 && e0->type != AR_TYPE_STRING)
-        return reply_err(
-            c,
-            "WRONGTYPE Operation against a key holding the wrong kind of value");
-    }
     char hdr[32];
     int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", argc - 1);
     if (wbuf_append(c, hdr, (size_t)hn) < 0)
@@ -1431,6 +1535,44 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       return reply_err(c, "ERR wrong number of arguments for 'decr'");
     int ok = 0;
     int64_t v = ar_incr(core, argv[1].p, argv[1].len, -1, &ok);
+    if (!ok)
+      return reply_err(c, "ERR value is not an integer or out of range");
+    repl_propagate(core, argv, argc);
+    return reply_int(c, v);
+  }
+  if (cmd_eq(cmd, clen, "incrby")) {
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'incrby'");
+    char nbuf[32];
+    if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[2].p, argv[2].len);
+    nbuf[argv[2].len] = '\0';
+    char* end = NULL;
+    long long delta = strtoll(nbuf, &end, 10);
+    if (end == nbuf || *end != '\0')
+      return reply_err(c, "ERR value is not an integer or out of range");
+    int ok = 0;
+    int64_t v = ar_incr(core, argv[1].p, argv[1].len, (int64_t)delta, &ok);
+    if (!ok)
+      return reply_err(c, "ERR value is not an integer or out of range");
+    repl_propagate(core, argv, argc);
+    return reply_int(c, v);
+  }
+  if (cmd_eq(cmd, clen, "decrby")) {
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'decrby'");
+    char nbuf[32];
+    if (argv[2].len == 0 || argv[2].len >= sizeof(nbuf))
+      return reply_err(c, "ERR value is not an integer or out of range");
+    memcpy(nbuf, argv[2].p, argv[2].len);
+    nbuf[argv[2].len] = '\0';
+    char* end = NULL;
+    long long delta = strtoll(nbuf, &end, 10);
+    if (end == nbuf || *end != '\0')
+      return reply_err(c, "ERR value is not an integer or out of range");
+    int ok = 0;
+    int64_t v = ar_incr(core, argv[1].p, argv[1].len, -(int64_t)delta, &ok);
     if (!ok)
       return reply_err(c, "ERR value is not an integer or out of range");
     repl_propagate(core, argv, argc);
@@ -2755,6 +2897,86 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       return reply_err(c, "ERR hash value is not an integer");
     repl_propagate(core, argv, argc);
     return reply_int(c, v);
+  }
+  if (cmd_eq(cmd, clen, "hscan")) {
+    /* HSCAN key cursor [MATCH pattern] [COUNT count] */
+    if (argc < 3)
+      return reply_err(c, "ERR wrong number of arguments for 'hscan'");
+    char cbuf[32];
+    if (argv[2].len == 0 || argv[2].len >= sizeof(cbuf))
+      return reply_err(c, "ERR invalid cursor");
+    memcpy(cbuf, argv[2].p, argv[2].len);
+    cbuf[argv[2].len] = '\0';
+    char* end = NULL;
+    unsigned long long cursor = strtoull(cbuf, &end, 10);
+    if (!end || *end != '\0')
+      return reply_err(c, "ERR invalid cursor");
+    const char* pattern = NULL;
+    size_t plen = 0;
+    int count = 10;
+    for (int i = 3; i < argc; ) {
+      if (cmd_eq(argv[i].p, argv[i].len, "match")) {
+        if (i + 1 >= argc)
+          return reply_err(c, "ERR syntax error");
+        pattern = argv[i + 1].p;
+        plen = argv[i + 1].len;
+        i += 2;
+      } else if (cmd_eq(argv[i].p, argv[i].len, "count")) {
+        if (i + 1 >= argc)
+          return reply_err(c, "ERR syntax error");
+        char nbuf[32];
+        if (argv[i + 1].len == 0 || argv[i + 1].len >= sizeof(nbuf))
+          return reply_err(c, "ERR value is not an integer or out of range");
+        memcpy(nbuf, argv[i + 1].p, argv[i + 1].len);
+        nbuf[argv[i + 1].len] = '\0';
+        char* e2 = NULL;
+        long long cv = strtoll(nbuf, &e2, 10);
+        if (!e2 || *e2 != '\0' || cv < 1)
+          return reply_err(c, "ERR value is not an integer or out of range");
+        if (cv > 10000)
+          cv = 10000;
+        count = (int)cv;
+        i += 2;
+      } else {
+        return reply_err(c, "ERR syntax error");
+      }
+    }
+    char** elems = NULL;
+    size_t* elens = NULL;
+    uint64_t next = 0;
+    int wt = 0;
+    size_t n = ar_hscan(core, argv[1].p, argv[1].len, (uint64_t)cursor, pattern,
+                        plen, count, &elems, &elens, &next, &wt);
+    if (wt) {
+      ar_hscan_free(elems, elens, n);
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
+    char hdr[64];
+    int hn = snprintf(hdr, sizeof(hdr), "*2\r\n");
+    if (hn < 0 || wbuf_append(c, hdr, (size_t)hn) < 0) {
+      ar_hscan_free(elems, elens, n);
+      return -1;
+    }
+    char ncur[32];
+    int cn = snprintf(ncur, sizeof(ncur), "%llu", (unsigned long long)next);
+    if (cn < 0 || reply_bulk(c, ncur, (size_t)cn) < 0) {
+      ar_hscan_free(elems, elens, n);
+      return -1;
+    }
+    hn = snprintf(hdr, sizeof(hdr), "*%zu\r\n", n);
+    if (hn < 0 || wbuf_append(c, hdr, (size_t)hn) < 0) {
+      ar_hscan_free(elems, elens, n);
+      return -1;
+    }
+    for (size_t i = 0; i < n; ++i) {
+      if (reply_bulk(c, elems[i], elens[i]) < 0) {
+        ar_hscan_free(elems, elens, n);
+        return -1;
+      }
+    }
+    ar_hscan_free(elems, elens, n);
+    return 0;
   }
 
 

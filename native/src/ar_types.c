@@ -620,6 +620,112 @@ int64_t ar_hash_hincrby(ArCore* core, const char* key, size_t klen,
   return v;
 }
 
+/* --- Tier-2 HSCAN: cursor over hash field buckets --- */
+
+void ar_hscan_free(char** elems, size_t* elens, size_t n) {
+  if (elems) {
+    for (size_t i = 0; i < n; ++i)
+      free(elems[i]);
+    free(elems);
+  }
+  free(elens);
+}
+
+static int hscan_push(char*** elems, size_t** elens, size_t* n, size_t* cap,
+                      const char* s, size_t slen) {
+  if (*n >= *cap) {
+    size_t ncap = (*cap == 0) ? 16 : (*cap * 2);
+    char** ne = (char**)realloc(*elems, ncap * sizeof(char*));
+    if (!ne)
+      return 0;
+    *elems = ne;
+    size_t* nl = (size_t*)realloc(*elens, ncap * sizeof(size_t));
+    if (!nl)
+      return 0;
+    *elens = nl;
+    *cap = ncap;
+  }
+  char* copy = ar_xmemdup(s, slen);
+  if (!copy)
+    return 0;
+  (*elems)[*n] = copy;
+  (*elens)[*n] = slen;
+  (*n)++;
+  return 1;
+}
+
+size_t ar_hscan(ArCore* core, const char* key, size_t klen, uint64_t cursor,
+                const char* pattern, size_t plen, int count, char*** out_elems,
+                size_t** out_elens, uint64_t* next_cursor, int* wrongtype) {
+  if (out_elems)
+    *out_elems = NULL;
+  if (out_elens)
+    *out_elens = NULL;
+  if (next_cursor)
+    *next_cursor = 0;
+  if (wrongtype)
+    *wrongtype = 0;
+  if (!core || !key || !out_elems || !out_elens || !next_cursor)
+    return 0;
+
+  ArEntry* e =
+      ar_entry_get_typed(core, key, klen, AR_TYPE_HASH, NULL, NULL, wrongtype);
+  if (wrongtype && *wrongtype)
+    return 0;
+  if (!e) {
+    *next_cursor = 0;
+    return 0;
+  }
+
+  ArHash* h = (ArHash*)e->obj;
+  if (!h || h->nbuckets == 0 || h->nfields == 0) {
+    *next_cursor = 0;
+    return 0;
+  }
+  if (cursor >= (uint64_t)h->nbuckets) {
+    *next_cursor = 0;
+    return 0;
+  }
+
+  const char* pat = pattern;
+  size_t patlen = plen;
+  int match_all = (!pat || patlen == 0 || (patlen == 1 && pat[0] == '*'));
+
+  int max_slots = count;
+  if (max_slots <= 0)
+    max_slots = 10;
+  if (max_slots > 10000)
+    max_slots = 10000;
+
+  char** elems = NULL;
+  size_t* elens = NULL;
+  size_t n = 0, cap = 0;
+  uint64_t idx = cursor;
+  int slots = 0;
+
+  while (slots < max_slots) {
+    for (ArHashField* f = h->buckets[idx]; f; f = f->next) {
+      if (match_all || ar_glob_match(pat, patlen, f->field, f->flen)) {
+        if (!hscan_push(&elems, &elens, &n, &cap, f->field, f->flen) ||
+            !hscan_push(&elems, &elens, &n, &cap, f->val, f->vlen)) {
+          break;
+        }
+      }
+    }
+    slots++;
+    idx++;
+    if (idx >= (uint64_t)h->nbuckets) {
+      idx = 0;
+      break;
+    }
+  }
+
+  *out_elems = elems;
+  *out_elens = elens;
+  *next_cursor = idx;
+  return n;
+}
+
 /* ---------- LIST ---------- */
 
 int64_t ar_list_push(ArCore* core, const char* key, size_t klen, int left,

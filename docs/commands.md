@@ -4,7 +4,7 @@
 **Not covered here:** pure-Lisp `AURA_REDIS_ENGINE=aura` (broader demo subset in README).  
 **Production product:** string KV cache + Aura control commands — see [`production-plan.md`](production-plan.md).
 
-Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLINK + STRLEN/SETEX/PSETEX/DBSIZE + WATCH/UNWATCH + CONFIG persist + CLIENT LIST.
+Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLINK + STRLEN/SETEX/PSETEX/DBSIZE + WATCH/UNWATCH + CONFIG persist + CLIENT LIST + HSCAN.
 
 ---
 
@@ -23,11 +23,15 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLI
 | `SYNC` | 1 | (stream) | P2.14 internal: full sync + feed; not for apps |
 | `QUIT` | any | `+OK` then close | Allowed pre-AUTH |
 | `GET` | 2 | bulk / null | |
-| `SET` | ≥3 | `+OK` / null bulk / `ERR OOM` | Options: `NX`\|`XX` (mutex), `EX <sec>`\|`PX <ms>` (mutex); NX/XX fail → null bulk; overwrites hash/list/zset → string (Redis) |
+| `SET` | ≥3 | `+OK` / null bulk / `ERR OOM` | Options: `NX`\|`XX`; `EX`\|`PX`\|`EXAT`\|`PXAT`\|`KEEPTTL` (expire modes mutex); NX/XX fail → null bulk; overwrites typed → string |
 | `SETNX` | 3 | integer 0/1 | Alias: set if absent |
 | `GETSET` | 3 | bulk / null / WRONGTYPE | Atomically return old string then SET (clears TTL) |
 | `EXPIRE` | 3 | integer 0/1 | |
+| `PEXPIRE` | 3 | integer 0/1 | milliseconds |
+| `EXPIREAT` | 3 | integer 0/1 | unix seconds absolute |
+| `PEXPIREAT` | 3 | integer 0/1 | unix ms absolute |
 | `TTL` | 2 | integer | −2 missing, −1 no expire, else seconds |
+| `PTTL` | 2 | integer | −2/−1 / remaining ms |
 | `DEL` | ≥2 | integer deleted | multi-key |
 | `UNLINK` | ≥2 | integer deleted | Tier-2: DEL-equivalent (single-threaded; no async reclaim) |
 | `APPEND` | 3 | integer new length | create if missing; WRONGTYPE on non-string; keeps TTL |
@@ -37,9 +41,10 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLI
 | `RENAME` | 3 | `+OK` / ERR | overwrite dest; any type; ERR no such key |
 | `RENAMENX` | 3 | integer 0/1 | rename only if dest absent |
 | `EXISTS` | ≥2 | integer count | multi-key |
-| `MGET` | ≥2 | array of bulks | |
+| `MGET` | ≥2 | array of bulks | missing/typed → null bulk per key (not WRONGTYPE) |
 | `MSET` | odd ≥3 | `+OK` | key val pairs |
-| `INCR` / `DECR` | 2 | integer | integer strings only |
+| `INCR` / `DECR` | 2 | integer | integer strings only; preserves TTL |
+| `INCRBY` / `DECRBY` | 3 | integer | delta; preserves TTL |
 | `FLUSHDB` | 1 | `+OK` | |
 | `DBSIZE` | 1 | integer | O(N) count of non-expired keys (string+typed); purges expired on walk |
 | `COMMAND` | 1 | `*0` | stub for clients that probe |
@@ -61,6 +66,7 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLI
 | `HEXISTS` | 3 | 0/1 | |
 | `HLEN` | 2 | integer | |
 | `HINCRBY` | 4 | integer | integer field values |
+| `HSCAN` | ≥3 | `[cursor, [field, value…]]` | Tier-2: opaque field-bucket cursor; optional `MATCH` (`*`/`?`) + `COUNT` hint; missing key → empty; WRONGTYPE on non-hash |
 | `LPUSH` / `RPUSH` | ≥3 | integer length | P3.16b |
 | `LPOP` / `RPOP` | 2 | bulk/null | |
 | `LLEN` | 2 | integer | |
@@ -106,7 +112,7 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 |------|----------|
 | Auth / admin | `SHUTDOWN`, `SLOWLOG`, `MONITOR` (AUTH/HELLO done; `CLIENT LIST/ID/SETNAME/KILL` done) |
 | Persistence / repl | `BGREWRITEAOF`, `PSYNC` (SAVE/BGSAVE/REPLICAOF/SYNC done P2.13–14) |
-| Strings extras | `SET` GET/KEEPTTL/EXAT/PXAT (`STRLEN`/`SETEX`/`PSETEX` done T2.11) |
+| Strings extras | `SET` GET option (`KEEPTTL`/`EXAT`/`PXAT`/`STRLEN`/`SETEX`/`PSETEX` done) |
 | Keys extras | `APPEND`/`RENAME`/`RENAMENX`/`UNLINK` done T2.10; `DBSIZE` done T2.11; `KEYS`/`SCAN` done P3.18 |
 | (types) | HASH/LIST/ZSET done P3.16 |
 | Patterns | `PSUBSCRIBE` (WATCH/UNWATCH done T2.12) |
