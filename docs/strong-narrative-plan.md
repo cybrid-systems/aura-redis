@@ -2,7 +2,7 @@
 
 **Status:** authoritative execution plan for the citeable Aura moat  
 **Date:** 2026-09-23 CST  
-**Tip baseline:** post A12/A10 on main (see changelog)  
+**Tip baseline:** post A7/A9 on main (see changelog)  
 **Scope:** Guard-bounded live `choose-fn` mutation under sandbox + C dumb kernels + multi-phase regret evidence — **not** Redis P3 parity.  
 **Companions:** [`aura-demand.md`](aura-demand.md) · [`aura-pain-scenarios.md`](aura-pain-scenarios.md) · [`aura-redis-match.md`](aura-redis-match.md) · [`aura-native-control.md`](aura-native-control.md) · [`mutation-gains.md`](mutation-gains.md) · [`perf-eval.md`](perf-eval.md) · [`production-plan.md`](production-plan.md) · [`architecture.md`](architecture.md) · [`high-roi-iterations.md`](high-roi-iterations.md)
 
@@ -154,7 +154,7 @@ Make ops trust live code change: durable audit, canary, prod-shaped sandbox.
 | **A10** | Shadow / A/B sample | C sample hook or dual agent | Shadow regret without applying loser | A4 | 2–3d | **DONE** (C `SHADOW`/INFO sample + agent dry-run never EVICT loser; `tests/test_shadow_ab.py`) |
 | **A12** | Named C kernel `slru` / TinyLFU — Aura select only | C `ArEvictOps`; Aura name pick | zipf regret ≤ LFU | explore | 2–3d | **DONE** (sample SLRU; `tinylfu` alias/approx; zipf hot-retention = LFU; `tests/test_evict_slru.py`) |
 
-Also backlog (demand map, not SN-gated): **A7** typed pressure INFO+choose; **A9** `hot_cold` RESP knobs; **A11** Restricted sandbox remains PARTIAL.
+Backlog: **A7** typed pressure **DONE**; **A9** `hot_cold` knobs **DONE**; **A11** Restricted sandbox remains **PARTIAL** (Tenant Admin). Strong-narrative backlog except A11 is complete.
 
 ---
 
@@ -174,6 +174,10 @@ Also backlog (demand map, not SN-gated): **A7** typed pressure INFO+choose; **A9
 12. **A14** → finish overhead bench summary + push  
 13. **A12** → slru/tinylfu named kernel + push  
 14. **A10** → shadow A/B sample path + push  
+15. **A7** → typed pressure INFO+choose + push  
+16. **A9** → hot_cold CONFIG/RESP knobs + push  
+
+**Pause:** do not start more waves unless trivial doc polish; A11 blocked on Tenant Admin.
 
 If blocked: document blocker here, push PARTIAL, continue what is possible.
 
@@ -203,3 +207,6 @@ If blocked: document blocker here, push PARTIAL, continue what is possible.
 | 2026-09-23 | SN3 explore: A13 weight evolve (+55.7pp evolve_gain), A15 PSO/`std/swarm` propose, A16 fiber-shadow, A14 overhead bench summary. |
 | 2026-09-23 | A12 `slru`/`tinylfu` named C kernels (approx TinyLFU doc); zipf retention = LFU. |
 | 2026-09-23 | A10 shadow sample path: C `SHADOW`+INFO + agent dual dry-run (never EVICT loser). |
+| 2026-09-23 | A7 typed pressure INFO shares/counts + agent `lfu\|flat\|pin`; `tests/test_typed_pressure.py`. |
+| 2026-09-23 | A9 `hot_cold` soft-cap/promote knobs via CONFIG/`HOTCOLD`; `tests/test_hot_cold_knobs.py`. |
+| 2026-09-23 | Strong-narrative backlog complete except **A11** PARTIAL (Tenant Admin). |

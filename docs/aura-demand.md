@@ -52,7 +52,7 @@ Redis-compatible cache (RESP, maxmemory kernels, string/typed KV) is **table sta
 | **Explainability of EVICT/LAYOUT flips** | Structured reason codes for ops | **PARTIAL** | Agent logs signals inline; no `INFO policy_explain` / stable schema |
 | **Policy version pin across replica failover** | Same choose generation on promote | **SHIPPED** (A6) | Durable pin file + resume `from_version`; C fail-safe keeps last EVICT; version counter process-local (honest) |
 | **Controller cost vs hit-quality** | Auto-freeze when gain < overhead | **SHIPPED** (A8) | `AUTO_FREEZE` → lengthen tick + fitness-off; unfreeze on miss spike; audit auto_freeze/unfreeze |
-| **`hot_cold` threshold via Aura** | Promote/demote knobs mutated live | **GAP** | C soft-cap ~nkeys/4; not RESP-tunable from agent |
+| **`hot_cold` threshold via Aura** | Promote/demote knobs mutated live | **SHIPPED** (A9) | CONFIG/RESP `hot-soft-cap-pct|min` + `hot-promote-on-get`; agent optional tune |
 | **W-TinyLFU / SLRU named kernels** | Better zipf admission | **SHIPPED** (A12) | `EVICT slru\|tinylfu`; tinylfu=approx SLRU alias (no CMS) |
 
 Statuses: **SHIPPED** = demo/bench green on main; **PARTIAL** = works but shallow vs demand; **GAP** = missing or recent stretch Δ=0.
@@ -163,9 +163,9 @@ Priorities here are **P0–P2 for Aura differentiation**, independent of Redis c
 | **A4** | Canary choose-fn — trial body N ticks; auto `heal!` if fitness drops | 2–3d | `tests/test_policy_canary.py` | A3 | **DONE** |
 | **A5** | Deep prefix isolation — per-prefix choose body or param bag via multi `register!` | 2–3d | Conflicting-optima `prefix_mix_v2` ≥ +20pp on victim tenant | M12 |  **DONE** +96.4pp |
 | **A6** | Policy version pin across replica promote | 1–2d | Extend `tests/test_prod_policy_ha.py` + replica | P2.14, P1.9 |  **DONE** pin resume |
-| **A7** | Typed pressure signals in INFO + choose | 2–3d | `typed_pressure` harness PASS | P3.16 | |
+| **A7** | Typed pressure signals in INFO + choose | 2–3d | `typed_pressure` harness PASS | P3.16 | **DONE** INFO shares + agent pin |
 | **A8** | Auto-freeze meta-policy (cost gate) | 1–2d | Stable-load INFO rate ↓ ≥5×; hit% within 2pp | A1 |  **DONE** ×6.7 poll drop |
-| **A9** | `hot_cold` promote/demote RESP knobs + Aura mutate | 1–2d | Microbench large-value locality | layout | |
+| **A9** | `hot_cold` promote/demote RESP knobs + Aura mutate | 1–2d | Microbench large-value locality | layout | **DONE** CONFIG/RESP + test |
 | **A10** | Shadow / A/B sample path (C hook or dual agent) | 2–3d | Shadow regret report without applying loser | A4 | **DONE** |
 | **A11** | Restricted sandbox + `effect:network` grant (prod-shaped) | 1d | Doc + demo without `AURA_SANDBOX=off` when TA available | sandbox profile | **PARTIAL** (off works; Restricted needs TA) |
 | **A12** | Named kernel `slru` or approx TinyLFU (C) — Aura select only | 2–3d | zipf regret ≤ LFU | explore | **DONE** |
@@ -174,7 +174,7 @@ Priorities here are **P0–P2 for Aura differentiation**, independent of Redis c
 | **A15** | **Swarm/FSS/PSO evolve backend** — replace/augment hand threshold walk with `std/swarm` | 2–3d | `evolve_gain` ≥ +8pp + swarm gen logs | A2 | **DONE** |
 | **A16** | Agent-side fiber parallel trial fitness (canary/shadow score without C hook) | 1–2d | Dual-body score in logs; no apply of loser | A4, A10 | **DONE** |
 
-**Top 3 start next:** **A7** (typed pressure), **A9** (`hot_cold` knobs), **A11** (Restricted TA). A10/A12 DONE.
+**Remaining:** **A11** Restricted sandbox (PARTIAL — Tenant Admin blocker). Strong-narrative backlog otherwise complete.
 
 Do **not** implement A1 in this doc-only change set unless trivially documentation.
 
