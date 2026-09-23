@@ -176,6 +176,35 @@ int ar_core_listen_tls(ArCore* core, int port); /* after ar_core_listen; needs c
 int ar_core_tls_port(ArCore* core);
 int ar_core_tls_enabled(ArCore* core);
 
+
+/* P3.16 thin public FFI — C-string keys for Aura std/ffi (≤6 args).
+ * wrongtype: optional int* out; set to 1 on WRONGTYPE (return -1 / NULL).
+ * malloc'd returns: caller frees via ar_free. */
+const char* ar_type(ArCore* core, const char* key); /* none|string|hash|list|zset */
+
+int64_t ar_hset(ArCore* core, const char* key, const char* field, const char* val,
+               int* wrongtype);
+char* ar_hget(ArCore* core, const char* key, const char* field, int* wrongtype);
+int64_t ar_hdel(ArCore* core, const char* key, const char* field, int* wrongtype);
+int64_t ar_hexists(ArCore* core, const char* key, const char* field, int* wrongtype);
+int64_t ar_hlen(ArCore* core, const char* key, int* wrongtype);
+int64_t ar_hincrby(ArCore* core, const char* key, const char* field, int64_t incr,
+                   int* wrongtype, int* ok);
+
+int64_t ar_lpush(ArCore* core, const char* key, const char* val, int* wrongtype);
+int64_t ar_rpush(ArCore* core, const char* key, const char* val, int* wrongtype);
+char* ar_lpop(ArCore* core, const char* key, int* wrongtype);
+char* ar_rpop(ArCore* core, const char* key, int* wrongtype);
+int64_t ar_llen(ArCore* core, const char* key, int* wrongtype);
+char* ar_lindex(ArCore* core, const char* key, int64_t index, int* wrongtype);
+
+int64_t ar_zadd(ArCore* core, const char* key, int64_t score, const char* member,
+               int* wrongtype);
+char* ar_zscore(ArCore* core, const char* key, const char* member, int* ok,
+                int* wrongtype);
+int64_t ar_zrem(ArCore* core, const char* key, const char* member, int* wrongtype);
+int64_t ar_zcard(ArCore* core, const char* key, int* wrongtype);
+
 #ifdef __cplusplus
 }
 #endif

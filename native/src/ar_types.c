@@ -877,3 +877,225 @@ ArZSet* ar_zset_get(ArCore* core, const char* key, size_t klen,
     return NULL;
   return (ArZSet*)e->obj;
 }
+
+/* ---------- Thin public FFI wrappers (C-string keys for Aura) ---------- */
+
+const char* ar_type(ArCore* core, const char* key) {
+  if (!core || !key)
+    return "none";
+  ArEntry* e = ar_find_entry(core, key, strlen(key), NULL);
+  if (!e)
+    return "none";
+  return ar_type_name(e->type);
+}
+
+int64_t ar_hset(ArCore* core, const char* key, const char* field, const char* val,
+               int* wrongtype) {
+  if (!core || !key || !field || !val)
+    return -1;
+  int wt = 0;
+  const char* fields[1] = {field};
+  size_t flens[1] = {strlen(field)};
+  const char* vals[1] = {val};
+  size_t vlens[1] = {strlen(val)};
+  int added = ar_hash_hset(core, key, strlen(key), 1, fields, flens, vals, vlens, &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return wt ? -1 : added;
+}
+
+char* ar_hget(ArCore* core, const char* key, const char* field, int* wrongtype) {
+  if (!core || !key || !field) {
+    if (wrongtype)
+      *wrongtype = 0;
+    return NULL;
+  }
+  int wt = 0;
+  size_t ol = 0;
+  char* v = ar_hash_hget(core, key, strlen(key), field, strlen(field), &ol, &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return v;
+}
+
+int64_t ar_hdel(ArCore* core, const char* key, const char* field, int* wrongtype) {
+  if (!core || !key || !field)
+    return 0;
+  int wt = 0;
+  const char* fields[1] = {field};
+  size_t flens[1] = {strlen(field)};
+  int n = ar_hash_hdel(core, key, strlen(key), 1, fields, flens, &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return wt ? -1 : n;
+}
+
+int64_t ar_hexists(ArCore* core, const char* key, const char* field, int* wrongtype) {
+  if (!core || !key || !field)
+    return 0;
+  int wt = 0;
+  int r = ar_hash_hexists(core, key, strlen(key), field, strlen(field), &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return wt ? -1 : r;
+}
+
+int64_t ar_hlen(ArCore* core, const char* key, int* wrongtype) {
+  if (!core || !key)
+    return 0;
+  int wt = 0;
+  int64_t n = ar_hash_hlen(core, key, strlen(key), &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return wt ? -1 : n;
+}
+
+int64_t ar_hincrby(ArCore* core, const char* key, const char* field, int64_t incr,
+                   int* wrongtype, int* ok) {
+  if (ok)
+    *ok = 0;
+  if (!core || !key || !field) {
+    if (wrongtype)
+      *wrongtype = 0;
+    return 0;
+  }
+  int wt = 0, ni = 0;
+  int64_t v =
+      ar_hash_hincrby(core, key, strlen(key), field, strlen(field), incr, &wt, &ni);
+  if (wrongtype)
+    *wrongtype = wt;
+  if (ok)
+    *ok = (wt || ni) ? 0 : 1;
+  return v;
+}
+
+int64_t ar_lpush(ArCore* core, const char* key, const char* val, int* wrongtype) {
+  if (!core || !key || !val)
+    return -1;
+  int wt = 0;
+  const char* vals[1] = {val};
+  size_t vlens[1] = {strlen(val)};
+  int64_t n = ar_list_push(core, key, strlen(key), 1, 1, vals, vlens, &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return wt ? -1 : n;
+}
+
+int64_t ar_rpush(ArCore* core, const char* key, const char* val, int* wrongtype) {
+  if (!core || !key || !val)
+    return -1;
+  int wt = 0;
+  const char* vals[1] = {val};
+  size_t vlens[1] = {strlen(val)};
+  int64_t n = ar_list_push(core, key, strlen(key), 0, 1, vals, vlens, &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return wt ? -1 : n;
+}
+
+char* ar_lpop(ArCore* core, const char* key, int* wrongtype) {
+  if (!core || !key) {
+    if (wrongtype)
+      *wrongtype = 0;
+    return NULL;
+  }
+  int wt = 0;
+  size_t ol = 0;
+  char* v = ar_list_pop(core, key, strlen(key), 1, &ol, &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return v;
+}
+
+char* ar_rpop(ArCore* core, const char* key, int* wrongtype) {
+  if (!core || !key) {
+    if (wrongtype)
+      *wrongtype = 0;
+    return NULL;
+  }
+  int wt = 0;
+  size_t ol = 0;
+  char* v = ar_list_pop(core, key, strlen(key), 0, &ol, &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return v;
+}
+
+int64_t ar_llen(ArCore* core, const char* key, int* wrongtype) {
+  if (!core || !key)
+    return 0;
+  int wt = 0;
+  int64_t n = ar_list_llen(core, key, strlen(key), &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return wt ? -1 : n;
+}
+
+char* ar_lindex(ArCore* core, const char* key, int64_t index, int* wrongtype) {
+  if (!core || !key) {
+    if (wrongtype)
+      *wrongtype = 0;
+    return NULL;
+  }
+  int wt = 0;
+  size_t ol = 0;
+  char* v = ar_list_lindex(core, key, strlen(key), index, &ol, &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return v;
+}
+
+int64_t ar_zadd(ArCore* core, const char* key, int64_t score, const char* member,
+               int* wrongtype) {
+  if (!core || !key || !member)
+    return -1;
+  int wt = 0;
+  double scores[1] = {(double)score};
+  const char* members[1] = {member};
+  size_t mlens[1] = {strlen(member)};
+  int added = ar_zset_zadd(core, key, strlen(key), 1, scores, members, mlens, &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return wt ? -1 : added;
+}
+
+char* ar_zscore(ArCore* core, const char* key, const char* member, int* ok,
+                int* wrongtype) {
+  if (ok)
+    *ok = 0;
+  if (!core || !key || !member) {
+    if (wrongtype)
+      *wrongtype = 0;
+    return NULL;
+  }
+  int wt = 0;
+  size_t ol = 0;
+  char* v = ar_zset_zscore(core, key, strlen(key), member, strlen(member), &ol, &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  if (ok)
+    *ok = (wt || !v) ? 0 : 1;
+  return v;
+}
+
+int64_t ar_zrem(ArCore* core, const char* key, const char* member, int* wrongtype) {
+  if (!core || !key || !member)
+    return 0;
+  int wt = 0;
+  const char* members[1] = {member};
+  size_t mlens[1] = {strlen(member)};
+  int n = ar_zset_zrem(core, key, strlen(key), 1, members, mlens, &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return wt ? -1 : n;
+}
+
+int64_t ar_zcard(ArCore* core, const char* key, int* wrongtype) {
+  if (!core || !key)
+    return 0;
+  int wt = 0;
+  int64_t n = ar_zset_zcard(core, key, strlen(key), &wt);
+  if (wrongtype)
+    *wrongtype = wt;
+  return wt ? -1 : n;
+}
