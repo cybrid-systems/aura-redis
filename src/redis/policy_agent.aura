@@ -74,8 +74,10 @@
 ; A1 early re-entry gate - BEFORE heavy defines / getenv. mutate:rebind may
 ; re-eval this file; if boot-guard exists, skip the rest of the module so the
 ; outer tick can continue (post-swap re-choose / PIN).
+; Boot-guard path: cwd-relative so native (cwd=repo) and docker (cwd=/work)
+; share the same .ar-agent-booted-<port>.flag the tests unlink under ROOT.
 (define *a1-boot-path*
-  (string-append "/work/.ar-agent-booted-"
+  (string-append ".ar-agent-booted-"
                  (let ((e (getenv "AURA_REDIS_PORT")))
                    (if (and (string? e) (> (string-length e) 0)) e "6379"))
                  ".flag"))
@@ -87,7 +89,10 @@
 (display *a1-boot-content*)
 (newline)
 (define *a1-reentry*
-  (and (string? *a1-boot-content*) (> (string-length *a1-boot-content*) 0)))
+  ; Real boot-guard payload is "booted\n". Missing → "" ; read error → "ERR:…".
+  (and (string? *a1-boot-content*)
+       (>= (string-length *a1-boot-content*) 6)
+       (string=? (substring *a1-boot-content* 0 6) "booted")))
 (display "policy_agent: early-guard reentry?=")
 (display *a1-reentry*)
 (newline)
@@ -313,7 +318,7 @@
     (set! *port* (string->number e))
     #t))
 (set! *boot-guard-file*
-  (string-append "/work/.ar-agent-booted-" (number->string *port*) ".flag"))
+  (string-append ".ar-agent-booted-" (number->string *port*) ".flag"))
 
 (let ((e (getenv "AURA_REDIS_POLICY_MS")))
   (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
@@ -1295,6 +1300,11 @@
               (begin
                 (set! *poison-active* #t)
                 (set! *poison-trips* (+ *poison-trips* 1))
+                ; A8: poison storm is a reason to leave meta-freeze — defensive
+                ; swap needs base tick_ms, not the cost-gate stretch.
+                (if *meta-frozen*
+                  (exit-auto-freeze! "poison_storm")
+                  #t)
                 (audit-append! "poison-defense" *profile-name* "defensive" "unique_set_storm")
                 (if *canary-on*
                   (canary-start! "defensive" "unique_set_storm")

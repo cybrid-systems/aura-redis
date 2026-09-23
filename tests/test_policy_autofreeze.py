@@ -72,6 +72,8 @@ def start_agent() -> str:
             "AURA_REDIS_DENY_PLUGIN": "1",
             "AURA_REDIS_FITNESS_MUTATE": "0",
             "AURA_REDIS_FROZEN": "1",
+            # Isolate A8 from A19: miss-spike SETs look like unique-SET storms.
+            "AURA_REDIS_POISON_DEFENSE": "0",
             "AURA_REDIS_SEED_PROFILE": "normal",
             "AURA_REDIS_AUTO_FREEZE": "1",
             "AURA_REDIS_AUTO_FREEZE_STABLE_TICKS": "6",
@@ -211,17 +213,36 @@ def main() -> int:
             return 100.0 * h / max(h + m, 1.0)
         freeze_hit = hit_pct(info)
 
-        # Phase 2: miss spike → auto_unfreeze
+        # Phase 2: miss spike → auto_unfreeze (GET-only; no unique SETs)
         stop.set()
         time.sleep(0.2)
         stop2 = threading.Event()
-        t_miss = threading.Thread(target=stable_load, args=(stop2, False), daemon=True)
+
+        def miss_only(stop_ev: threading.Event) -> None:
+            i = 0
+            while not stop_ev.is_set():
+                try:
+                    with socket.create_connection(("127.0.0.1", PORT), timeout=2) as s:
+                        for _ in range(40):
+                            redis_call(s, "GET", f"missing{i % 8000}")
+                            i += 1
+                except Exception:
+                    time.sleep(0.05)
+
+        t_miss = threading.Thread(target=miss_only, args=(stop2,), daemon=True)
         t_miss.start()
         wait_log(cid, ["auto_unfreeze reason="], timeout=30)
+        # Heartbeat is authoritative; log can lag or pre-match after rebind.
+        hb_uf = {}
+        for _ in range(50):
+            hb_uf = parse_hb()
+            if hb_uf.get("meta_frozen") == "0" and int(hb_uf.get("unfreeze_count", "0") or 0) >= 1:
+                break
+            time.sleep(0.1)
         stop2.set()
-        hb_uf = parse_hb()
-        assert hb_uf.get("meta_frozen") == "0", hb_uf
+        assert hb_uf.get("meta_frozen") == "0", (hb_uf, agent_logs(cid)[-2000:])
         assert int(hb_uf.get("unfreeze_count", "0")) >= 1, hb_uf
+        assert hb_uf.get("poison_active", "0") == "0", hb_uf
 
         audit = AUDIT.read_text(errors="replace") if AUDIT.exists() else ""
         assert "op=auto_freeze" in audit or "auto_freeze" in agent_logs(cid)
