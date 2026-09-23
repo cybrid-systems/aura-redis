@@ -15,6 +15,9 @@ Two independent scoreboards — **never collapse** ops/s and regret into one num
 
 ---
 
+> **Adaptive hit-quality SSOT:** `python3 scripts/bench_regret.py phase_marathon` (Aura `policy_agent`, long phases). Short `scripts/bench_hit_vs_redis.py` **adaptive** rows are **non-citeable** until harness parity — cite **§2A** for adaptive; **§2B** only for fixed-kernel vs Redis tables. Never claim memtier adaptive wins; keep dual scoreboards.
+
+
 ## Scoreboard 1 — Throughput (ops/s)
 
 Frozen matrix: **1c×1t**, SET:GET=**1:10**, 32B, key 1..10000 **R:R**, `-n 20000`.
@@ -61,7 +64,7 @@ Same harness as [`perf-eval.md`](perf-eval.md): `maxmemory=120000`, Aura `policy
 
 ### 2B) Side-by-side vs Redis fixed policy (`bench_hit_vs_redis.py`)
 
-Redis has **no** live EVICT/PIN/LAYOUT. Baseline = `allkeys-lru` / `allkeys-lfu` with headroom ≈150KiB above Redis idle `used_memory` (~1MB). Aura adaptive on this *short* harness often tracks LRU (agent needs longer phases) — use **2A** for adaptive cites; use **2B** for fixed-kernel vs Redis tables.
+Redis has **no** live EVICT/PIN/LAYOUT. Baseline = `allkeys-lru` / `allkeys-lfu` with headroom ≈150KiB above Redis idle `used_memory` (~1MB). Aura adaptive on this *short* harness often tracks LRU (agent needs longer phases). **§2B adaptive rows are non-citeable** until harness parity — use **§2A** (`bench_regret.py phase_marathon`) for adaptive cites; use **§2B** for fixed-kernel vs Redis tables only.
 
 | Workload | Engine | Policy | Hit% | Useful GET hits | Misses | Notes |
 |----------|--------|--------|------|-----------------|--------|-------|

@@ -56,6 +56,24 @@ dev image; runners fall back to `ghcr.io/cybrid-systems/dev:v1.0.7` when needed.
 | `ci-bench.sh` | Regret packs (`phase_marathon`, zipf, hot_protect, poison_heal; full via env) | **no** |
 | `bench-vs-redis.sh` | Memtier ops/s + hit-quality vs `redis:7-alpine` dual scoreboard | **no** |
 
+
+
+### GitHub Actions (Tier 2)
+
+| Workflow | Trigger | What |
+|----------|---------|------|
+| `.github/workflows/ci.yml` | push/PR `main`, `workflow_dispatch` | Fetch+build Aura → `smoke-test.sh` → `ci-prod.sh` (short soak via `AURA_REDIS_SOAK_SEC`, default 30s) |
+| `.github/workflows/ci-bench.yml` | nightly cron + `workflow_dispatch` | `ci-bench.sh` (long regret; optional FULL) + `soak-prod.sh` (default 3600s; override input) |
+
+```bash
+# Local mirrors
+./scripts/ci-prod.sh
+./scripts/ci-bench.sh
+AURA_REDIS_SOAK_SEC=120 ./scripts/soak-prod.sh
+```
+
+Hour-scale soak covers eviction + TTL + typed keys + optional `policy_agent` + client reconnect; keep default `ci-prod` soak short.
+
 ## Sandbox profile (A11)
 
 ```bash

@@ -92,7 +92,7 @@ Make ops trust live code change: durable audit, canary, prod-shaped sandbox.
 | **Exit criteria** | Doc + demo path without `AURA_SANDBOX=off` when TA available; `scripts/sandbox-policy-profile.sh` updated |
 | **Depends-on** | sandbox profile |
 | **Estimate** | 1d |
-| **Status** | **PARTIAL** (2026-09-23): profile `off|restricted` + `smoke-sandbox-profile.sh`; live agent still needs `AURA_SANDBOX=off` — Restricted `grant-effect!` returns #f without Tenant Admin on this Aura pin |
+| **Status** | **PARTIAL** (2026-09-23): profile `off|restricted` + `smoke-sandbox-profile.sh`; live agent still needs `AURA_SANDBOX=off` — Restricted `grant-effect!` returns #f without Tenant Admin on this Aura pin. **Tier 2 risk acceptance:** production profile = Soft/`AURA_SANDBOX=off` + `AURA_REDIS_DENY_PLUGIN=1` — see [`prod-profile.md`](prod-profile.md). |
 
 ---
 

@@ -16,8 +16,8 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.17 (HASH/LIST/ZSET/MULTI/PubSub).
 | `AUTH` | 2 or 3 | `+OK` / WRONGPASS | `AUTH <pass>` or `AUTH <user> <pass>` (user ignored); need `--requirepass` / `AURA_REDIS_REQUIREPASS` |
 | `HELLO` | 1+ | array map | Minimal stub; optional `AUTH` inline; allowed pre-AUTH |
 | `CONFIG` | GET 3 / SET 4 | array / `+OK` | P1.1+P1.12+P2.13: `maxmemory`, `requirepass`, `protected-mode`, `evict-samples`, `bind`, `maxclients`, `timeout`, `tcp-backlog`, `slowlog-log-slower-than`, `dir`, `dbfilename`, `shadow-policy`, `shadow-sample-pct`, `hot-soft-cap-pct`, `hot-soft-cap-min`, `hot-promote-on-get` |
-| `SAVE` | 1 | `+OK` | P2.13 sync `aura-rdb` snapshot |
-| `BGSAVE` | 1 | `+OK` | P2.13 fork child (or sync fallback) |
+| `SAVE` | 1 | `+OK` | P2.13 sync aura-rdb **v2** (string+HASH+LIST+ZSET+TTL) |
+| `BGSAVE` | 1 | `+OK` | P2.13 fork child aura-rdb v2 (or sync fallback) |
 | `REPLICAOF` / `SLAVEOF` | 3 | `+OK` | P2.14: `host port` or `NO ONE`; replica read-only |
 | `SYNC` | 1 | (stream) | P2.14 internal: full sync + feed; not for apps |
 | `QUIT` | any | `+OK` then close | Allowed pre-AUTH |

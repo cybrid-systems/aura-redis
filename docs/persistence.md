@@ -4,7 +4,7 @@
 
 **Optional warm-start:** custom **`aura-rdb`** snapshot for **string keys + TTL** (not Redis RDB byte-compatible).
 
-**P3.16 note:** `SAVE`/`BGSAVE` persist **string keys only**. HASH/LIST/ZSET keys are skipped until a later encoding; document honestly — restart after SAVE loses non-string keys.
+**Typed keys (Tier 2):** `SAVE`/`BGSAVE` persist **string + HASH + LIST + ZSET** with TTL (**aura-rdb v2**). Legacy **v1** string-only dumps still load. Not Redis-RDB compatible.
 
 ## Knobs
 
@@ -22,19 +22,26 @@ Path = `{dir}/{dbfilename}`. Load runs once at process start (missing file = emp
 | `SAVE` | Synchronous write (temp + `rename`); `+OK` / `ERR save failed` |
 | `BGSAVE` | `fork` child writes the same format (COW); falls back to sync `SAVE` if `fork` fails. Parent reaps in the serve loop. |
 
-## Format (`aura-rdb` v1)
+## Format (`aura-rdb` v2)
 
-Little-endian, documented custom format (prefer robust simplicity over Redis RDB subset):
+Little-endian custom format (not Redis RDB):
 
 ```
-magic[8]     = "AURARDB\0"
-version u32  = 1
-count   u64  = number of live string entries
+magic[8]     = "AURARDB" + NUL
+version u32  = 2
+count   u64  = number of live entries (all types)
 repeated count times:
-  klen u32 | key[klen] | vlen u32 | val[vlen] | expire_at u64
+  type u8              # 0=string 1=hash 2=list 3=zset
+  klen u32 | key[klen]
+  expire_at u64        # 0 = none; absolute ms
+  payload:
+    string: vlen u32 | val[vlen]
+    hash:   nfields u32 | repeated (flen|field|vlen|val)
+    list:   nitems u32 | repeated (vlen|val)   # head→tail
+    zset:   nmembers u32 | repeated (score f64 LE | mlen|member)
 ```
 
-`expire_at` is absolute deadline ms (`0` = no TTL), matching the in-memory clock. Expired keys are skipped on save and on load.
+**v1 load:** still supported (no type byte; string payload only).
 
 Pinned / LFU / layout tier state is **not** persisted (keys reload into flat hot tier).
 
@@ -50,7 +57,7 @@ Pinned / LFU / layout tier state is **not** persisted (keys reload into flat hot
 
 ## INFO (Persistence)
 
-Flat keys (policy_agent-safe): `loading`, `aof_enabled`, `rdb_bgsave_in_progress`, `rdb_last_save_time`, `rdb_last_bgsave_status`, `dir`, `dbfilename`, `aura_rdb:1`.
+Flat keys (policy_agent-safe): `loading`, `aof_enabled`, `rdb_bgsave_in_progress`, `rdb_last_save_time`, `rdb_last_bgsave_status`, `dir`, `dbfilename`, `aura_rdb:2`.
 
 ## Test
 
@@ -58,7 +65,7 @@ Flat keys (policy_agent-safe): `loading`, `aof_enabled`, `rdb_bgsave_in_progress
 python3 tests/test_prod_rdb.py
 ```
 
-Exit criteria: `SET` + `EXPIRE` → `SAVE` → kill → restart with same `--dir`/`--dbfilename` → `GET`/`TTL` restored.
+Exit criteria: strings + TTL + HASH/LIST/ZSET → `SAVE` → kill → restart → typed GET/HGET/LRANGE/ZSCORE + TTL restored (`tests/test_prod_rdb.py`).
 
 ## Replication (P2.14)
 

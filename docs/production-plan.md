@@ -156,6 +156,40 @@ Production P0–P3 (single-node RESP cache/KV) is **complete**. Compatibility wo
 
 Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/.so as the moat. Redis-shaped Aura core patches stay out of scope.
 
+
+
+---
+
+## Tier 2 — staging / canary checklist
+
+**Goal:** run a single-node aura-redis canary with honest ops docs, typed persistence, hour-scale soak, and CI gates — without claiming Cluster/Lua/ACL or citeable short-harness adaptive wins.
+
+| # | Item | Status | Evidence |
+|---|------|--------|----------|
+| T2.1 | GitHub Actions: smoke + `ci-prod.sh` on push/PR | **DONE** | `.github/workflows/ci.yml` |
+| T2.2 | Nightly / `workflow_dispatch` `ci-bench.sh` + hour `soak-prod.sh` | **DONE** | `.github/workflows/ci-bench.yml` |
+| T2.3 | Hour-scale soak script (evict+TTL+typed+optional agent+reconnect) | **DONE** | `scripts/soak-prod.sh` (default 3600s; short override for CI) |
+| T2.4 | Typed aura-rdb HASH/LIST/ZSET SAVE/LOAD | **DONE** | `native/src/ar_rdb.c` v2; `tests/test_prod_rdb.py` typed roundtrip |
+| T2.5 | Ops runbook v0 | **DONE** | [`runbook.md`](runbook.md) |
+| T2.6 | Client allowlist (Tier 2 intake) | **DONE** | [`client-allowlist.md`](client-allowlist.md) |
+| T2.7 | Adaptive gate SSOT docs | **DONE** | [`redis-compare.md`](redis-compare.md) · [`perf-eval.md`](perf-eval.md) · runbook §8 |
+| T2.8 | A11 prod-profile risk acceptance | **DONE** (Restricted still PARTIAL) | [`prod-profile.md`](prod-profile.md) |
+
+**Deferred / blocked:** A11 Restricted sandbox without Soft still needs Tenant Admin. Cluster/SCAN/Streams/Lua/ACL remain non-goals. Short `bench_hit_vs_redis` adaptive cites remain non-citeable.
+
+**How to run Tier 2 gates locally:**
+
+```bash
+export AURA_REDIS_DENY_PLUGIN=1
+./scripts/build-native.sh
+python3 tests/test_prod_rdb.py          # typed RDB
+AURA_REDIS_SOAK_SEC=60 ./scripts/soak-prod.sh
+./scripts/ci-prod.sh                    # wall-time gate (short soak)
+# long (optional): ./scripts/ci-bench.sh
+# hour soak: ./scripts/soak-prod.sh
+```
+
+
 ## Changelog (production track)
 
 | Date (CST) | Item | Notes |
@@ -184,3 +218,5 @@ Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/
 | 2026-09-23 | **P3 COMPLETE** | HASH+LIST+ZSET+MULTI+Pub/Sub on main |
 | 2026-09-23 | **Aura demand map** | [`docs/aura-demand.md`](aura-demand.md) — Aura differentiation track after P0–P3; mutation/evolve Δ=0 as open demand |
 | 2026-09-23 | **Strong-narrative plan** | [`docs/strong-narrative-plan.md`](strong-narrative-plan.md) — native-first SN0–SN3 execution |
+
+| 2026-09-23 | **Tier 2** | GHA ci-prod + nightly bench/soak; typed RDB v2; soak-prod; runbook; allowlist; prod-profile; SSOT docs |

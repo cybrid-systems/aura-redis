@@ -1,5 +1,24 @@
 # aura-redis perf log
 
+## 2026-09-23 09:59:12 CST — tip `ce55c70` (bench-vs-redis)
+
+Frozen memtier: **1c×1t**, SET:GET=**1:10**, 32B, key 1..10000 **R:R**.
+
+| Engine | pipeline | Totals ops/s | vs Redis |
+|--------|----------|--------------|----------|
+| redis:7-alpine | 1 | 40412.37 | 1.00 |
+| aura-redis C EVICT=lru | 1 | 42546.85 | **1.053** |
+| aura-redis C EVICT=lfu | 1 | 45521.07 | **1.126** |
+| aura-redis C EVICT=slru | 1 | 46340.49 | **1.147** |
+| redis:7-alpine | 16 | 409165.30 | 1.00 |
+| aura-redis C EVICT=lru | 16 | 475963.83 | **1.163** |
+| aura-redis C EVICT=lfu | 16 | 303817.47 | **0.743** |
+| aura-redis C EVICT=slru | 16 | 422101.22 | **1.032** |
+
+Full dual scoreboard: [`redis-compare.md`](redis-compare.md).
+
+---
+
 ## 2026-09-23 09:57:16 CST — tip `abfd3f8` (bench-vs-redis dual scoreboard)
 
 Frozen memtier: **1c×1t**, SET:GET=**1:10**, 32B, key 1..10000 **R:R**, `-n 20000`.  

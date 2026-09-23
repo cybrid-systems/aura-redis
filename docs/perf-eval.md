@@ -1,5 +1,8 @@
 # aura-redis end-to-end performance evaluation
 
+> **Hit-quality SSOT:** cite `scripts/bench_regret.py phase_marathon` (and this doc's marathon table). Short `bench_hit_vs_redis.py` adaptive rows are non-citeable — see [`redis-compare.md`](redis-compare.md).
+
+
 > **Citeable Redis dual scoreboard (throughput + hit quality):** [`redis-compare.md`](redis-compare.md) (2026-09-23 CST).
 > Fresh marathon: adaptive **100%** / 1956 vs LRU **81.8%** / LFU **36.1%** (+18.2pp / +63.9pp). Throughput p=1 aura-lru **1.065×** redis; p=16 **1.115×**.
 

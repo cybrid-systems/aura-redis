@@ -1380,7 +1380,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         "rdb_last_bgsave_status:%s\n"
         "dir:%s\n"
         "dbfilename:%s\n"
-        "aura_rdb:1\n"
+        "aura_rdb:2\n"
         "# Aura\n"
         "evict:%s\n"
         "layout:%s\n"

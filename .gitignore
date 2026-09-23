@@ -14,3 +14,6 @@ server.pid
 # Native build
 native/build/
 .ar-agent-booted-*.flag
+
+.ar-policy-pin-*.pin
+.ar-policy-audit-*.log

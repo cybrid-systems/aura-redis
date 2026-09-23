@@ -1,5 +1,5 @@
-/* P2.13 — optional aura-rdb snapshot (string keys + TTL warm-start).
- * P3.16: non-string types (HASH/LIST/ZSET) are skipped on SAVE — see docs/persistence.md. */
+/* P2.13 / Tier-2 — aura-rdb snapshot with typed HASH/LIST/ZSET roundtrip.
+ * v1 = string-only (legacy load). v2 = typed (current SAVE). See docs/persistence.md. */
 #include "ar_internal.h"
 
 #include <errno.h>
@@ -14,7 +14,12 @@
 
 #define AURA_RDB_MAGIC "AURARDB\0"
 #define AURA_RDB_MAGIC_LEN 8
-#define AURA_RDB_VERSION 1u
+#define AURA_RDB_VERSION_V1 1u
+#define AURA_RDB_VERSION 2u
+#define AURA_RDB_MAX_BLOB (16u * 1024u * 1024u)
+#define AURA_RDB_MAX_ELEMS 1000000u
+
+static int wr_u8(FILE* f, uint8_t v) { return fwrite(&v, 1, 1, f) == 1; }
 
 static int wr_u32(FILE* f, uint32_t v) {
   unsigned char b[4] = {(unsigned char)v, (unsigned char)(v >> 8),
@@ -28,6 +33,24 @@ static int wr_u64(FILE* f, uint64_t v) {
     b[i] = (unsigned char)(v >> (8 * i));
   return fwrite(b, 1, 8, f) == 8;
 }
+
+static int wr_f64(FILE* f, double d) {
+  unsigned char b[8];
+  memcpy(b, &d, 8);
+  return fwrite(b, 1, 8, f) == 8;
+}
+
+static int wr_blob(FILE* f, const void* p, size_t n) {
+  if (n > 0x7fffffffu)
+    return 0;
+  if (!wr_u32(f, (uint32_t)n))
+    return 0;
+  if (n && fwrite(p, 1, n, f) != n)
+    return 0;
+  return 1;
+}
+
+static int rd_u8(FILE* f, uint8_t* out) { return fread(out, 1, 1, f) == 1; }
 
 static int rd_u32(FILE* f, uint32_t* out) {
   unsigned char b[4];
@@ -49,75 +72,152 @@ static int rd_u64(FILE* f, uint64_t* out) {
   return 1;
 }
 
+static int rd_f64(FILE* f, double* out) {
+  unsigned char b[8];
+  if (fread(b, 1, 8, f) != 8)
+    return 0;
+  memcpy(out, b, 8);
+  return 1;
+}
+
+static int rd_blob(FILE* f, char** out, uint32_t* out_len) {
+  uint32_t n = 0;
+  if (!rd_u32(f, &n) || n > AURA_RDB_MAX_BLOB)
+    return 0;
+  char* p = (char*)malloc(n ? n : 1);
+  if (!p)
+    return 0;
+  if (n && fread(p, 1, n, f) != n) {
+    free(p);
+    return 0;
+  }
+  *out = p;
+  *out_len = n;
+  return 1;
+}
+
 int ar_rdb_build_path(ArCore* core, char* out, size_t outsz) {
   if (!core || !out || outsz < 4)
     return 0;
-  const char* dir =
-      (core->rdb_dir[0]) ? core->rdb_dir : ".";
+  const char* dir = (core->rdb_dir[0]) ? core->rdb_dir : ".";
   const char* name =
       (core->rdb_filename[0]) ? core->rdb_filename : "dump.aura-rdb";
   int n = snprintf(out, outsz, "%s/%s", dir, name);
   return (n > 0 && (size_t)n < outsz) ? 1 : 0;
 }
 
+static int entry_live(const ArEntry* e, uint64_t now) {
+  if (!e)
+    return 0;
+  if (e->expire_at && now >= e->expire_at)
+    return 0;
+  return 1;
+}
+
 static uint64_t count_live_entries(ArCore* core, uint64_t now) {
   uint64_t n = 0;
   for (size_t i = 0; i < core->nbuckets; ++i) {
     for (ArEntry* e = core->buckets[i]; e; e = e->next) {
-      if (e->type != AR_TYPE_STRING)
-        continue; /* P3.16: RDB string-only until later */
-      if (e->expire_at && now >= e->expire_at)
-        continue;
-      n++;
+      if (entry_live(e, now))
+        n++;
     }
   }
   if (core->cold_buckets) {
     for (size_t i = 0; i < core->cold_nbuckets; ++i) {
       for (ArEntry* e = core->cold_buckets[i]; e; e = e->next) {
-        if (e->type != AR_TYPE_STRING)
-          continue;
-        if (e->expire_at && now >= e->expire_at)
-          continue;
-        n++;
+        if (entry_live(e, now))
+          n++;
       }
     }
   }
   return n;
 }
 
-static int write_entry(FILE* f, ArEntry* e) {
-  if (e->klen > 0x7fffffffu || e->vlen > 0x7fffffffu)
+static int write_hash(FILE* f, const ArHash* h) {
+  if (!h)
+    return wr_u32(f, 0);
+  if (!wr_u32(f, (uint32_t)h->nfields))
     return 0;
-  if (!wr_u32(f, (uint32_t)e->klen))
+  uint32_t written = 0;
+  for (size_t i = 0; i < h->nbuckets; ++i) {
+    for (ArHashField* fld = h->buckets[i]; fld; fld = fld->next) {
+      if (!wr_blob(f, fld->field, fld->flen))
+        return 0;
+      if (!wr_blob(f, fld->val, fld->vlen))
+        return 0;
+      written++;
+    }
+  }
+  return written == (uint32_t)h->nfields;
+}
+
+static int write_list(FILE* f, const ArList* l) {
+  if (!l)
+    return wr_u32(f, 0);
+  if (!wr_u32(f, (uint32_t)l->len))
     return 0;
-  if (e->klen && fwrite(e->key, 1, e->klen, f) != e->klen)
+  uint32_t written = 0;
+  for (ArListNode* n = l->head; n; n = n->next) {
+    if (!wr_blob(f, n->val, n->vlen))
+      return 0;
+    written++;
+  }
+  return written == (uint32_t)l->len;
+}
+
+static int write_zset(FILE* f, const ArZSet* z) {
+  if (!z)
+    return wr_u32(f, 0);
+  if (!wr_u32(f, (uint32_t)z->len))
     return 0;
-  if (!wr_u32(f, (uint32_t)e->vlen))
-    return 0;
-  if (e->vlen && fwrite(e->val, 1, e->vlen, f) != e->vlen)
-    return 0;
-  if (!wr_u64(f, e->expire_at))
-    return 0;
+  for (size_t i = 0; i < z->len; ++i) {
+    if (!wr_f64(f, z->arr[i].score))
+      return 0;
+    if (!wr_blob(f, z->arr[i].member, z->arr[i].mlen))
+      return 0;
+  }
   return 1;
 }
 
-static int write_table(FILE* f, ArEntry** table, size_t nb, uint64_t now) {
+static int write_entry_v2(FILE* f, ArEntry* e) {
+  if (e->klen > 0x7fffffffu)
+    return 0;
+  if (!wr_u8(f, e->type))
+    return 0;
+  if (!wr_blob(f, e->key, e->klen))
+    return 0;
+  if (!wr_u64(f, e->expire_at))
+    return 0;
+  switch (e->type) {
+    case AR_TYPE_STRING:
+      if (e->vlen > 0x7fffffffu)
+        return 0;
+      return wr_blob(f, e->val ? e->val : "", e->vlen);
+    case AR_TYPE_HASH:
+      return write_hash(f, (const ArHash*)e->obj);
+    case AR_TYPE_LIST:
+      return write_list(f, (const ArList*)e->obj);
+    case AR_TYPE_ZSET:
+      return write_zset(f, (const ArZSet*)e->obj);
+    default:
+      return 0;
+  }
+}
+
+static int write_table_v2(FILE* f, ArEntry** table, size_t nb, uint64_t now) {
   if (!table)
     return 1;
   for (size_t i = 0; i < nb; ++i) {
     for (ArEntry* e = table[i]; e; e = e->next) {
-      if (e->type != AR_TYPE_STRING)
+      if (!entry_live(e, now))
         continue;
-      if (e->expire_at && now >= e->expire_at)
-        continue;
-      if (!write_entry(f, e))
+      if (!write_entry_v2(f, e))
         return 0;
     }
   }
   return 1;
 }
 
-/* Write snapshot to path (caller supplies final path; uses .tmp + rename). */
 static int ar_rdb_save_to_path(ArCore* core, const char* path) {
   char tmp[640];
   int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
@@ -135,9 +235,9 @@ static int ar_rdb_save_to_path(ArCore* core, const char* path) {
     ok = 0;
   if (ok && !wr_u64(f, nlive))
     ok = 0;
-  if (ok && !write_table(f, core->buckets, core->nbuckets, now))
+  if (ok && !write_table_v2(f, core->buckets, core->nbuckets, now))
     ok = 0;
-  if (ok && !write_table(f, core->cold_buckets, core->cold_nbuckets, now))
+  if (ok && !write_table_v2(f, core->cold_buckets, core->cold_nbuckets, now))
     ok = 0;
   if (ok && fflush(f) != 0)
     ok = 0;
@@ -178,7 +278,7 @@ void ar_rdb_poll_bgsave(ArCore* core) {
   int status = 0;
   pid_t r = waitpid(core->rdb_bgsave_pid, &status, WNOHANG);
   if (r == 0)
-    return; /* still running */
+    return;
   if (r == core->rdb_bgsave_pid) {
     int ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
     core->rdb_last_bgsave_ok = ok ? 1 : 0;
@@ -196,22 +296,294 @@ int ar_rdb_bgsave(ArCore* core) {
     return 0;
   ar_rdb_poll_bgsave(core);
   if (core->rdb_bgsave_pid > 0)
-    return -1; /* already in progress */
+    return -1;
   char path[512];
   if (!ar_rdb_build_path(core, path, sizeof(path)))
     return 0;
   pid_t pid = fork();
-  if (pid < 0) {
-    /* fork failed — fall back to sync SAVE */
+  if (pid < 0)
     return ar_rdb_save(core) ? 1 : 0;
-  }
   if (pid == 0) {
-    /* Child: snapshot via COW; do not touch network. */
     int ok = ar_rdb_save_to_path(core, path);
     _exit(ok ? 0 : 1);
   }
   core->rdb_bgsave_pid = (int)pid;
   return 1;
+}
+
+static int apply_expire_abs(ArCore* core, const char* key, size_t klen,
+                            uint64_t exp, uint64_t now) {
+  if (!exp)
+    return 1;
+  if (now >= exp)
+    return 1;
+  int64_t sec = (int64_t)((exp - now + 999ull) / 1000ull);
+  if (sec <= 0)
+    sec = 1;
+  return ar_expire(core, key, klen, sec) ? 1 : 0;
+}
+
+/* Drain typed payload without inserting (expired key on load). */
+static int drain_hash_payload(FILE* f) {
+  uint32_t nfields = 0;
+  if (!rd_u32(f, &nfields) || nfields > AURA_RDB_MAX_ELEMS)
+    return 0;
+  for (uint32_t i = 0; i < nfields; ++i) {
+    char *field = NULL, *val = NULL;
+    uint32_t flen = 0, vlen = 0;
+    if (!rd_blob(f, &field, &flen) || !rd_blob(f, &val, &vlen)) {
+      free(field);
+      free(val);
+      return 0;
+    }
+    free(field);
+    free(val);
+  }
+  return 1;
+}
+
+static int drain_list_payload(FILE* f) {
+  uint32_t nitems = 0;
+  if (!rd_u32(f, &nitems) || nitems > AURA_RDB_MAX_ELEMS)
+    return 0;
+  for (uint32_t i = 0; i < nitems; ++i) {
+    char* val = NULL;
+    uint32_t vlen = 0;
+    if (!rd_blob(f, &val, &vlen))
+      return 0;
+    free(val);
+  }
+  return 1;
+}
+
+static int drain_zset_payload(FILE* f) {
+  uint32_t nmembers = 0;
+  if (!rd_u32(f, &nmembers) || nmembers > AURA_RDB_MAX_ELEMS)
+    return 0;
+  for (uint32_t i = 0; i < nmembers; ++i) {
+    double score = 0;
+    char* member = NULL;
+    uint32_t mlen = 0;
+    if (!rd_f64(f, &score) || !rd_blob(f, &member, &mlen)) {
+      free(member);
+      return 0;
+    }
+    free(member);
+  }
+  return 1;
+}
+
+static int load_one_v1(ArCore* core, FILE* f, uint64_t now, uint64_t* loaded,
+                       uint64_t* skipped_expired) {
+  char* key = NULL;
+  char* val = NULL;
+  uint32_t klen = 0, vlen = 0;
+  uint64_t exp = 0;
+  if (!rd_u32(f, &klen) || klen > AURA_RDB_MAX_BLOB)
+    return 0;
+  key = (char*)malloc(klen ? klen : 1);
+  if (!key)
+    return 0;
+  if (klen && fread(key, 1, klen, f) != klen) {
+    free(key);
+    return 0;
+  }
+  if (!rd_u32(f, &vlen) || vlen > AURA_RDB_MAX_BLOB) {
+    free(key);
+    return 0;
+  }
+  val = (char*)malloc(vlen ? vlen : 1);
+  if (!val) {
+    free(key);
+    return 0;
+  }
+  if (vlen && fread(val, 1, vlen, f) != vlen) {
+    free(key);
+    free(val);
+    return 0;
+  }
+  if (!rd_u64(f, &exp)) {
+    free(key);
+    free(val);
+    return 0;
+  }
+  if (exp && now >= exp) {
+    (*skipped_expired)++;
+    free(key);
+    free(val);
+    return 1;
+  }
+  if (!ar_entry_set_ex(core, key, (size_t)klen, val, (size_t)vlen, exp)) {
+    free(key);
+    free(val);
+    return 0;
+  }
+  (*loaded)++;
+  free(key);
+  free(val);
+  return 1;
+}
+
+static int load_one_v2(ArCore* core, FILE* f, uint64_t now, uint64_t* loaded,
+                       uint64_t* skipped_expired) {
+  uint8_t type = 0;
+  if (!rd_u8(f, &type))
+    return 0;
+  char* key = NULL;
+  uint32_t klen = 0;
+  if (!rd_blob(f, &key, &klen))
+    return 0;
+  uint64_t exp = 0;
+  if (!rd_u64(f, &exp)) {
+    free(key);
+    return 0;
+  }
+  int expired = (exp && now >= exp) ? 1 : 0;
+  if (expired)
+    (*skipped_expired)++;
+
+  int ok = 1;
+  int wt = 0;
+  switch (type) {
+    case AR_TYPE_STRING: {
+      char* val = NULL;
+      uint32_t vlen = 0;
+      if (!rd_blob(f, &val, &vlen)) {
+        ok = 0;
+        break;
+      }
+      if (!expired) {
+        if (!ar_entry_set_ex(core, key, (size_t)klen, val, (size_t)vlen, exp))
+          ok = 0;
+        else
+          (*loaded)++;
+      }
+      free(val);
+      break;
+    }
+    case AR_TYPE_HASH: {
+      if (expired) {
+        ok = drain_hash_payload(f);
+        break;
+      }
+      uint32_t nfields = 0;
+      if (!rd_u32(f, &nfields) || nfields > AURA_RDB_MAX_ELEMS) {
+        ok = 0;
+        break;
+      }
+      for (uint32_t i = 0; i < nfields; ++i) {
+        char *field = NULL, *val = NULL;
+        uint32_t flen = 0, vlen = 0;
+        if (!rd_blob(f, &field, &flen) || !rd_blob(f, &val, &vlen)) {
+          free(field);
+          free(val);
+          ok = 0;
+          break;
+        }
+        const char* fields[1] = {field};
+        size_t flens[1] = {flen};
+        const char* vals[1] = {val};
+        size_t vlens[1] = {vlen};
+        wt = 0;
+        if (ar_hash_hset(core, key, (size_t)klen, 1, fields, flens, vals, vlens,
+                         &wt) < 0) {
+          free(field);
+          free(val);
+          ok = 0;
+          break;
+        }
+        free(field);
+        free(val);
+      }
+      if (ok) {
+        if (!apply_expire_abs(core, key, (size_t)klen, exp, now))
+          ok = 0;
+        else
+          (*loaded)++;
+      }
+      break;
+    }
+    case AR_TYPE_LIST: {
+      if (expired) {
+        ok = drain_list_payload(f);
+        break;
+      }
+      uint32_t nitems = 0;
+      if (!rd_u32(f, &nitems) || nitems > AURA_RDB_MAX_ELEMS) {
+        ok = 0;
+        break;
+      }
+      for (uint32_t i = 0; i < nitems; ++i) {
+        char* val = NULL;
+        uint32_t vlen = 0;
+        if (!rd_blob(f, &val, &vlen)) {
+          ok = 0;
+          break;
+        }
+        const char* vals[1] = {val};
+        size_t vlens[1] = {vlen};
+        wt = 0;
+        /* RPUSH (left=0) preserves head→tail order */
+        if (ar_list_push(core, key, (size_t)klen, 0, 1, vals, vlens, &wt) < 0) {
+          free(val);
+          ok = 0;
+          break;
+        }
+        free(val);
+      }
+      if (ok) {
+        if (!apply_expire_abs(core, key, (size_t)klen, exp, now))
+          ok = 0;
+        else
+          (*loaded)++;
+      }
+      break;
+    }
+    case AR_TYPE_ZSET: {
+      if (expired) {
+        ok = drain_zset_payload(f);
+        break;
+      }
+      uint32_t nmembers = 0;
+      if (!rd_u32(f, &nmembers) || nmembers > AURA_RDB_MAX_ELEMS) {
+        ok = 0;
+        break;
+      }
+      for (uint32_t i = 0; i < nmembers; ++i) {
+        double score = 0;
+        char* member = NULL;
+        uint32_t mlen = 0;
+        if (!rd_f64(f, &score) || !rd_blob(f, &member, &mlen)) {
+          free(member);
+          ok = 0;
+          break;
+        }
+        const char* members[1] = {member};
+        size_t mlens[1] = {mlen};
+        double scores[1] = {score};
+        wt = 0;
+        if (ar_zset_zadd(core, key, (size_t)klen, 1, scores, members, mlens,
+                         &wt) < 0) {
+          free(member);
+          ok = 0;
+          break;
+        }
+        free(member);
+      }
+      if (ok) {
+        if (!apply_expire_abs(core, key, (size_t)klen, exp, now))
+          ok = 0;
+        else
+          (*loaded)++;
+      }
+      break;
+    }
+    default:
+      ok = 0;
+      break;
+  }
+  free(key);
+  return ok;
 }
 
 int ar_rdb_load(ArCore* core) {
@@ -223,7 +595,7 @@ int ar_rdb_load(ArCore* core) {
   FILE* f = fopen(path, "rb");
   if (!f) {
     if (errno == ENOENT)
-      return 1; /* missing = empty warm-start OK */
+      return 1;
     fprintf(stderr, "ar_rdb: cannot open %s: %s\n", path, strerror(errno));
     return 0;
   }
@@ -238,7 +610,7 @@ int ar_rdb_load(ArCore* core) {
   uint32_t ver = 0;
   if (ok && !rd_u32(f, &ver))
     ok = 0;
-  if (ok && ver != AURA_RDB_VERSION) {
+  if (ok && ver != AURA_RDB_VERSION && ver != AURA_RDB_VERSION_V1) {
     fprintf(stderr, "ar_rdb: unsupported version %u in %s\n", ver, path);
     ok = 0;
   }
@@ -254,60 +626,10 @@ int ar_rdb_load(ArCore* core) {
   uint64_t loaded = 0;
   uint64_t skipped_expired = 0;
   for (uint64_t i = 0; ok && i < nentries; ++i) {
-    uint32_t klen = 0, vlen = 0;
-    uint64_t exp = 0;
-    if (!rd_u32(f, &klen) || klen > (16u * 1024u * 1024u)) {
-      ok = 0;
-      break;
-    }
-    char* key = (char*)malloc(klen ? klen : 1);
-    if (!key) {
-      ok = 0;
-      break;
-    }
-    if (klen && fread(key, 1, klen, f) != klen) {
-      free(key);
-      ok = 0;
-      break;
-    }
-    if (!rd_u32(f, &vlen) || vlen > (16u * 1024u * 1024u)) {
-      free(key);
-      ok = 0;
-      break;
-    }
-    char* val = (char*)malloc(vlen ? vlen : 1);
-    if (!val) {
-      free(key);
-      ok = 0;
-      break;
-    }
-    if (vlen && fread(val, 1, vlen, f) != vlen) {
-      free(key);
-      free(val);
-      ok = 0;
-      break;
-    }
-    if (!rd_u64(f, &exp)) {
-      free(key);
-      free(val);
-      ok = 0;
-      break;
-    }
-    if (exp && now >= exp) {
-      skipped_expired++;
-      free(key);
-      free(val);
-      continue;
-    }
-    if (!ar_entry_set_ex(core, key, (size_t)klen, val, (size_t)vlen, exp)) {
-      free(key);
-      free(val);
-      ok = 0;
-      break;
-    }
-    loaded++;
-    free(key);
-    free(val);
+    if (ver == AURA_RDB_VERSION_V1)
+      ok = load_one_v1(core, f, now, &loaded, &skipped_expired);
+    else
+      ok = load_one_v2(core, f, now, &loaded, &skipped_expired);
   }
   fclose(f);
   core->rdb_loading = 0;
@@ -317,8 +639,8 @@ int ar_rdb_load(ArCore* core) {
     return 0;
   }
   fprintf(stderr,
-          "ar_rdb: loaded %llu keys from %s (skipped_expired=%llu)\n",
-          (unsigned long long)loaded, path,
+          "ar_rdb: loaded %llu keys (v%u) from %s (skipped_expired=%llu)\n",
+          (unsigned long long)loaded, ver, path,
           (unsigned long long)skipped_expired);
   return 1;
 }
@@ -342,7 +664,7 @@ int ar_core_set_rdb_filename(ArCore* core, const char* name) {
   if (!core || !name || !name[0])
     return 0;
   if (strchr(name, '/') || strchr(name, '\\'))
-    return 0; /* basename only */
+    return 0;
   if (strlen(name) >= sizeof(core->rdb_filename))
     return 0;
   snprintf(core->rdb_filename, sizeof(core->rdb_filename), "%s", name);

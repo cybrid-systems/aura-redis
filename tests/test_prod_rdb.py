@@ -95,7 +95,7 @@ def test_save_restart_restore() -> None:
                 assert isinstance(ttl2, int) and 100 <= ttl2 <= 120, ttl2
                 assert redis_call(sock, "SAVE") == "OK"
                 info = info_map(redis_call(sock, "INFO"))
-                assert info.get("aura_rdb") == "1"
+                assert info.get("aura_rdb") == "2"
                 assert int(info.get("rdb_last_save_time", "0")) > 0
                 assert info.get("dbfilename") == dbfilename
         finally:
@@ -155,9 +155,58 @@ def test_missing_dump_ok() -> None:
         shutil.rmtree(datadir, ignore_errors=True)
 
 
+
+
+def test_typed_roundtrip() -> None:
+    """HASH/LIST/ZSET survive SAVE → kill → restart (aura-rdb v2)."""
+    datadir = Path(tempfile.mkdtemp(prefix="aura-rdb-typed-"))
+    dbfilename = "typed.aura-rdb"
+    dump = datadir / dbfilename
+    try:
+        proc, log = start_server(datadir, dbfilename)
+        try:
+            with socket.create_connection(("127.0.0.1", PORT), timeout=5) as sock:
+                assert redis_call(sock, "HSET", "h1", "f1", "v1", "f2", "v2") == 2
+                assert redis_call(sock, "RPUSH", "l1", "a", "b", "c") == 3
+                assert redis_call(sock, "ZADD", "z1", "1.5", "m1", "2.5", "m2") == 2
+                assert redis_call(sock, "SET", "s1", "str") == "OK"
+                assert redis_call(sock, "EXPIRE", "h1", "300") == 1
+                assert redis_call(sock, "SAVE") == "OK"
+                info = info_map(redis_call(sock, "INFO"))
+                assert info.get("aura_rdb") == "2"
+        finally:
+            stop_kill(proc)
+
+        assert dump.is_file() and dump.stat().st_size > 16
+
+        proc2, log2 = start_server(datadir, dbfilename)
+        try:
+            with socket.create_connection(("127.0.0.1", PORT), timeout=5) as sock:
+                assert redis_call(sock, "TYPE", "h1") == "hash"
+                assert redis_call(sock, "HGET", "h1", "f1") == "v1"
+                assert redis_call(sock, "HGET", "h1", "f2") == "v2"
+                assert redis_call(sock, "HLEN", "h1") == 2
+                ttl_h = redis_call(sock, "TTL", "h1")
+                assert isinstance(ttl_h, int) and 1 <= ttl_h <= 300, ttl_h
+                assert redis_call(sock, "TYPE", "l1") == "list"
+                assert redis_call(sock, "LRANGE", "l1", "0", "-1") == ["a", "b", "c"]
+                assert redis_call(sock, "TYPE", "z1") == "zset"
+                assert redis_call(sock, "ZCARD", "z1") == 2
+                assert redis_call(sock, "ZSCORE", "z1", "m1") == "1.5"
+                assert redis_call(sock, "ZSCORE", "z1", "m2") == "2.5"
+                assert redis_call(sock, "GET", "s1") == "str"
+            print("typed HASH/LIST/ZSET SAVE→restart OK")
+        finally:
+            stop_kill(proc2)
+            print(log2.read_text(errors="replace")[-500:])
+    finally:
+        shutil.rmtree(datadir, ignore_errors=True)
+
+
 def main() -> int:
     build()
     test_save_restart_restore()
+    test_typed_roundtrip()
     test_missing_dump_ok()
     print("test_prod_rdb: ALL PASSED")
     return 0
