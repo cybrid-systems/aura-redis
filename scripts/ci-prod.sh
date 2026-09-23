@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P0.7 — production gate: P0.1–P0.7 tests (no Aura build; native C server only).
+# Production gate: native C server tests + Aura FFI/TCP typed suites.
 # Skip long CI wait preference: soak defaults to 30s via AURA_REDIS_SOAK_SEC.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,6 +14,12 @@ run() {
   python3 "$@"
 }
 
+echo "=== ci-prod: Aura FFI typed ==="
+./scripts/run-aura-ffi-tests.sh
+
+echo "=== ci-prod: Aura TCP typed ==="
+./scripts/run-aura-tcp-tests.sh
+
 run P0.1 tests/test_prod_protocol.py
 run P0.2 tests/test_prod_memory.py
 run P0.3 tests/test_prod_ttl.py
@@ -26,6 +32,7 @@ run P0.7 tests/test_prod_soak.py
 run P3.16a tests/test_prod_hash.py
 run P3.16b tests/test_prod_list.py
 run P3.16c tests/test_prod_zset.py
+run P3.16-edge tests/test_prod_types_edge.py
 run P3.17a tests/test_prod_multi.py
 run P3.17b tests/test_prod_pubsub.py
 

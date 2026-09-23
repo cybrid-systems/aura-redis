@@ -107,6 +107,15 @@ Production profile: `AURA_REDIS_DENY_PLUGIN=1`.
 
 ---
 
+
+## Thin public FFI (Aura `std/ffi`)
+
+In-process typed helpers on `libaura_redis_core.so` (C-string keys; see `ar_core.h`):
+`ar_type`, `ar_hset`/`ar_hget`/`ar_hdel`/`ar_hexists`/`ar_hlen`/`ar_hincrby`,
+`ar_lpush`/`ar_rpush`/`ar_lpop`/`ar_rpop`/`ar_llen`/`ar_lindex`,
+`ar_zadd`/`ar_zscore`/`ar_zrem`/`ar_zcard`. WRONGTYPE → return `-1`/`NULL` and `*wrongtype=1`.
+Exercised by `tests/test_types_ffi.aura` — not a substitute for RESP product tests.
+
 ## Security (P0.4)
 
 | Knob | Flag | Env | Default |
