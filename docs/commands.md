@@ -4,7 +4,7 @@
 **Not covered here:** pure-Lisp `AURA_REDIS_ENGINE=aura` (broader demo subset in README).  
 **Production product:** string KV cache + Aura control commands — see [`production-plan.md`](production-plan.md).
 
-Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLINK + STRLEN/SETEX/PSETEX/DBSIZE (+ T2.harden edges).
+Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLINK + STRLEN/SETEX/PSETEX/DBSIZE + WATCH/UNWATCH (+ T2.harden edges).
 
 ---
 
@@ -72,8 +72,10 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLI
 | `ZRANGE` | 4–5 | array | optional WITHSCORES |
 | `ZRANGEBYSCORE` | ≥4 | array | min/max, -inf/+inf; WITHSCORES; LIMIT |
 | `MULTI` | 1 | +OK | P3.17a; subsequent cmds → +QUEUED |
-| `EXEC` | 1 | array | replies; error if no MULTI |
-| `DISCARD` | 1 | +OK | clear queue |
+| `EXEC` | 1 | array / null array | replies; `*-1` if WATCH key dirty; error if no MULTI |
+| `DISCARD` | 1 | +OK | clear queue + watches |
+| `WATCH` | ≥2 | +OK | T2.12: mark keys for CAS; not allowed inside MULTI |
+| `UNWATCH` | 1 | +OK | clear watched keys / dirty flag |
 | `SUBSCRIBE` | ≥2 | array confirms | enters pubsub mode (P3.17b) |
 | `UNSUBSCRIBE` | ≥1 | array confirms | no args = all |
 | `PUBLISH` | 3 | integer receivers | local subscribers only |
@@ -106,7 +108,7 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 | Strings extras | `SET` GET/KEEPTTL/EXAT/PXAT (`STRLEN`/`SETEX`/`PSETEX` done T2.11) |
 | Keys extras | `APPEND`/`RENAME`/`RENAMENX`/`UNLINK` done T2.10; `DBSIZE` done T2.11; `KEYS`/`SCAN` done P3.18 |
 | (types) | HASH/LIST/ZSET done P3.16 |
-| Patterns / WATCH | `PSUBSCRIBE`, `WATCH`/`UNWATCH` (deferred) |
+| Patterns | `PSUBSCRIBE` (WATCH/UNWATCH done T2.12) |
 | Cluster / modules | all |
 
 Clients needing these should not assume Redis parity; extend only under production P3 demand.

@@ -42,6 +42,7 @@ run T2.9-set-opts tests/test_prod_set_opts.py
 run T2.10-string-keys tests/test_prod_string_keys.py
 run T2.11-string-meta tests/test_prod_string_meta.py
 run T2.edges tests/test_prod_tier2_edges.py
+run T2.12-watch tests/test_prod_watch.py
 
 # P1/P2 + strong-narrative (config/clients/rdb/replica/tls/policy_ha + A3–A13)
 AURA_REDIS_SKIP_BUILD=1 ./scripts/ci-strong.sh

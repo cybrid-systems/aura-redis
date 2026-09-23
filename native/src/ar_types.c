@@ -457,6 +457,7 @@ int ar_hash_hset(ArCore* core, const char* key, size_t klen, int nfields,
   }
   e->last_access = ++core->clock;
   ar_maybe_evict_pub(core);
+  ar_watch_touch(core, key, klen);
   return added;
 }
 
@@ -519,6 +520,8 @@ int ar_hash_hdel(ArCore* core, const char* key, size_t klen, int nfields,
     ArEntry* ee = ar_find_entry_ex(core, key, klen, &b, &tier);
     if (ee)
       ar_entry_free_ex(core, b, tier, ee);
+  } else if (removed > 0) {
+    ar_watch_touch(core, key, klen);
   }
   return removed;
 }
@@ -613,6 +616,7 @@ int64_t ar_hash_hincrby(ArCore* core, const char* key, size_t klen,
   }
   e->last_access = ++core->clock;
   ar_maybe_evict_pub(core);
+  ar_watch_touch(core, key, klen);
   return v;
 }
 
@@ -673,6 +677,7 @@ int64_t ar_list_push(ArCore* core, const char* key, size_t klen, int left,
   }
   e->last_access = ++core->clock;
   ar_maybe_evict_pub(core);
+  ar_watch_touch(core, key, klen);
   return (int64_t)l->len;
 }
 
@@ -723,6 +728,7 @@ char* ar_list_pop(ArCore* core, const char* key, size_t klen, int left,
     ar_entry_free_ex(core, b, tier, e);
     return out;
   }
+  ar_watch_touch(core, key, klen);
   if (out_len)
     *out_len = ol;
   return out;
@@ -877,6 +883,7 @@ int ar_zset_zadd(ArCore* core, const char* key, size_t klen, int n,
   }
   e->last_access = ++core->clock;
   ar_maybe_evict_pub(core);
+  ar_watch_touch(core, key, klen);
   return added;
 }
 
@@ -934,6 +941,8 @@ int ar_zset_zrem(ArCore* core, const char* key, size_t klen, int n,
   }
   if (z->len == 0)
     ar_entry_free_ex(core, b, tier, e);
+  else if (removed > 0)
+    ar_watch_touch(core, key, klen);
   return removed;
 }
 

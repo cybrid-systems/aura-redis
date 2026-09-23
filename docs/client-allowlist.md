@@ -20,8 +20,8 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 ### ZSET
 `ZADD`, `ZSCORE`, `ZREM`, `ZCARD`, `ZRANGE`, `ZRANGEBYSCORE` (+ `WITHSCORES`, `LIMIT`)
 
-### Transactions (no WATCH)
-`MULTI`, `EXEC`, `DISCARD` — **no `WATCH` / `UNWATCH`**
+### Transactions (+ WATCH)
+`MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH`
 
 ### Pub/Sub (local)
 `SUBSCRIBE`, `UNSUBSCRIBE`, `PUBLISH` — **no `PSUBSCRIBE`**
@@ -41,7 +41,6 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 | **Lua** | `EVAL`, `EVALSHA`, `SCRIPT` | Not implemented |
 | **ACL** | `ACL SETUSER`, … | Use requirepass only |
 | **Sets / Bitmaps / Geo / HyperLogLog** | `SADD`, `SETBIT`, `GEOADD`, … | Not in Tier 2 |
-| **WATCH** | `WATCH` / `UNWATCH` | MULTI only without optimism |
 | **Modules / PLUGIN** | Redis modules, `PLUGIN` .so | `AURA_REDIS_DENY_PLUGIN=1` |
 | **AOF / PSYNC** | `BGREWRITEAOF`, full Redis PSYNC | aura-rdb + best-effort REPLICAOF only |
 
@@ -87,4 +86,12 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 - **SETEX:** `SETEX key seconds value` (Redis argument order). Same write path as `SET … EX`; seconds ≤0 → `ERR invalid expire time`.
 - **PSETEX:** `PSETEX key milliseconds value` → same as `SET … PX`.
 - **DBSIZE:** integer count of non-expired keys (string + HASH/LIST/ZSET). **O(N)** full walk; expired keys are purged as encountered (may differ briefly from INFO `keys=` until walk/active-expire).
+
+## WATCH / UNWATCH caveats (Tier 2)
+
+- **WATCH key [key…]:** marks keys for optimistic locking; duplicate keys ignored; max 64 keys/connection.
+- **Dirty:** any successful mutation of a watched key (SET/DEL/typed writes/EXPIRE/evict/expire/FLUSHDB/RENAME src|dst) sets dirty — including writes by the same connection outside MULTI.
+- **EXEC:** if dirty → RESP2 null array (`*-1`); queued commands are **not** executed; watches cleared. Else run queue and clear watches.
+- **DISCARD / UNWATCH / disconnect:** clear watches.
+- **WATCH inside MULTI:** `-ERR WATCH inside MULTI is not allowed`.
 

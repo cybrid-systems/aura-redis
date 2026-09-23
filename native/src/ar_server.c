@@ -50,6 +50,17 @@ static void multi_clear(ArConn* c) {
   c->in_multi = 0;
 }
 
+static void watch_clear(ArConn* c) {
+  if (!c)
+    return;
+  for (int i = 0; i < c->watch_n; ++i) {
+    free(c->watch_keys[i]);
+    c->watch_keys[i] = NULL;
+    c->watch_klens[i] = 0;
+  }
+  c->watch_n = 0;
+  c->watch_dirty = 0;
+}
 
 static void pubsub_clear(ArConn* c) {
   if (!c)
@@ -65,6 +76,7 @@ static void pubsub_clear(ArConn* c) {
 
 static void conn_reset(ArConn* c) {
   multi_clear(c);
+  watch_clear(c);
   pubsub_clear(c);
   c->fd = -1;
   c->in_use = 0;
@@ -165,6 +177,11 @@ static int reply_int(ArConn* c, int64_t v) {
 
 static int reply_null_bulk(ArConn* c) {
   return wbuf_append(c, "$-1\r\n", 5);
+}
+
+static int reply_null_array(ArConn* c) {
+  /* RESP2 null multi-bulk — Redis EXEC abort under WATCH */
+  return wbuf_append(c, "*-1\r\n", 5);
 }
 
 static int reply_bulk(ArConn* c, const char* data, size_t n) {
@@ -735,6 +752,41 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (c->pubsub_mode && !pubsub_is_allowed(cmd, clen))
     return reply_err(c, "ERR only (P)SUBSCRIBE / (P)UNSUBSCRIBE / PING / QUIT allowed in this context");
 
+  /* T2.12 — WATCH / UNWATCH (optimistic locking for MULTI/EXEC) */
+  if (cmd_eq(cmd, clen, "watch")) {
+    if (argc < 2)
+      return reply_err(c, "ERR wrong number of arguments for 'watch'");
+    if (c->in_multi)
+      return reply_err(c, "ERR WATCH inside MULTI is not allowed");
+    for (int ai = 1; ai < argc; ++ai) {
+      int exists = 0;
+      for (int w = 0; w < c->watch_n; ++w) {
+        if (c->watch_klens[w] == argv[ai].len &&
+            memcmp(c->watch_keys[w], argv[ai].p, argv[ai].len) == 0) {
+          exists = 1;
+          break;
+        }
+      }
+      if (exists)
+        continue;
+      if (c->watch_n >= AR_WATCH_MAX)
+        return reply_err(c, "ERR WATCH key limit exceeded");
+      char* k = ar_xmemdup(argv[ai].p, argv[ai].len);
+      if (!k)
+        return reply_err(c, "ERR OOM");
+      c->watch_keys[c->watch_n] = k;
+      c->watch_klens[c->watch_n] = argv[ai].len;
+      c->watch_n++;
+    }
+    return reply_ok(c);
+  }
+  if (cmd_eq(cmd, clen, "unwatch")) {
+    if (argc != 1)
+      return reply_err(c, "ERR wrong number of arguments for 'unwatch'");
+    watch_clear(c);
+    return reply_ok(c);
+  }
+
   /* P3.17a — MULTI/EXEC/DISCARD */
   if (cmd_eq(cmd, clen, "multi")) {
     if (argc != 1)
@@ -751,6 +803,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     if (!c->in_multi)
       return reply_err(c, "ERR DISCARD without MULTI");
     multi_clear(c);
+    watch_clear(c);
     return reply_ok(c);
   }
   if (cmd_eq(cmd, clen, "exec")) {
@@ -758,12 +811,18 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       return reply_err(c, "ERR wrong number of arguments for 'exec'");
     if (!c->in_multi)
       return reply_err(c, "ERR EXEC without MULTI");
+    if (c->watch_dirty) {
+      multi_clear(c);
+      watch_clear(c);
+      return reply_null_array(c);
+    }
     int nq = c->multi_n;
     c->in_multi = 0; /* run without re-queuing */
     char hdr[32];
     int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", nq);
     if (wbuf_append(c, hdr, (size_t)hn) < 0) {
       multi_clear(c);
+      watch_clear(c);
       return -1;
     }
     for (int qi = 0; qi < nq; ++qi) {
@@ -775,10 +834,12 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       }
       if (dispatch(core, c, qargv, q->argc) < 0) {
         multi_clear(c);
+        watch_clear(c);
         return -1;
       }
     }
     multi_clear(c);
+    watch_clear(c);
     return 0;
   }
   /* Inside MULTI: queue (except handled above). */

@@ -80,6 +80,7 @@ typedef enum {
 #define AR_MULTI_MAX 128
 #define AR_MULTI_ARGV 32
 #define AR_PUBSUB_MAX 64
+#define AR_WATCH_MAX 64
 
 typedef struct ArQueuedCmd {
   int argc;
@@ -111,6 +112,11 @@ typedef struct ArConn {
   int in_multi;
   int multi_n;
   ArQueuedCmd multi_q[AR_MULTI_MAX];
+  /* T2.12 WATCH/UNWATCH (optimistic locking) */
+  int watch_n;
+  int watch_dirty; /* CLIENT_DIRTY_CAS */
+  char* watch_keys[AR_WATCH_MAX];
+  size_t watch_klens[AR_WATCH_MAX];
   /* P3.17b Pub/Sub */
   int pubsub_mode;
   int nsubs;
@@ -224,6 +230,10 @@ int ar_rdb_save(ArCore* core);
 int ar_rdb_bgsave(ArCore* core); /* 1 started/ok, 0 fail, -1 already in progress */
 int ar_rdb_load(ArCore* core);   /* 1 ok (incl missing file), 0 corrupt/error */
 void ar_rdb_poll_bgsave(ArCore* core);
+/* T2.12 — notify WATCH clients that a key (or all keys) changed */
+void ar_watch_touch(ArCore* core, const char* key, size_t klen);
+void ar_watch_touch_all(ArCore* core);
+
 void ar_rdb_wait_bgsave(ArCore* core);
 int ar_core_set_rdb_dir(ArCore* core, const char* dir);
 const char* ar_core_rdb_dir(ArCore* core);

@@ -535,7 +535,39 @@ static void unlink_entry(ArEntry** table, size_t bucket, ArEntry* e) {
   }
 }
 
+
+/* T2.12 — WATCH dirty notification (optimistic locking for MULTI/EXEC). */
+void ar_watch_touch(ArCore* core, const char* key, size_t klen) {
+  if (!core || !key)
+    return;
+  for (int i = 0; i < AR_MAX_CONN; ++i) {
+    ArConn* c = &core->conns[i];
+    if (!c->in_use || c->watch_n <= 0 || c->watch_dirty)
+      continue;
+    for (int w = 0; w < c->watch_n; ++w) {
+      if (c->watch_klens[w] == klen &&
+          memcmp(c->watch_keys[w], key, klen) == 0) {
+        c->watch_dirty = 1;
+        break;
+      }
+    }
+  }
+}
+
+void ar_watch_touch_all(ArCore* core) {
+  if (!core)
+    return;
+  for (int i = 0; i < AR_MAX_CONN; ++i) {
+    ArConn* c = &core->conns[i];
+    if (c->in_use && c->watch_n > 0)
+      c->watch_dirty = 1;
+  }
+}
+
 void ar_entry_free_ex(ArCore* core, size_t bucket, int tier, ArEntry* e) {
+  /* Notify WATCH before key memory is released. */
+  if (e && e->key)
+    ar_watch_touch(core, e->key, e->klen);
   entry_clear_expire(core, e);
   ArEntry** table =
       (tier == 1 && core->cold_buckets) ? core->cold_buckets : core->buckets;
@@ -719,6 +751,7 @@ int ar_entry_set_ex(ArCore* core, const char* key, size_t klen, const char* val,
     if (core->evict && core->evict->on_set)
       core->evict->on_set(core, e);
     maybe_evict(core);
+    ar_watch_touch(core, key, klen);
     return 1;
   }
   ArEntry* ne = (ArEntry*)calloc(1, sizeof(ArEntry));
@@ -758,6 +791,7 @@ int ar_entry_set_ex(ArCore* core, const char* key, size_t klen, const char* val,
   maybe_demote_hot(core);
   ar_rehash_if_needed(core);
   maybe_evict(core);
+  ar_watch_touch(core, key, klen);
   return 1;
 }
 
@@ -1051,9 +1085,11 @@ int ar_expire(ArCore* core, const char* key, size_t klen, int64_t seconds) {
     return 0;
   if (seconds <= 0) {
     entry_clear_expire(core, e);
+    ar_watch_touch(core, key, klen);
     return 1;
   }
   entry_set_expire_at(core, e, ar_now_ms() + (uint64_t)seconds * 1000ull);
+  ar_watch_touch(core, key, klen);
   return 1;
 }
 
@@ -1224,6 +1260,7 @@ int64_t ar_append(ArCore* core, const char* key, size_t klen, const char* val,
   if (core->evict && core->evict->on_set)
     core->evict->on_set(core, e);
   maybe_evict(core);
+  ar_watch_touch(core, key, klen);
   return (int64_t)newlen;
 }
 
@@ -1293,6 +1330,8 @@ int ar_rename(ArCore* core, const char* key, size_t klen, const char* newkey,
   maybe_demote_hot(core);
   ar_rehash_if_needed(core);
   maybe_evict(core);
+  ar_watch_touch(core, key, klen);
+  ar_watch_touch(core, newkey, nklen);
   return 1;
 }
 
@@ -1426,6 +1465,7 @@ void ar_flushdb(ArCore* core) {
   core->expire_at_sum = 0;
   ar_type_stats_reset(core);
   core->ops++;
+  ar_watch_touch_all(core);
 }
 
 int ar_mset(ArCore* core, size_t n, const char** keys, const size_t* klens,

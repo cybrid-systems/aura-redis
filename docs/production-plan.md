@@ -96,7 +96,7 @@
 | **P3.16b LIST** | **DONE** — LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE/LINDEX |
 | **P3.16c ZSET** | **DONE** — ZADD/ZSCORE/ZREM/ZCARD/ZRANGE/ZRANGEBYSCORE (sorted array) |
 | **P3.16** | **DONE** (HASH+LIST+ZSET) |
-| **P3.17a MULTI/EXEC** | **DONE** — MULTI/EXEC/DISCARD; no WATCH |
+| **P3.17a MULTI/EXEC** | **DONE** — MULTI/EXEC/DISCARD; **WATCH/UNWATCH via T2.12** |
 | **P3.17b Pub/Sub** | **DONE** — SUBSCRIBE/UNSUBSCRIBE/PUBLISH (no PSUBSCRIBE) |
 | **Production P3** | **COMPLETE** (P3.16–P3.17) |
 
@@ -178,6 +178,7 @@ Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/
 | T2.10 | APPEND / RENAME / UNLINK (+ RENAMENX) | **DONE** | `ar_append`/`ar_rename`; `tests/test_prod_string_keys.py` |
 | T2.11 | STRLEN / SETEX / PSETEX / DBSIZE | **DONE** | `ar_strlen`/`ar_dbsize` + SETEX/PSETEX via `ar_set_bin_ex`/`px`; `tests/test_prod_string_meta.py` |
 | T2.harden | Edge/regression + flake polls for T2.9–T2.11/SCAN/RDB | **DONE** | `tests/test_prod_tier2_edges.py`; poll-until-expire in set_opts/string_meta |
+| T2.12 | WATCH / UNWATCH for MULTI/EXEC CAS | **DONE** | `ar_watch_touch`; `tests/test_prod_watch.py`; allowlist + commands |
 
 **Deferred / blocked:** A11 Restricted sandbox without Soft still needs Tenant Admin. Cluster/field-SCAN/Streams/Lua/ACL remain non-goals (keyspace SCAN/KEYS landed for Tier 2). Short `bench_hit_vs_redis` adaptive cites remain non-citeable.
 
@@ -188,6 +189,7 @@ export AURA_REDIS_DENY_PLUGIN=1
 ./scripts/build-native.sh
 python3 tests/test_prod_rdb.py          # typed RDB
 python3 tests/test_prod_tier2_edges.py  # T2 harden edges
+python3 tests/test_prod_watch.py       # T2.12 WATCH/UNWATCH
 AURA_REDIS_SOAK_SEC=60 ./scripts/soak-prod.sh
 ./scripts/ci-prod.sh                    # wall-time gate (short soak)
 # long (optional): ./scripts/ci-bench.sh
@@ -218,7 +220,7 @@ AURA_REDIS_SOAK_SEC=60 ./scripts/soak-prod.sh
 | 2026-09-23 | **P3.16a** | HASH + TYPE; `ar_types.c`; RDB skips non-string; `tests/test_prod_hash.py` |
 | 2026-09-23 | **P3.16b** | LIST commands; `tests/test_prod_list.py` |
 | 2026-09-23 | **P3.16c** | ZSET sorted-array; ZRANGEBYSCORE+LIMIT; `tests/test_prod_zset.py` |
-| 2026-09-23 | **P3.17a** | MULTI/EXEC/DISCARD (+QUEUED); no WATCH; `tests/test_prod_multi.py` |
+| 2026-09-23 | **P3.17a** | MULTI/EXEC/DISCARD (+QUEUED); WATCH later in T2.12; `tests/test_prod_multi.py` |
 | 2026-09-23 | **P3.17b** | SUBSCRIBE/UNSUBSCRIBE/PUBLISH; no PSUBSCRIBE; `tests/test_prod_pubsub.py` |
 | 2026-09-23 | **P3 COMPLETE** | HASH+LIST+ZSET+MULTI+Pub/Sub on main |
 | 2026-09-23 | **Aura demand map** | [`docs/aura-demand.md`](aura-demand.md) — Aura differentiation track after P0–P3; mutation/evolve Δ=0 as open demand |
@@ -229,3 +231,4 @@ AURA_REDIS_SOAK_SEC=60 ./scripts/soak-prod.sh
 | 2026-09-23 | **T2.10** | APPEND/RENAME/UNLINK (+RENAMENX); `tests/test_prod_string_keys.py`; docs + ci-prod |
 | 2026-09-23 | **T2.11** | STRLEN/SETEX/PSETEX/DBSIZE; `tests/test_prod_string_meta.py`; docs + ci-prod |
 | 2026-09-23 | **T2.harden** | Edge suite SCAN/SETNX/RENAME-across-types/RDB-large + expire poll harden; ci-prod wire |
+| 2026-09-23 | **T2.12** | WATCH/UNWATCH optimistic locking; EXEC null-array abort; tests + allowlist + ci-prod |

@@ -53,6 +53,8 @@ def decode_one(buf: bytearray):
         if i < 0:
             raise Incomplete()
         n = int(buf[1:i])
+        if n < 0:
+            return None, i + 2  # RESP2 null array (e.g. EXEC abort)
         pos = i + 2
         items = []
         for _ in range(n):
@@ -60,6 +62,7 @@ def decode_one(buf: bytearray):
             items.append(v)
             pos += c
         return items, pos
+
     raise ValueError(f"bad RESP type {t!r}")
 
 
