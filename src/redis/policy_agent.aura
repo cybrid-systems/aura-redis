@@ -53,6 +53,9 @@
 ;   AURA_REDIS_CANARY_INJECT         start one canary trial of named profile
 ;                                   (broken|inverted|aggressive|…) after warm-up
 ;   AURA_REDIS_CANARY_DROP_PP        EWMA drop vs baseline to heal (default 12)
+;   AURA_REDIS_SHADOW_AUTOPROMOTE=0|1 A18: shadow dry-run winner -> canary trial (default 0)
+;   AURA_REDIS_POISON_DEFENSE=0|1    A19: unique-SET / keyspace storm -> defensive body (default 1)
+;   AURA_REDIS_POISON_UNIQUE_RATE   unique SETs/tick threshold to trigger defense (default 40)
 
 (require "std/mutate" all:)
 (require "std/hot-strategy" all:)
@@ -63,6 +66,7 @@
 (require "src/redis/policy/choose_inverted" all:)
 (require "src/redis/policy/choose_broken" all:)
 (require "src/redis/policy/choose_nosoft" all:)
+(require "src/redis/policy/choose_defensive" all:)
 
 (display "policy_agent: A1-FILE-LOAD\n")
 ; A1 early re-entry gate - BEFORE heavy defines / getenv. mutate:rebind may
@@ -258,6 +262,20 @@
 (define *last-audit-version* 0)
 (define *last-audit-ts* 0)
 (define *last-explain* "")
+; A17 - mid join (native provenance x ops explain)
+(define *last-audit-mid* 0)
+(define *audit-mid-seq* 0)
+(define *explain-pushed* 0)
+; A18 - shadow->canary auto-promote (default OFF)
+(define *shadow-autopromote* #f)
+(define *shadow-autopromote-starts* 0)
+; A19 - poison / unique-SET flood defense
+(define *poison-defense* #t)
+(define *poison-unique-rate* 40)
+(define *poison-active* #f)
+(define *poison-trips* 0)
+(define *prev-unique-sets* 0)
+(define *have-unique-prev* #f)
 ; A4: canary choose-fn trial window (commit or heal!)
 (define *canary-on* #f)
 (define *canary-ticks-n* 5)
@@ -428,6 +446,27 @@
 (let ((e (getenv "AURA_REDIS_SHADOW_SAMPLE_PCT")))
   (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
     (set! *shadow-sample-pct* (string->number e))
+    #t))
+(let ((e (getenv "AURA_REDIS_SHADOW_AUTOPROMOTE")))
+  (if (and (string? e)
+           (or (string=? e "1") (string=? e "true") (string=? e "yes")
+               (string=? e "on")))
+    (begin
+      (set! *shadow-autopromote* #t)
+      (set! *canary-on* #t)
+      (display "policy_agent: shadow-autopromote on (A18)\n"))
+    #t))
+(let ((e (getenv "AURA_REDIS_POISON_DEFENSE")))
+  (if (and (string? e)
+           (or (string=? e "0") (string=? e "false") (string=? e "no")
+               (string=? e "off")))
+    (begin
+      (set! *poison-defense* #f)
+      (display "policy_agent: poison-defense off\n"))
+    #t))
+(let ((e (getenv "AURA_REDIS_POISON_UNIQUE_RATE")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (set! *poison-unique-rate* (string->number e))
     #t))
 (let ((e (getenv "AURA_REDIS_TYPED_PRESSURE")))
   (if (and (string? e)
@@ -851,6 +890,7 @@
     ((string=? name "inverted") *policy-choose-inverted*)
     ((string=? name "broken") *policy-choose-broken*)
     ((string=? name "nosoft") *policy-choose-nosoft*)
+    ((string=? name "defensive") *policy-choose-defensive*)
     (else *policy-choose-normal*)))
 
 ;; M7 - mutate numeric thresholds inside choose-fn body string (Aura-native)
@@ -1206,6 +1246,46 @@
       (newline)
       #t)))
 
+
+;; A19 — unique-SET / keyspace growth storm -> defensive choose body
+;; Defensive = lru + refuse pin aggression + soft/erate. Demo scoreboard = hit quality.
+(define (maybe-poison-defense! dunique nkeys dsets)
+  (if (not *poison-defense*)
+    #f
+    (begin
+      ; Storm: unique-SET flood OR keyspace growing under write pressure.
+      (let ((storm (or (>= dunique *poison-unique-rate*)
+                       (and (>= dunique 15)
+                            (> nkeys 100)
+                            (> dsets 20)))))
+        (if storm
+          (begin
+            (display "policy_agent: poison-storm unique=")
+            (display dunique)
+            (display " nkeys=")
+            (display nkeys)
+            (display " dsets=")
+            (display dsets)
+            (display " active=")
+            (display *poison-active*)
+            (newline)
+            (if (not *poison-active*)
+              (begin
+                (set! *poison-active* #t)
+                (set! *poison-trips* (+ *poison-trips* 1))
+                (audit-append! "poison-defense" *profile-name* "defensive" "unique_set_storm")
+                (if *canary-on*
+                  (canary-start! "defensive" "unique_set_storm")
+                  (do-fitness-swap-commit! "defensive" "unique_set_storm"))
+                #t)
+              #t))
+          (if (and *poison-active* (< dunique 5))
+            (begin
+              (set! *poison-active* #f)
+              (display "policy_agent: poison-storm cleared\n")
+              #t)
+            #f))))))
+
 (define (shadow-ab-tick! champ-choice)
   (set! *shadow-ab-ticks* (+ *shadow-ab-ticks* 1))
   (let ((alt-choice (shadow-alt-choice))
@@ -1222,12 +1302,25 @@
         (display alt-choice)
         (display " (dry-run no EVICT loser)\n")
         (set! *shadow-ab-blocked* (+ *shadow-ab-blocked* 1))
+        ; A18: optional auto-promote — never EVICT to loser; canary must pass first.
+        (if (and *shadow-autopromote*
+                 (not (canary-active?))
+                 ; synthetic winner: challenger preferred when EWMA weak / missy
+                 (or (< *hit-ewma* 70)
+                     (> *shadow-ab-diverges* 2)))
+          (begin
+            (display "policy_agent: shadow-ab autopromote -> canary ")
+            (display *shadow-profile*)
+            (newline)
+            (set! *shadow-autopromote-starts* (+ *shadow-autopromote-starts* 1))
+            (audit-append! "shadow-autopromote" "champ" *shadow-profile* "shadow_winner")
+            (canary-start! *shadow-profile* "shadow_autopromote")
+            #t)
+          #t)
         #t)
       #t)))
 
-;; A16 — fiber parallel trial fitness: score dual param bags in fibers
-;; without applying the loser (shadow). Proxy score = fireability heuristic;
-;; live window keep/revert still owns apply. No body-string eval (pipeline).
+
 (define (shadow-proxy-score min-ops miss-pin w-miss w-write w-evict)
   (+ (- 0.0 (/ min-ops 5.0))
      (- 0.0 miss-pin)
@@ -1948,12 +2041,51 @@
 
 ;; A3 — durable audit ring + explain schema
 ;; Line schema: ts=<ms> op=<fitness-swap|evolve-keep|evict|heal|...> from=<a> to=<b> reason=<r> version=<n>
-;; Prefer native (query:last-mutation-provenance) when available; always write structured file.
+;; A17/A3 - durable audit ring + mid->reason->kernel explain join
+;; Line schema: ts=<ms> op=<...> from=<a> to=<b> reason=<r> version=<n> mid=<id> evict=<e> layout=<l>
+;; Prefer native (query:last-mutation-provenance) hash.mutation_id when available.
+(define (audit-extract-mid p)
+  (cond
+    ((not p) 0)
+    ((number? p) p)
+    ((string? p)
+     (let ((n (string->number p))) (if (number? n) n 0)))
+    (else
+     (try
+       (let ((v (hash-ref p "mutation_id" #f)))
+         (cond
+           ((number? v) v)
+           ((string? v)
+            (let ((n (string->number v))) (if (number? n) n 0)))
+           (else
+            (let ((v2 (hash-ref p "mutation-id" 0)))
+              (if (number? v2) v2 0)))))
+       (catch (e) 0)))))
+
 (define (audit-native-note)
   (try
     (let ((p (query:last-mutation-provenance)))
-      (if (string? p) p ""))
+      (let ((mid (audit-extract-mid p)))
+        (if (> mid 0)
+          (string-append "mid=" (number->string mid))
+          (if (string? p) p ""))))
     (catch (e) "")))
+
+(define (audit-push-explain!)
+  ; Push mid|reason|kernel join onto C INFO via POLICY EXPLAIN (best-effort).
+  (if (not *sock*)
+    #f
+    (try
+      (begin
+        (redis-call! *sock* "POLICY" "EXPLAIN"
+                     (number->string *last-audit-mid*)
+                     *last-audit-reason*
+                     *last-audit-op*
+                     (if (> (string-length *last-evict*) 0) *last-evict* "-")
+                     (if (> (string-length *last-layout*) 0) *last-layout* "-"))
+        (set! *explain-pushed* (+ *explain-pushed* 1))
+        #t)
+      (catch (e) #f))))
 
 (define (audit-append! op from to reason)
   (set! *last-audit-ts* (monotonic-ms))
@@ -1963,46 +2095,58 @@
   (set! *last-audit-reason* reason)
   (set! *last-audit-version* (try (hot-strategy:version) (catch (e) *last-audit-version*)))
   (set! *audit-count* (+ *audit-count* 1))
-  (set! *last-explain*
-    (string-append op ":" reason ":" from "->" to))
+  (set! *audit-mid-seq* (+ *audit-mid-seq* 1))
   (let ((native (audit-native-note))
-        (line (string-append
-                "ts=" (number->string *last-audit-ts*)
-                " op=" op
-                " from=" from
-                " to=" to
-                " reason=" reason
-                " version=" (number->string *last-audit-version*)
-                (if (and (string? native) (> (string-length native) 0))
-                  (string-append " native=" native)
-                  "")
-                "\n")))
-    (display "policy_agent: audit ")
-    (display line)
-    (if (and (string? *audit-file*) (> (string-length *audit-file*) 0))
-      (begin
-        ; append-best-effort: read existing (cap ring) then rewrite
-        (let ((prev (try (read-file *audit-file*) (catch (e) "")))
-              (keep ""))
-          (if (and (string? prev) (> (string-length prev) 0))
-            (set! keep prev)
-            #t)
-          (let ((merged (string-append keep line)))
-            ; crude ring: if too long, keep tail ~8k
-            (if (> (string-length merged) 8192)
-              (set! merged
-                (substring merged (- (string-length merged) 6144)
-                           (string-length merged)))
+        (native-mid 0))
+    (set! native-mid
+      (if (and (string? native) (> (string-length native) 4)
+               (string=? (substring native 0 4) "mid="))
+        (let ((n (string->number (substring native 4 (string-length native)))))
+          (if (number? n) n 0))
+        0))
+    (set! *last-audit-mid*
+      (if (> native-mid 0) native-mid *audit-mid-seq*))
+    (set! *last-explain*
+      (string-append
+        "mid=" (number->string *last-audit-mid*)
+        "|" op ":" reason ":" from "->" to
+        "|evict=" (if (> (string-length *last-evict*) 0) *last-evict* "-")
+        "|layout=" (if (> (string-length *last-layout*) 0) *last-layout* "-")))
+    (let ((line (string-append
+                  "ts=" (number->string *last-audit-ts*)
+                  " op=" op
+                  " from=" from
+                  " to=" to
+                  " reason=" reason
+                  " version=" (number->string *last-audit-version*)
+                  " mid=" (number->string *last-audit-mid*)
+                  " evict=" (if (> (string-length *last-evict*) 0) *last-evict* "-")
+                  " layout=" (if (> (string-length *last-layout*) 0) *last-layout* "-")
+                  "\n")))
+      (display "policy_agent: audit ")
+      (display line)
+      (if (and (string? *audit-file*) (> (string-length *audit-file*) 0))
+        (begin
+          (let ((prev (try (read-file *audit-file*) (catch (e) "")))
+                (keep ""))
+            (if (and (string? prev) (> (string-length prev) 0))
+              (set! keep prev)
               #t)
-            (write-file *audit-file* merged)
-            (display "policy_agent: audit-file wrote path=")
-            (display *audit-file*)
-            (newline)))
+            (let ((merged (string-append keep line)))
+              (if (> (string-length merged) 8192)
+                (set! merged
+                  (substring merged (- (string-length merged) 6144)
+                             (string-length merged)))
+                #t)
+              (write-file *audit-file* merged)
+              (display "policy_agent: audit-file wrote path=")
+              (display *audit-file*)
+              (newline)))
+          #t)
         #t)
-      #t)
-  ; A3: heartbeat refresh even if mutate:rebind re-entry skips later ticks
-  (write-heartbeat!)
-  #t))
+      (audit-push-explain!)
+      (write-heartbeat!)
+      #t)))
 
 (define (write-heartbeat!)
   (if (or (not (string? *heartbeat-file*)) (= (string-length *heartbeat-file*) 0))
@@ -2024,6 +2168,12 @@
                        "last_audit_reason=" *last-audit-reason* "\n"
                        "last_audit_version=" (number->string *last-audit-version*) "\n"
                        "last_explain=" *last-explain* "\n"
+                       "last_audit_mid=" (number->string *last-audit-mid*) "\n"
+                       "explain_pushed=" (number->string *explain-pushed*) "\n"
+                       "shadow_autopromote=" (if *shadow-autopromote* "1" "0") "\n"
+                       "shadow_autopromote_starts=" (number->string *shadow-autopromote-starts*) "\n"
+                       "poison_active=" (if *poison-active* "1" "0") "\n"
+                       "poison_trips=" (number->string *poison-trips*) "\n"
                        "canary_mode=" *canary-mode* "\n"
                        "canary_ticks=" (number->string *canary-ticks*) "\n"
                        "canary_commits=" (number->string *canary-commits*) "\n"
@@ -2452,7 +2602,8 @@
                   (kt (info-num info "keys_with_ttl"))
                   (at (info-num info "avg_ttl_ms"))
                   (cur (info-get info "evict"))
-                  (cur-layout (info-get info "layout")))
+                  (cur-layout (info-get info "layout"))
+                  (unique-sets (info-num info "unique_sets")))
                 (parse-policy-hints! (info-get info "policy_hints"))
               (let ((dgets (if *have-prev* (- g *prev-gets*) 0))
                     (dsets (if *have-prev* (- s *prev-sets*) 0))
@@ -2486,6 +2637,10 @@
                 (set! *last-dmisses* dmisses)
                 (set! *last-devicted* devicted)
                 (set! *last-nkeys* nk)
+                (let ((dunique (if *have-unique-prev* (- unique-sets *prev-unique-sets*) 0)))
+                  (set! *prev-unique-sets* unique-sets)
+                  (set! *have-unique-prev* #t)
+                  (maybe-poison-defense! dunique nk dsets))
                 (set! *last-dexpired* dexpired)
                 (set! *last-avg-ttl* at)
                 (set! *last-keys-ttl* kt)

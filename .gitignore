@@ -23,3 +23,6 @@ aura-redis.conf
 # Compose local secrets
 .env
 deploy/staging/.env
+
+.ar-policy-hb-*
+.ar-shadow-*-hb-*

@@ -192,6 +192,15 @@ struct ArCore {
   uint64_t shadow_hits;
   uint64_t shadow_misses;
   uint64_t shadow_diverges; /* agent-reported champ≠challenger choices */
+  /* A17 — policy explain join (agent-pushed mid|reason|kernel) */
+  char explain_mid[32];
+  char explain_reason[64];
+  char explain_op[32];
+  char explain_evict[16];
+  char explain_layout[16];
+  char explain_join[192];
+  /* A19 — unique SET / keyspace growth counters */
+  uint64_t unique_sets; /* SETs that created a new key */
 
   /* network */
   int listen_fd;

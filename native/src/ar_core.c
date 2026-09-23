@@ -776,6 +776,7 @@ int ar_entry_set_ex(ArCore* core, const char* key, size_t klen, const char* val,
   b = hash_bin(key, klen) & (core->nbuckets - 1);
   ne->next = core->buckets[b];
   core->buckets[b] = ne;
+  core->unique_sets++;
   core->nkeys++;
   if (core->layout == AR_LAYOUT_HOT_COLD)
     core->hot_nkeys++;
@@ -1844,6 +1845,46 @@ uint64_t ar_core_shadow_diverges(ArCore* core) {
 void ar_core_shadow_note_diverge(ArCore* core) {
   if (core)
     core->shadow_diverges++;
+}
+
+int ar_core_set_explain(ArCore* core, const char* mid, const char* reason,
+                        const char* op, const char* evict, const char* layout) {
+  if (!core)
+    return 0;
+  snprintf(core->explain_mid, sizeof(core->explain_mid), "%s", mid ? mid : "");
+  snprintf(core->explain_reason, sizeof(core->explain_reason), "%s", reason ? reason : "");
+  snprintf(core->explain_op, sizeof(core->explain_op), "%s", op ? op : "");
+  snprintf(core->explain_evict, sizeof(core->explain_evict), "%s", evict ? evict : "");
+  snprintf(core->explain_layout, sizeof(core->explain_layout), "%s", layout ? layout : "");
+  snprintf(core->explain_join, sizeof(core->explain_join),
+           "mid=%s|%s:%s|evict=%s|layout=%s",
+           core->explain_mid[0] ? core->explain_mid : "0",
+           core->explain_op[0] ? core->explain_op : "-",
+           core->explain_reason[0] ? core->explain_reason : "-",
+           core->explain_evict[0] ? core->explain_evict : "-",
+           core->explain_layout[0] ? core->explain_layout : "-");
+  return 1;
+}
+const char* ar_core_explain_join(ArCore* core) {
+  return core && core->explain_join[0] ? core->explain_join : "";
+}
+const char* ar_core_explain_mid(ArCore* core) {
+  return core && core->explain_mid[0] ? core->explain_mid : "";
+}
+const char* ar_core_explain_reason(ArCore* core) {
+  return core && core->explain_reason[0] ? core->explain_reason : "";
+}
+const char* ar_core_explain_op(ArCore* core) {
+  return core && core->explain_op[0] ? core->explain_op : "";
+}
+const char* ar_core_explain_evict(ArCore* core) {
+  return core && core->explain_evict[0] ? core->explain_evict : "";
+}
+const char* ar_core_explain_layout(ArCore* core) {
+  return core && core->explain_layout[0] ? core->explain_layout : "";
+}
+uint64_t ar_core_unique_sets(ArCore* core) {
+  return core ? core->unique_sets : 0;
 }
 
 int ar_core_set_evict_samples(ArCore* core, int n) {

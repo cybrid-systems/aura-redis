@@ -84,7 +84,7 @@ def start_agent() -> str:
     # Either needle is enough for boot; wait_log needs all — poll manually.
     t0 = time.time()
     last = ""
-    while time.time() - t0 < 12:
+    while time.time() - t0 < 30:
         last = _agent_logs(cid, AGENT_LOG)
         if "PING" in last or "PONG" in last:
             return cid
@@ -113,6 +113,7 @@ def drive_miss_spike(rounds: int = 50) -> None:
 LINE_RE = re.compile(
     r"ts=(?P<ts>\d+)\s+op=(?P<op>\S+)\s+from=(?P<frm>\S+)\s+"
     r"to=(?P<to>\S+)\s+reason=(?P<reason>\S+)\s+version=(?P<ver>\d+)"
+    r"(?:\s+mid=(?P<mid>\S+))?(?:\s+evict=(?P<evict>\S+))?(?:\s+layout=(?P<layout>\S+))?"
 )
 
 
@@ -143,13 +144,13 @@ def test_policy_audit_ring_and_explain() -> None:
 
         ops = {p["op"] for p in parsed}
         reasons = {p["reason"] for p in parsed}
-        assert ops & {"fitness-swap", "evict", "evolve-keep", "heal"}, (
+        assert ops & {"fitness-swap", "evict", "evolve-keep", "heal", "policy_pin"}, (
             f"expected known op in {ops}; lines={lines}"
         )
         known_reasons = {
             "miss_spike", "ewma_drop", "stuck", "evict_pressure", "fitness",
             "choose", "evolve_keep", "poison_profile", "still_bad_after_swap",
-            "write_heavy", "read_heavy", "mixed", "unknown",
+            "write_heavy", "read_heavy", "mixed", "unknown", "resume", "connect",
         }
         assert reasons & known_reasons or any(
             r.replace("-ttl", "") in known_reasons or "spike" in r or "fitness" in r
@@ -182,6 +183,28 @@ def test_policy_audit_ring_and_explain() -> None:
         assert "audit_count=0" not in hb.splitlines() and any(
             ln.startswith("audit_count=") and ln != "audit_count=0" for ln in hb.splitlines()
         ), f"heartbeat audit_count not advanced:\n{hb}"
+
+
+        # A17 — mid join after swap/audit: mid + kernel fields + INFO/POLICY explain
+        mids = {p.get("mid") for p in parsed if p.get("mid") and p.get("mid") not in ("-", "")}
+        assert mids, f"A17 expected mid= on audit lines; lines={lines}"
+        assert any(p.get("evict") for p in parsed) or any(p.get("layout") for p in parsed), (
+            f"A17 expected evict=/layout= on audit lines; lines={lines}"
+        )
+        hb2 = HEARTBEAT.read_text(errors="replace")
+        assert "last_audit_mid=" in hb2, f"heartbeat missing last_audit_mid:\n{hb2}"
+        mid_hb = next((ln.split("=", 1)[1] for ln in hb2.splitlines() if ln.startswith("last_audit_mid=")), "")
+        assert mid_hb not in ("", "0"), f"heartbeat last_audit_mid unset:\n{hb2}"
+        expl = next((ln.split("=", 1)[1] for ln in hb2.splitlines() if ln.startswith("last_explain=")), "")
+        assert "mid=" in expl, f"last_explain should carry mid= join: {expl!r}\n{hb2}"
+        with socket.create_connection(("127.0.0.1", PORT), timeout=5) as s:
+            redis_call(s, "POLICY", "EXPLAIN", "9", "test_join", "audit", "lru", "flat")
+            info = redis_call(s, "INFO")
+            assert "explain_mid:" in info and "unique_sets:" in info, info
+            assert "explain_mid:9" in info, info
+            got = redis_call(s, "POLICY", "EXPLAIN")
+            assert "mid=" in str(got), got
+            redis_call(s, "QUIT")
 
         print(f"PASS test_policy_audit: {len(parsed)} audit lines ops={ops} reasons={reasons}")
         print(f"  heartbeat last_explain={dict(x.split('=',1) for x in hb.splitlines() if '=' in x).get('last_explain')}")

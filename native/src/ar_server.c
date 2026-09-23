@@ -2138,7 +2138,14 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         "shadow_samples:%llu\n"
         "shadow_hits:%llu\n"
         "shadow_misses:%llu\n"
-        "shadow_diverges:%llu\n",
+        "shadow_diverges:%llu\n"
+        "explain_mid:%s\n"
+        "explain_reason:%s\n"
+        "explain_op:%s\n"
+        "explain_evict:%s\n"
+        "explain_layout:%s\n"
+        "explain:%s\n"
+        "unique_sets:%llu\n",
         core->tcp_port,
         core->tls_port,
         core->tls_listen_fd >= 0 ? "yes" : "no",
@@ -2209,7 +2216,14 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         (unsigned long long)ar_core_shadow_samples(core),
         (unsigned long long)ar_core_shadow_hits(core),
         (unsigned long long)ar_core_shadow_misses(core),
-        (unsigned long long)ar_core_shadow_diverges(core));
+        (unsigned long long)ar_core_shadow_diverges(core),
+        ar_core_explain_mid(core),
+        ar_core_explain_reason(core),
+        ar_core_explain_op(core),
+        ar_core_explain_evict(core),
+        ar_core_explain_layout(core),
+        ar_core_explain_join(core),
+        (unsigned long long)ar_core_unique_sets(core));
     if (n < 0)
       return reply_err(c, "ERR info");
     return reply_bulk(c, buf, (size_t)n);
@@ -2321,6 +2335,32 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   }
   /* M12: POLICY prefix profile | POLICY (list hints) */
   if (cmd_eq(cmd, clen, "policy")) {
+    /* A17: POLICY EXPLAIN [mid reason op evict layout] | POLICY EXPLAIN (get) */
+    if (argc >= 2 && cmd_eq(argv[1].p, argv[1].len, "explain")) {
+      if (argc == 2) {
+        const char* j = ar_core_explain_join(core);
+        return reply_bulk(c, j, strlen(j));
+      }
+      if (argc >= 7) {
+        char mid[32], reason[64], op[32], ev[16], ly[16];
+        size_t n;
+        n = argv[2].len < sizeof(mid) - 1 ? argv[2].len : sizeof(mid) - 1;
+        memcpy(mid, argv[2].p, n); mid[n] = '\0';
+        n = argv[3].len < sizeof(reason) - 1 ? argv[3].len : sizeof(reason) - 1;
+        memcpy(reason, argv[3].p, n); reason[n] = '\0';
+        n = argv[4].len < sizeof(op) - 1 ? argv[4].len : sizeof(op) - 1;
+        memcpy(op, argv[4].p, n); op[n] = '\0';
+        n = argv[5].len < sizeof(ev) - 1 ? argv[5].len : sizeof(ev) - 1;
+        memcpy(ev, argv[5].p, n); ev[n] = '\0';
+        n = argv[6].len < sizeof(ly) - 1 ? argv[6].len : sizeof(ly) - 1;
+        memcpy(ly, argv[6].p, n); ly[n] = '\0';
+        if (!ar_core_set_explain(core, mid, reason, op, ev, ly))
+          return reply_err(c, "ERR explain");
+        return reply_ok(c);
+      }
+      return reply_err(c, "ERR wrong number of arguments for 'policy explain'");
+    }
+    /* placeholder */
     if (argc == 1) {
       char hints[160];
       int hn = ar_core_policy_hints(core, hints, sizeof(hints));

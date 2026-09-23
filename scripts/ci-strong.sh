@@ -53,6 +53,8 @@ run A4.policy_canary tests/test_policy_canary.py
 run A8.policy_autofreeze tests/test_policy_autofreeze.py
 run A13.weight_evolve tests/test_policy_weight_evolve.py
 run A10.shadow_ab tests/test_shadow_ab.py
+run A18.shadow_autopromote tests/test_shadow_autopromote.py
+run A19.poison_keys tests/test_poison_keys.py
 run A7.typed_pressure tests/test_typed_pressure.py
 
 echo "=== ci-strong: ALL PASSED ==="

@@ -658,3 +658,13 @@ C 数据面卫生指标（本仓库约 **1.02–1.14×** Redis，`perf-eval.md`�
 | Date (CST) | Notes |
 |------------|-------|
 | 2026-09-23 | Initial authoritative scenario deep-dive：S1–S13 + out-of-scope + cross pattern + priority map；链自 match/demand。 |
+
+
+### S2-variant — Poison-key / unique-SET flood (A19)
+
+**Pain:** Abuse scanners or buggy writers flood unique SETs; keyspace grows; pin/LFU aggression retains garbage; hot keys thrash.
+
+**Aura path:** C `unique_sets` INFO → policy_agent storm detect → mutate to **defensive** choose (`lru|flat|soft`, refuse pin) → audit `poison-defense`.
+
+**Verify:** `tests/test_poison_keys.py`; heartbeat `poison_trips`; demo scoreboard = keep* hit quality vs static LFU/LRU (not ops/s).
+

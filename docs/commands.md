@@ -50,12 +50,12 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLI
 | `FLUSHDB` | 1 | `+OK` | |
 | `DBSIZE` | 1 | integer | O(N) count of non-expired keys (string+typed); purges expired on walk |
 | `COMMAND` | 1 | `*0` | stub for clients that probe |
-| `INFO` | 1+ | bulk | Sectioned; flat keys for policy_agent; A7 `keys_{string,hash,list,zset}`/`mem_*`/`bigkey_*`; A9 `hot_soft_cap_*`. **Stable for agents:** `gets,sets,hits,misses,keys,evict,layout,used_memory,role,connected_slaves,rdb_last_save_time,slowlog_count,keys_string,keys_hash,keys_list,keys_zset` |
+| `INFO` | 1+ | bulk | Sectioned; flat keys for policy_agent; A7 `keys_{string,hash,list,zset}`/`mem_*`/`bigkey_*`; A9 `hot_soft_cap_*`; A17 `explain_mid`/`explain_reason`/`explain_op`/`explain_evict`/`explain_layout`/`explain`; A19 `unique_sets`. **Stable for agents:** `gets,sets,hits,misses,keys,evict,layout,used_memory,role,connected_slaves,rdb_last_save_time,slowlog_count,keys_string,keys_hash,keys_list,keys_zset` |
 | `EVICT` | 1 / 2 / 3 | bulk name / `+OK` | `EVICT` \| `EVICT <noop\|lru\|lfu\|ttl_aware\|slru\|tinylfu>` \| `EVICT samples <n>` |
 | `LAYOUT` | 1 / 2 | bulk / `+OK` | `flat` \| `hot_cold` |
 | `PIN` | 1 / 2 | list / `+OK` | `PIN` lists; `PIN key` pins |
 | `UNPIN` | 2 | integer | |
-| `POLICY` | 3 | `+OK` | `POLICY <prefix> <profile>` (M12 hints) |
+| `POLICY` | 1/3/2+/7 | bulk/`+OK` | `POLICY` list hints; `POLICY <prefix> <profile>` (M12); **A17** `POLICY EXPLAIN` get/set mid\|reason\|op\|evict\|layout |
 | `SHADOW` | 1–3 | bulk / `+OK` | A10: `SHADOW` stats; `SHADOW policy <name>`; `SHADOW sample-pct <n>`; `SHADOW reset\|diverge` |
 | `HOTCOLD` | 1 / 3 | bulk / `+OK` | A9: status; `HOTCOLD soft-cap-pct\|soft-cap-min\|promote-on-get <v>` |
 | `PLUGIN` | 1 / 2 | bulk / `+OK` | **Denied** when `AURA_REDIS_DENY_PLUGIN=1` |
@@ -156,3 +156,12 @@ Exercised by `tests/test_types_ffi.aura` — not a substitute for RESP product t
 - Default bind remains loopback — safest deploy default; use `--bind 0.0.0.0` + `requirepass` for remote + Aura policy_agent on another host.
 - `CONFIG SET/GET` runtime knobs: maxmemory, requirepass, protected-mode, evict-samples, maxclients, timeout, tcp-backlog, dir, dbfilename, …
 - **CONFIG persist:** when `--config <path>` or `AURA_REDIS_CONFIG` is set, durable `CONFIG SET` auto-writes that file; `CONFIG REWRITE` rewrites explicitly. Load on boot (defaults → file → CLI/env; CLI wins). Empty path / unset = no file (runtime-only). Default is **disabled** (empty) so casual runs do not drop `aura-redis.conf` in cwd. `requirepass` is stored in cleartext in the file — protect the path.
+
+
+## A17–A19 short-cycle ops surfaces (2026-09-23)
+
+| ID | Surface | Stable fields | Notes |
+|----|---------|---------------|-------|
+| **A17** | Audit line + heartbeat + `INFO`/`POLICY EXPLAIN` | `mid`, `reason`, `op`, `evict`, `layout`; heartbeat `last_audit_mid`/`last_explain`; INFO `explain_*` | Join native provenance mid (when Aura hash query works) else agent seq; demo scoreboard = mid join quality, not ops/s |
+| **A18** | `AURA_REDIS_SHADOW_AUTOPROMOTE=0\|1` (default **0**) | heartbeat `shadow_autopromote*`; logs `shadow-ab autopromote` | Shadow dry-run winner → canary trial → commit/heal; never EVICT to loser |
+| **A19** | INFO `unique_sets`; `AURA_REDIS_POISON_DEFENSE` | heartbeat `poison_active`/`poison_trips` | Unique-SET storm → defensive choose (`lru\|flat\|soft`, no pin); S2 variant |

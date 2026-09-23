@@ -222,3 +222,19 @@ If blocked: document blocker here, push PARTIAL, continue what is possible.
 | 2026-09-23 | A7 typed pressure INFO shares/counts + agent `lfu\|flat\|pin`; `tests/test_typed_pressure.py`. |
 | 2026-09-23 | A9 `hot_cold` soft-cap/promote knobs via CONFIG/`HOTCOLD`; `tests/test_hot_cold_knobs.py`. |
 | 2026-09-23 | Strong-narrative backlog complete except **A11** PARTIAL (Tenant Admin). |
+
+
+---
+
+## Short-cycle innovation bets (2026-09-23)
+
+Dual scoreboard: **demo metrics = regret / hit quality / mid join** — not memtier adaptive ops/s.
+
+| ID | Bet | Exit | Status |
+|----|-----|------|--------|
+| **A17** | Native provenance × SecurityEvent ops explain (deepen A3) | After mutate/swap, operator parses `mid→reason→evict/layout` via audit + heartbeat + `INFO`/`POLICY EXPLAIN`; `tests/test_policy_audit.py` asserts mid join | **DONE** (agent mid join + C explain_* ; native hash mid best-effort) |
+| **A18** | Shadow→Canary auto-promote (close A10+A4) | Default OFF; `SHADOW_AUTOPROMOTE=1` → shadow winner → canary → commit/heal; never EVICT loser; `tests/test_shadow_autopromote.py` | **DONE** (default OFF; canary gate) |
+| **A19** | Abuse / poison-key flood defense | INFO `unique_sets`; storm → defensive choose (lru + refuse pin + soft); `tests/test_poison_keys.py`; S2 variant | **DONE** (C counter + agent mutate path) |
+
+**Residual risks:** A11 Restricted sandbox still PARTIAL; A17 native `query:last-mutation-provenance` may return void under soft sandbox (agent seq mid still joins); A18 autopromote uses heuristic winner (not full dual-kernel fitness); A19 keep* Δ vs static LFU/LRU is demo-best-effort under maxmemory pressure.
+

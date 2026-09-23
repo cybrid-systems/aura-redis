@@ -49,7 +49,9 @@ Redis-compatible cache (RESP, maxmemory kernels, string/typed KV) is **table sta
 | **Mutation audit trail** | Ops-visible why/when body changed | **SHIPPED** | A3: audit file ring + heartbeat last_audit_*; `tests/test_policy_audit.py` |
 | **Canary / rollback of choose-fn** | Trial apply before commit; timed rollback | **SHIPPED** | A4: `AURA_REDIS_CANARY` + inject; `tests/test_policy_canary.py` |
 | **A/B shadow traffic** | Dual policy on sampled GETs | **SHIPPED** (A10) | C `SHADOW` sample + agent dry-run; never apply loser |
-| **Explainability of EVICT/LAYOUT flips** | Structured reason codes for ops | **PARTIAL** | Agent logs signals inline; no `INFO policy_explain` / stable schema |
+| **Shadow→canary auto-promote** | Dry-run winner trial before commit | **SHIPPED** (A18) | Default OFF; canary gate; never EVICT loser |
+| **Poison-key / unique-SET flood defense** | Detect keyspace growth storm → defensive body | **SHIPPED** (A19) | INFO `unique_sets`; defensive `lru\|flat\|soft` |
+| **Explainability of EVICT/LAYOUT flips** | Structured reason codes for ops | **SHIPPED** (A17) | mid→reason→kernel via audit/heartbeat/`INFO explain_*`/`POLICY EXPLAIN` |
 | **Policy version pin across replica failover** | Same choose generation on promote | **SHIPPED** (A6) | Durable pin file + resume `from_version`; C fail-safe keeps last EVICT; version counter process-local (honest) |
 | **Controller cost vs hit-quality** | Auto-freeze when gain < overhead | **SHIPPED** (A8) | `AUTO_FREEZE` → lengthen tick + fitness-off; unfreeze on miss spike; audit auto_freeze/unfreeze |
 | **`hot_cold` threshold via Aura** | Promote/demote knobs mutated live | **SHIPPED** (A9) | CONFIG/RESP `hot-soft-cap-pct|min` + `hot-promote-on-get`; agent optional tune |

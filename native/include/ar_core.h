@@ -176,6 +176,17 @@ uint64_t ar_core_shadow_hits(ArCore* core);
 uint64_t ar_core_shadow_misses(ArCore* core);
 uint64_t ar_core_shadow_diverges(ArCore* core);
 void ar_core_shadow_note_diverge(ArCore* core); /* agent dual-choice diverge */
+/* A17 — POLICY EXPLAIN / INFO explain_* (agent mid join) */
+int ar_core_set_explain(ArCore* core, const char* mid, const char* reason,
+                        const char* op, const char* evict, const char* layout);
+const char* ar_core_explain_join(ArCore* core);
+const char* ar_core_explain_mid(ArCore* core);
+const char* ar_core_explain_reason(ArCore* core);
+const char* ar_core_explain_op(ArCore* core);
+const char* ar_core_explain_evict(ArCore* core);
+const char* ar_core_explain_layout(ArCore* core);
+/* A19 — unique SET counter (new-key SETs) */
+uint64_t ar_core_unique_sets(ArCore* core);
 
 /* P0.3 — active expire sampling (Redis-ish). Walks random buckets and frees
  * keys past expire_at. Returns number expired this call. effort ≈ samples. */

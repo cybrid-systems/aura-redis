@@ -1,0 +1,19 @@
+; choose_defensive — A19 poison/unique-SET storm body: lru + refuse pin + soft erate
+(export *policy-choose-defensive*)
+
+(define *policy-choose-defensive*
+  "(lambda (dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl)
+     (let ((ops (+ dgets dsets)))
+       (if (< ops 20)
+         \"\"
+         (let ((erate (if (> ops 0) (quotient (* 100 devicted) ops) 0))
+               (miss-pct (if (> (+ dhits dmisses) 0)
+                           (quotient (* 100 dmisses) (+ dhits dmisses))
+                           0)))
+           ; Never emit |pin under poison flood; prefer lru + soft budget.
+           (cond
+             ((>= erate 15) \"lru|flat|soft\")
+             ((> miss-pct 60) \"lru|flat|soft\")
+             ((> dsets (* dgets 2)) \"lru|flat|soft\")
+             (else \"lru|flat|soft\"))))))
+")
