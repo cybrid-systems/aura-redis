@@ -9,7 +9,7 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 ## Allowed (Tier 2)
 
 ### Strings
-`PING`, `AUTH`, `HELLO` (stub), `QUIT`, `GET`, `SET` (+ `EX`), `MGET`, `MSET`, `DEL`, `EXISTS`, `INCR`, `DECR`, `EXPIRE`, `TTL`, `TYPE`, `FLUSHDB`, `SCAN`, `KEYS`
+`PING`, `AUTH`, `HELLO` (stub), `QUIT`, `GET`, `SET` (+ `NX`/`XX`/`EX`/`PX`), `SETNX`, `GETSET`, `MGET`, `MSET`, `DEL`, `EXISTS`, `INCR`, `DECR`, `EXPIRE`, `TTL`, `TYPE`, `FLUSHDB`, `SCAN`, `KEYS`
 
 ### HASH
 `HSET`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`
@@ -55,6 +55,14 @@ Full command table: [`commands.md`](commands.md). Ops context: [`runbook.md`](ru
 4. Will `policy_agent` be the only writer of `EVICT`/`LAYOUT`/`PIN`? (Apps should not fight the agent.)
 
 ---
+
+## SET option caveats (Tier 2)
+
+- **Allowed:** `SET key value [NX|XX] [EX seconds|PX milliseconds]`, plus `SETNX` / `GETSET`.
+- **NX/XX:** mutually exclusive; condition fail → null bulk (`$-1`), not an error.
+- **EX/PX:** mutually exclusive; expire `≤0` → `ERR invalid expire time`.
+- **Overwrite:** plain `SET` / `XX` replaces HASH/LIST/ZSET with a string (Redis 7); `NX`/`SETNX` leave typed keys untouched.
+- **Not yet:** `GET` option on SET, `KEEPTTL`, `EXAT`/`PXAT`.
 
 ## SCAN / KEYS caveats (Tier 2)
 

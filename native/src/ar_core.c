@@ -1022,6 +1022,19 @@ int ar_set_bin_ex(ArCore* core, const char* key, size_t klen, const char* val,
   return ar_entry_set_ex(core, key, klen, val, vlen, exp);
 }
 
+int ar_set_bin_px(ArCore* core, const char* key, size_t klen, const char* val,
+                  size_t vlen, int64_t expire_ms) {
+  if (!core || !key || !val)
+    return 0;
+  core->ops++;
+  core->sets++;
+  uint64_t exp = 0;
+  if (expire_ms > 0) {
+    exp = ar_now_ms() + (uint64_t)expire_ms;
+  }
+  return ar_entry_set_ex(core, key, klen, val, vlen, exp);
+}
+
 int ar_set(ArCore* core, const char* key, const char* val) {
   if (!key || !val)
     return 0;

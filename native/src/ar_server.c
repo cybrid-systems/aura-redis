@@ -396,7 +396,8 @@ static int repl_connect_master(ArCore* core, const char* host, int port) {
 }
 
 static int cmd_is_write(const char* cmd, size_t clen) {
-  return cmd_eq(cmd, clen, "set") || cmd_eq(cmd, clen, "del") ||
+  return cmd_eq(cmd, clen, "set") || cmd_eq(cmd, clen, "setnx") ||
+         cmd_eq(cmd, clen, "getset") || cmd_eq(cmd, clen, "del") ||
          cmd_eq(cmd, clen, "expire") || cmd_eq(cmd, clen, "flushdb") ||
          cmd_eq(cmd, clen, "mset") || cmd_eq(cmd, clen, "incr") ||
          cmd_eq(cmd, clen, "decr") || cmd_eq(cmd, clen, "pin") ||
@@ -935,12 +936,28 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     return reply_bulk(c, v, vl);
   }
   if (cmd_eq(cmd, clen, "set")) {
-    /* SET key value [EX seconds] — minimal TTL path (M9) */
+    /* SET key value [NX|XX] [EX seconds|PX milliseconds] — Redis cache subset */
     if (argc < 3)
       return reply_err(c, "ERR wrong number of arguments for 'set'");
-    int64_t ex_sec = -1; /* -1 = plain SET (clear TTL) */
-    for (int oi = 3; oi + 1 < argc; oi += 2) {
-      if (cmd_eq(argv[oi].p, argv[oi].len, "ex")) {
+    int nx = 0, xx = 0;
+    int64_t ex_sec = -1; /* -1 = unset */
+    int64_t px_ms = -1;
+    for (int oi = 3; oi < argc; ) {
+      if (cmd_eq(argv[oi].p, argv[oi].len, "nx")) {
+        if (xx)
+          return reply_err(c, "ERR syntax error");
+        nx = 1;
+        oi++;
+      } else if (cmd_eq(argv[oi].p, argv[oi].len, "xx")) {
+        if (nx)
+          return reply_err(c, "ERR syntax error");
+        xx = 1;
+        oi++;
+      } else if (cmd_eq(argv[oi].p, argv[oi].len, "ex")) {
+        if (oi + 1 >= argc)
+          return reply_err(c, "ERR syntax error");
+        if (ex_sec >= 0 || px_ms >= 0)
+          return reply_err(c, "ERR syntax error");
         char nbuf[32];
         if (argv[oi + 1].len == 0 || argv[oi + 1].len >= sizeof(nbuf))
           return reply_err(c, "ERR invalid expire time in 'set'");
@@ -949,22 +966,94 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         ex_sec = (int64_t)atoll(nbuf);
         if (ex_sec <= 0)
           return reply_err(c, "ERR invalid expire time in 'set'");
+        oi += 2;
+      } else if (cmd_eq(argv[oi].p, argv[oi].len, "px")) {
+        if (oi + 1 >= argc)
+          return reply_err(c, "ERR syntax error");
+        if (ex_sec >= 0 || px_ms >= 0)
+          return reply_err(c, "ERR syntax error");
+        char nbuf[32];
+        if (argv[oi + 1].len == 0 || argv[oi + 1].len >= sizeof(nbuf))
+          return reply_err(c, "ERR invalid expire time in 'set'");
+        memcpy(nbuf, argv[oi + 1].p, argv[oi + 1].len);
+        nbuf[argv[oi + 1].len] = '\0';
+        px_ms = (int64_t)atoll(nbuf);
+        if (px_ms <= 0)
+          return reply_err(c, "ERR invalid expire time in 'set'");
+        oi += 2;
       } else {
         return reply_err(c, "ERR syntax error");
       }
     }
-    if (ex_sec > 0) {
-      if (!ar_set_bin_ex(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len,
-                         ex_sec))
-        return reply_err(c, "ERR OOM");
-    } else {
+    int exists = ar_exists_bin(core, argv[1].p, argv[1].len);
+    if (nx && exists)
+      return reply_null_bulk(c);
+    if (xx && !exists)
+      return reply_null_bulk(c);
+    int ok;
+    if (ex_sec > 0)
+      ok = ar_set_bin_ex(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len,
+                         ex_sec);
+    else if (px_ms > 0)
+      ok = ar_set_bin_px(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len,
+                         px_ms);
+    else {
       core->ops++;
       core->sets++;
-      if (!ar_entry_set(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len))
-        return reply_err(c, "ERR OOM");
+      ok = ar_entry_set(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len);
     }
+    if (!ok)
+      return reply_err(c, "ERR OOM");
     repl_propagate(core, argv, argc);
     return reply_ok(c);
+  }
+  if (cmd_eq(cmd, clen, "setnx")) {
+    /* SETNX key value — integer 1/0 (alias of SET NX) */
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'setnx'");
+    if (ar_exists_bin(core, argv[1].p, argv[1].len))
+      return reply_int(c, 0);
+    core->ops++;
+    core->sets++;
+    if (!ar_entry_set(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len))
+      return reply_err(c, "ERR OOM");
+    repl_propagate(core, argv, argc);
+    return reply_int(c, 1);
+  }
+  if (cmd_eq(cmd, clen, "getset")) {
+    /* GETSET key value — old bulk/null then SET (clears TTL) */
+    if (argc != 3)
+      return reply_err(c, "ERR wrong number of arguments for 'getset'");
+    const char* v = NULL;
+    size_t vl = 0;
+    int gr = get_ptr(core, argv[1].p, argv[1].len, &v, &vl);
+    if (gr < 0)
+      return reply_err(
+          c, "WRONGTYPE Operation against a key holding the wrong kind of value");
+    char* old = NULL;
+    size_t oldlen = 0;
+    if (gr) {
+      old = (char*)malloc(vl ? vl : 1);
+      if (!old)
+        return reply_err(c, "ERR OOM");
+      if (vl)
+        memcpy(old, v, vl);
+      oldlen = vl;
+    }
+    /* get_ptr already counted ops/gets; count the write half */
+    core->sets++;
+    if (!ar_entry_set(core, argv[1].p, argv[1].len, argv[2].p, argv[2].len)) {
+      free(old);
+      return reply_err(c, "ERR OOM");
+    }
+    repl_propagate(core, argv, argc);
+    if (!gr) {
+      free(old);
+      return reply_null_bulk(c);
+    }
+    int rc = reply_bulk(c, old, oldlen);
+    free(old);
+    return rc;
   }
   if (cmd_eq(cmd, clen, "expire")) {
     if (argc != 3)

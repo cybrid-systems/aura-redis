@@ -59,6 +59,9 @@ int ar_set_bin(ArCore* core, const char* key, size_t klen, const char* val,
 /* M9: SET with EX seconds (expire_sec<=0 clears TTL). */
 int ar_set_bin_ex(ArCore* core, const char* key, size_t klen, const char* val,
                   size_t vlen, int64_t expire_sec);
+/* SET with PX milliseconds (expire_ms<=0 clears TTL). */
+int ar_set_bin_px(ArCore* core, const char* key, size_t klen, const char* val,
+                  size_t vlen, int64_t expire_ms);
 /* EXPIRE key seconds — 1 if key exists, 0 else. */
 int ar_expire(ArCore* core, const char* key, size_t klen, int64_t seconds);
 /* TTL: -2 missing, -1 no expire, else remaining seconds. */

@@ -174,6 +174,7 @@ Keep `AURA_REDIS_DENY_PLUGIN=1` for Aura-native demos. Do not re-elevate PLUGIN/
 | T2.6 | Client allowlist (Tier 2 intake) | **DONE** | [`client-allowlist.md`](client-allowlist.md) |
 | T2.7 | Adaptive gate SSOT docs | **DONE** | [`redis-compare.md`](redis-compare.md) · [`perf-eval.md`](perf-eval.md) · runbook §8 |
 | T2.8 | A11 prod-profile risk acceptance | **DONE** (Restricted still PARTIAL) | [`prod-profile.md`](prod-profile.md) |
+| T2.9 | SET NX/XX/EX/PX (+ SETNX/GETSET) | **DONE** | `native/src/ar_server.c`; `tests/test_prod_set_opts.py` |
 
 **Deferred / blocked:** A11 Restricted sandbox without Soft still needs Tenant Admin. Cluster/field-SCAN/Streams/Lua/ACL remain non-goals (keyspace SCAN/KEYS landed for Tier 2). Short `bench_hit_vs_redis` adaptive cites remain non-citeable.
 
@@ -220,3 +221,4 @@ AURA_REDIS_SOAK_SEC=60 ./scripts/soak-prod.sh
 | 2026-09-23 | **Strong-narrative plan** | [`docs/strong-narrative-plan.md`](strong-narrative-plan.md) — native-first SN0–SN3 execution |
 
 | 2026-09-23 | **Tier 2** | GHA ci-prod + nightly bench/soak; typed RDB v2; soak-prod; runbook; allowlist; prod-profile; SSOT docs |
+| 2026-09-23 | **T2.9** | SET NX/XX/EX/PX + SETNX/GETSET; `tests/test_prod_set_opts.py`; docs + ci-prod |

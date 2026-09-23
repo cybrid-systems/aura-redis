@@ -4,7 +4,7 @@
 **Not covered here:** pure-Lisp `AURA_REDIS_ENGINE=aura` (broader demo subset in README).  
 **Production product:** string KV cache + Aura control commands — see [`production-plan.md`](production-plan.md).
 
-Last audited: 2026-09-23 (CST) for P3.16–P3.18 (HASH/LIST/ZSET/MULTI/PubSub/SCAN).
+Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET NX/XX/EX/PX (+ SETNX/GETSET).
 
 ---
 
@@ -22,7 +22,9 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.18 (HASH/LIST/ZSET/MULTI/PubSub/SC
 | `SYNC` | 1 | (stream) | P2.14 internal: full sync + feed; not for apps |
 | `QUIT` | any | `+OK` then close | Allowed pre-AUTH |
 | `GET` | 2 | bulk / null | |
-| `SET` | ≥3 | `+OK` / `ERR OOM` | Optional `EX <sec>` only (no PX/NX/XX on C path) |
+| `SET` | ≥3 | `+OK` / null bulk / `ERR OOM` | Options: `NX`\|`XX` (mutex), `EX <sec>`\|`PX <ms>` (mutex); NX/XX fail → null bulk; overwrites hash/list/zset → string (Redis) |
+| `SETNX` | 3 | integer 0/1 | Alias: set if absent |
+| `GETSET` | 3 | bulk / null / WRONGTYPE | Atomically return old string then SET (clears TTL) |
 | `EXPIRE` | 3 | integer 0/1 | |
 | `TTL` | 2 | integer | −2 missing, −1 no expire, else seconds |
 | `DEL` | ≥2 | integer deleted | multi-key |
@@ -93,7 +95,7 @@ These may exist on the Lisp engine or Redis; **not** in `ar_server.c` today:
 |------|----------|
 | Auth / admin | `SHUTDOWN`, `CLIENT`, `SLOWLOG`, `MONITOR` (AUTH/HELLO done in P0.4) |
 | Persistence / repl | `BGREWRITEAOF`, `PSYNC` (SAVE/BGSAVE/REPLICAOF/SYNC done P2.13–14) |
-| Strings extras | `APPEND`, `STRLEN`, `GETSET`, `SETEX`, `PSETEX`, `SET` NX/XX/PX |
+| Strings extras | `APPEND`, `STRLEN`, `SETEX`, `PSETEX`, `SET` GET/KEEPTTL/EXAT/PXAT |
 | Keys extras | `DBSIZE`, `RENAME`, `UNLINK` (≠ DEL alias); `KEYS`/`SCAN` done P3.18 |
 | (types) | HASH/LIST/ZSET done P3.16 |
 | Patterns / WATCH | `PSUBSCRIBE`, `WATCH`/`UNWATCH` (deferred) |
