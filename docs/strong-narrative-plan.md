@@ -70,7 +70,7 @@ Make ops trust live code change: durable audit, canary, prod-shaped sandbox.
 | **Exit criteria** | `tests/test_policy_audit.py` PASS; explain reasons on `phase_marathon` path ∈ {miss_spike, soft_goal, ttl_pressure, prefix_policy, fitness_swap, evolve_keep, …} |
 | **Depends-on** | — (can follow A1/A2) |
 | **Estimate** | 1–2d |
-| **Status** | **TODO** |
+| **Status** | **DONE** (2026-09-23): durable audit ring + heartbeat last_audit_*/last_explain; `tests/test_policy_audit.py` PASS
 
 #### SN4 / A4 — Canary choose-fn
 
@@ -183,3 +183,4 @@ If A2 or A3 blocked: document blocker here, push partial, continue what is possi
 | Date (CST) | Notes |
 |------------|-------|
 | 2026-09-23 | Initial native-first strong-narrative plan (SN0–SN3 / A1–A16). |
+| 2026-09-23 | A1 +27.9pp, A2 +57.1pp, A3 audit ring + test green on main. |

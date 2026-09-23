@@ -160,6 +160,17 @@
 (define *backoff-cap* 4000)
 (define *conn-alive* #f)
 (define *heartbeat-file* "")
+; A3: durable mutation audit ring (file) + last explain fields for heartbeat/INFO
+(define *audit-file* "")
+(define *audit-ring-max* 64)
+(define *audit-count* 0)
+(define *last-audit-op* "")
+(define *last-audit-from* "")
+(define *last-audit-to* "")
+(define *last-audit-reason* "")
+(define *last-audit-version* 0)
+(define *last-audit-ts* 0)
+(define *last-explain* "")
 (define *password* "")
 (define *force-reconnect-after* 0)
 (define *tick-count* 0)
@@ -242,6 +253,20 @@
       (newline))
     (begin
       (display "policy_agent: heartbeat-file=(none)")
+      (newline))))
+(let ((e (getenv "AURA_REDIS_POLICY_AUDIT")))
+  (if (and (string? e) (> (string-length e) 0))
+    (begin
+      (set! *audit-file* e)
+      (display "policy_agent: audit-file=")
+      (display *audit-file*)
+      (newline))
+    (begin
+      ; default under /work so host tests can read it
+      (set! *audit-file*
+        (string-append "/work/.ar-policy-audit-" (number->string *port*) ".log"))
+      (display "policy_agent: audit-file=")
+      (display *audit-file*)
       (newline))))
 (let ((e (getenv "AURA_REDIS_POLICY_FORCE_RECONNECT_AFTER")))
   (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
@@ -682,6 +707,10 @@
                    (set! *champ-min* *trial-min*)
                    (set! *champ-miss* *trial-miss*)
                    (set! *evolve-keeps* (+ *evolve-keeps* 1))
+                   (audit-append! "evolve-keep"
+                                  (number->string *champ-min*)
+                                  (number->string *trial-min*)
+                                  "evolve_keep")
                    (evolve-log! "keep" fit))
                  (begin
                    ; revert / heal to champion thresholds
@@ -759,6 +788,7 @@
             (set! *ticks-since-fitness* 0)
             (set! *post-swap-bad* 0)
             (set! *force-rechoose* #t)
+            (audit-append! "fitness-swap" from to-name reason)
             ; A1: apply LFU+PIN immediately in THIS stack frame. mutate:rebind
             ; re-evals the file (nested); waiting for a later tick is unreliable.
             (if (and (string=? to-name "aggressive") (number? *sock*))
@@ -1040,6 +1070,65 @@
   (newline)
   #t)
 
+
+;; A3 — durable audit ring + explain schema
+;; Line schema: ts=<ms> op=<fitness-swap|evolve-keep|evict|heal|...> from=<a> to=<b> reason=<r> version=<n>
+;; Prefer native (query:last-mutation-provenance) when available; always write structured file.
+(define (audit-native-note)
+  (try
+    (let ((p (query:last-mutation-provenance)))
+      (if (string? p) p ""))
+    (catch (e) "")))
+
+(define (audit-append! op from to reason)
+  (set! *last-audit-ts* (monotonic-ms))
+  (set! *last-audit-op* op)
+  (set! *last-audit-from* from)
+  (set! *last-audit-to* to)
+  (set! *last-audit-reason* reason)
+  (set! *last-audit-version* (try (hot-strategy:version) (catch (e) *last-audit-version*)))
+  (set! *audit-count* (+ *audit-count* 1))
+  (set! *last-explain*
+    (string-append op ":" reason ":" from "->" to))
+  (let ((native (audit-native-note))
+        (line (string-append
+                "ts=" (number->string *last-audit-ts*)
+                " op=" op
+                " from=" from
+                " to=" to
+                " reason=" reason
+                " version=" (number->string *last-audit-version*)
+                (if (and (string? native) (> (string-length native) 0))
+                  (string-append " native=" native)
+                  "")
+                "\n")))
+    (display "policy_agent: audit ")
+    (display line)
+    (if (and (string? *audit-file*) (> (string-length *audit-file*) 0))
+      (begin
+        ; append-best-effort: read existing (cap ring) then rewrite
+        (let ((prev (try (read-file *audit-file*) (catch (e) "")))
+              (keep ""))
+          (if (and (string? prev) (> (string-length prev) 0))
+            (set! keep prev)
+            #t)
+          (let ((merged (string-append keep line)))
+            ; crude ring: if too long, keep tail ~8k
+            (if (> (string-length merged) 8192)
+              (set! merged
+                (substring merged (- (string-length merged) 6144)
+                           (string-length merged)))
+              #t)
+            (write-file *audit-file* merged)
+            (display "policy_agent: audit-file wrote path=")
+            (display *audit-file*)
+            (newline)))
+        #t)
+      #t)
+  ; A3: heartbeat refresh even if mutate:rebind re-entry skips later ticks
+  (write-heartbeat!)
+  #t))
+
 (define (write-heartbeat!)
   (if (or (not (string? *heartbeat-file*)) (= (string-length *heartbeat-file*) 0))
     #f
@@ -1052,7 +1141,14 @@
                        "last_evict=" *last-evict* "\n"
                        "last_layout=" *last-layout* "\n"
                        "reconnects=" (number->string *reconnects*) "\n"
-                       "applies=" (number->string *applies*) "\n")))
+                       "applies=" (number->string *applies*) "\n"
+                       "audit_count=" (number->string *audit-count*) "\n"
+                       "last_audit_op=" *last-audit-op* "\n"
+                       "last_audit_from=" *last-audit-from* "\n"
+                       "last_audit_to=" *last-audit-to* "\n"
+                       "last_audit_reason=" *last-audit-reason* "\n"
+                       "last_audit_version=" (number->string *last-audit-version*) "\n"
+                       "last_explain=" *last-explain* "\n")))
         (write-file *heartbeat-file* payload)
         (display "policy_agent: heartbeat wrote path=")
         (display *heartbeat-file*)
@@ -1396,7 +1492,9 @@
                                 (redis-call! *sock* "EVICT" ev-name)
                                 (set! *last-evict* ev-name)
                                 (set! *applies* (+ *applies* 1))
-                                (set! *swaps* (+ *swaps* 1))))
+                                (set! *swaps* (+ *swaps* 1))
+                                (audit-append! "evict" cur ev-name
+                                               (if (string? *phase-hint*) *phase-hint* "choose")))))
                             #t)
                           (if (and (> (string-length ly-name) 0)
                                    (not (string=? ly-name cur-layout)))
@@ -1611,5 +1709,4 @@
 (display *profile-name*)
 (newline)
 (if *fatal* (set! *exit* 1) #t)
-)) ; end A1 early-guard if/begin
-
+) ; end A1 early-guard if/begin
