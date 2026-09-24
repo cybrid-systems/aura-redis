@@ -525,8 +525,30 @@ class AuraAgentController:
             env["AURA_REDIS_THRESH_MISS_PIN"] = str(self.thresh_miss_pin)
         if profile:
             env["AURA_REDIS_POLICY_PROFILE_FILE"] = profile
-        self.cid = _start_agent(env=env, log_path=self.log)
-        _wait_log(self.cid, ["PING"], timeout=12.0, log_path=self.log, poll=0.15)
+        # Explicit host paths (same as ci-prod agent tests). Avoids stale
+        # /work/... defaults when the GHA job runs the agent natively.
+        hb = ROOT / f".ar-policy-hb-bench-{self.port}"
+        audit = ROOT / f".ar-policy-audit-bench-{self.port}.log"
+        pin = ROOT / f".ar-policy-pin-{self.port}.pin"
+        for pth in (hb, audit, pin):
+            pth.unlink(missing_ok=True)
+        self.cid = _start_agent(
+            env=env,
+            log_path=self.log,
+            path_env={
+                "AURA_REDIS_POLICY_HEARTBEAT": hb,
+                "AURA_REDIS_POLICY_AUDIT": audit,
+                "AURA_REDIS_POLICY_PIN": pin,
+            },
+        )
+        _wait_log(
+            self.cid,
+            ["PING", "PONG", "policy_agent:"],
+            timeout=30.0,
+            log_path=self.log,
+            poll=0.15,
+            match_any=True,
+        )
 
     def harvest_swaps(self) -> None:
         if not self.cid:

@@ -548,11 +548,11 @@
       (display *pin-file*)
       (newline))
     (begin
-      ; default beside heartbeat or under /work
+      ; default beside heartbeat, else cwd-relative (native cwd=repo, docker cwd=/work)
       (set! *pin-file*
         (if (and (string? *heartbeat-file*) (> (string-length *heartbeat-file*) 0))
           (string-append *heartbeat-file* ".pin")
-          (string-append "/work/.ar-policy-pin-" (number->string *port*) ".pin")))
+          (string-append ".ar-policy-pin-" (number->string *port*) ".pin")))
       (display "policy_agent: pin-file=")
       (display *pin-file*)
       (newline))))
@@ -564,9 +564,9 @@
       (display *audit-file*)
       (newline))
     (begin
-      ; default under /work so host tests can read it
+      ; default cwd-relative so native GHA and docker (/work) share one path
       (set! *audit-file*
-        (string-append "/work/.ar-policy-audit-" (number->string *port*) ".log"))
+        (string-append ".ar-policy-audit-" (number->string *port*) ".log"))
       (display "policy_agent: audit-file=")
       (display *audit-file*)
       (newline))))
