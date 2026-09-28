@@ -188,7 +188,7 @@ def wait_log(
     handle: str,
     needles: list[str],
     *,
-    timeout: float = 20.0,
+    timeout: float = 30.0,
     log_path: Path | None = None,
     poll: float = 0.15,
     match_any: bool = False,

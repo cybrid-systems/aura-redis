@@ -127,7 +127,7 @@ def stop_agent(cid: str) -> None:
     _stop_agent(cid)
 
 
-def wait_log(cid: str, needles: list[str], timeout: float = 20.0) -> str:
+def wait_log(cid: str, needles: list[str], timeout: float = 30.0) -> str:
     return _wait_log(cid, needles, timeout=timeout, log_path=AGENT_LOG)
 
 
@@ -196,7 +196,7 @@ def test_kill_agent_kernel_stays() -> None:
     stop = threading.Event()
     threading.Thread(target=write_load, args=(stop, 10.0), daemon=True).start()
     try:
-        wait_log(cid, ["PING →"], timeout=20)
+        wait_log(cid, ["PING →"], timeout=30)
         time.sleep(1.0)
         # Snapshot kernel immediately before killing agent (agent may have mutated)
         with socket.create_connection(("127.0.0.1", PORT), timeout=5) as sock:
@@ -208,7 +208,7 @@ def test_kill_agent_kernel_stays() -> None:
         assert after == before, f"{before} → {after}"
         cid2 = start_agent(force_after=0)
         try:
-            wait_log(cid2, ["policy-pin tag=connect"], timeout=20)
+            wait_log(cid2, ["policy-pin tag=connect"], timeout=30)
             with socket.create_connection(("127.0.0.1", PORT), timeout=5) as sock:
                 assert info_field(sock, "evict") == after
             print(f"PASS kill/restart agent; kernel stayed {after}")

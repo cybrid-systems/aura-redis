@@ -10,7 +10,7 @@ export AURA_REDIS_DENY_PLUGIN=1
 
 echo "=== ci-bench: regret headline packs ==="
 python3 scripts/bench_regret.py phase_marathon
-python3 scripts/bench_regret.py zipf
+python3 scripts/bench_regret.py zipf_hotkey
 python3 scripts/bench_regret.py hot_protect
 python3 scripts/bench_regret.py poison_heal
 

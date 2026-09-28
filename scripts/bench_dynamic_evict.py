@@ -1533,6 +1533,16 @@ def _policy_agent_opts(policy: str) -> tuple:
     return fitness, seed, evolve, thresh_min, thresh_miss
 
 
+# Historical/docs short name: zipf → canonical zipf_hotkey (gates + RunResult key).
+WORKLOAD_ALIASES = {
+    "zipf": "zipf_hotkey",
+}
+
+
+def normalize_workload(name: str) -> str:
+    return WORKLOAD_ALIASES.get(name, name)
+
+
 def run_one(
     workload: str,
     policy: str,
@@ -1541,6 +1551,7 @@ def run_one(
     adaptive_backend: str,
 ) -> RunResult:
     global _ACTIVE_CONTROLLER
+    workload = normalize_workload(workload)
     adaptive = "off"
     start_evict = policy if policy in ("lru", "lfu", "noop", "ttl_aware") else "lru"
     fitness_mutate = True
@@ -2350,7 +2361,7 @@ def main() -> int:
     ap.add_argument(
         "--workloads",
         default="phase_marathon,zipf_hotkey,hot_protect,ws_shift,oscillate",
-        help="Comma list: phase_marathon,diurnal_shift,mutation_gain,poison_heal,zipf_hotkey,...",
+        help="Comma list: phase_marathon,diurnal_shift,mutation_gain,poison_heal,zipf_hotkey (alias: zipf),...",
     )
     ap.add_argument(
         "--policies",
@@ -2374,7 +2385,11 @@ def main() -> int:
     ap.add_argument("--skip-assert", action="store_true")
     args = ap.parse_args()
 
-    workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]
+    workloads = [
+        normalize_workload(w.strip())
+        for w in args.workloads.split(",")
+        if w.strip()
+    ]
     policies = [p.strip() for p in args.policies.split(",") if p.strip()]
     # Default = Aura agent. Explicit --python-ctl or AURA_AGENT=0 → Python mirror.
     env_agent = os.environ.get("AURA_AGENT", "1").strip().lower()

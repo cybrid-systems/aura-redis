@@ -53,7 +53,7 @@ dev image; runners fall back to `ghcr.io/cybrid-systems/dev:v1.0.7` when needed.
 |--------|----------|---------------|
 | `ci-prod.sh` | Aura FFI/TCP + P0 + P3 + calls `ci-strong.sh` | — (top gate) |
 | `ci-strong.sh` | P1 config/clients/slowlog + P2 rdb/replica/tls/policy_ha + A3–A13 strong suites + `test_strong_edges.py` | yes |
-| `ci-bench.sh` | Regret packs (`phase_marathon`, zipf, hot_protect, poison_heal; full via env) | **no** |
+| `ci-bench.sh` | Regret packs (`phase_marathon`, `zipf_hotkey` (alias `zipf`), hot_protect, poison_heal; full via env) | **no** |
 | `bench-vs-redis.sh` | Memtier ops/s + hit-quality vs `redis:7-alpine` dual scoreboard | **no** |
 
 
