@@ -17,8 +17,11 @@
 ;                                   (normal|aggressive|conservative|inverted|broken);
 ;                                   on change, hot-strategy:swap! (demo-mvp invert/heal)
 ;   AURA_REDIS_FITNESS_MUTATE=0|1   fitness-driven hot-strategy profile swap/heal
-;                                   (default 1). Set 0 or AURA_REDIS_FROZEN=1 to freeze
-;                                   choose-fn after seed (adaptive_frozen bench).
+;                                   (default 1). Set 0 to disable maybe-fitness-mutate!
+;                                   (A19 poison-defense still may swap choose-fn).
+;   AURA_REDIS_FROZEN=1             freeze choose-fn after seed (adaptive_frozen /
+;                                   poison_frozen bench). Implies fitness-off AND
+;                                   skips A19 defensive profile swap.
 ;   AURA_REDIS_SEED_PROFILE         initial body after register (default normal)
 ;   AURA_REDIS_EVOLVE=0|1           M11 slow online evolve loop (multi-gen threshold
 ;                                   mutate + fitness window + keep/revert). Distinct
@@ -121,6 +124,9 @@
 (define *profile-name* "normal")
 (define *seed-profile* "normal")
 (define *fitness-on* #t)
+; AURA_REDIS_FROZEN=1: hard-freeze choose-fn after seed (stronger than fitness-off).
+; Distinct from A8 *meta-frozen* (cost-gate) and from FITNESS_MUTATE=0 alone.
+(define *seed-frozen* #f)
 (define *last-good-profile* "normal")
 (define *prev-ewma* 0)
 (define *ticks-bad* 0)
@@ -341,7 +347,10 @@
 (let ((e (getenv "AURA_REDIS_FROZEN")))
   (if (and (string? e)
            (or (string=? e "1") (string=? e "true") (string=? e "yes")))
-    (set! *fitness-on* #f)
+    (begin
+      (set! *seed-frozen* #t)
+      (set! *fitness-on* #f)
+      (display "policy_agent: seed-frozen (choose-fn pinned after seed)\n"))
     #t))
 (let ((e (getenv "AURA_REDIS_AUTO_FREEZE")))
   (set! *auto-freeze-enabled*
@@ -1296,21 +1305,28 @@
             (display " active=")
             (display *poison-active*)
             (newline)
-            (if (not *poison-active*)
+            ; Bench FROZEN / poison_frozen: keep inverted seed; A19 defensive
+            ; swap would heal frozen and collapse poison_heal mutate−frozen Δ.
+            ; FITNESS_MUTATE=0 alone still allows A19 (test_poison_keys).
+            (if *seed-frozen*
               (begin
-                (set! *poison-active* #t)
-                (set! *poison-trips* (+ *poison-trips* 1))
-                ; A8: poison storm is a reason to leave meta-freeze — defensive
-                ; swap needs base tick_ms, not the cost-gate stretch.
-                (if *meta-frozen*
-                  (exit-auto-freeze! "poison_storm")
+                (display "policy_agent: skip poison-defense (seed-frozen)\n")
+                #f)
+              (if (not *poison-active*)
+                (begin
+                  (set! *poison-active* #t)
+                  (set! *poison-trips* (+ *poison-trips* 1))
+                  ; A8: poison storm is a reason to leave meta-freeze — defensive
+                  ; swap needs base tick_ms, not the cost-gate stretch.
+                  (if *meta-frozen*
+                    (exit-auto-freeze! "poison_storm")
+                    #t)
+                  (audit-append! "poison-defense" *profile-name* "defensive" "unique_set_storm")
+                  (if *canary-on*
+                    (canary-start! "defensive" "unique_set_storm")
+                    (do-fitness-swap-commit! "defensive" "unique_set_storm"))
                   #t)
-                (audit-append! "poison-defense" *profile-name* "defensive" "unique_set_storm")
-                (if *canary-on*
-                  (canary-start! "defensive" "unique_set_storm")
-                  (do-fitness-swap-commit! "defensive" "unique_set_storm"))
-                #t)
-              #t))
+                #t)))
           (if (and *poison-active* (< dunique 5))
             (begin
               (set! *poison-active* #f)
