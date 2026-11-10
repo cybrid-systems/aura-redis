@@ -129,9 +129,9 @@
      "aura_redis_version:" *redis-version* "\r\n"
      "tcp_port:loopback\r\n"
      "# Keyspace\r\n"
-     "db0:keys=" keys "\r\n"
+     "db0:keys=" (number->string keys) "\r\n"
      "# Stats\r\n"
-     "uptime_in_seconds:" uptime "\r\n")))
+     "uptime_in_seconds:" (number->string uptime) "\r\n")))
 
 (define (cmd-dispatch args)
   (if (or (not (pair? args)) (= (length args) 0))
