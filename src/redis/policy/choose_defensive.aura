@@ -8,14 +8,14 @@
      (let ((ops (+ dgets dsets)))
        (if (< ops 20)
          \"\"
-         (let ((erate (if (> ops 0) (quotient (* 100 devicted) ops) 0))
-               (miss-pct (if (> (+ dhits dmisses) 0)
-                           (quotient (* 100 dmisses) (+ dhits dmisses))
+         (let ((hit-pct (if (> (+ dhits dmisses) 0)
+                           (quotient (* 100 dhits) (+ dhits dmisses))
                            0)))
-           ; Never emit |pin under poison flood; prefer lfu + soft budget.
-           (cond
-             ((>= erate 15) \"lfu|flat|soft\")
-             ((> miss-pct 60) \"lfu|flat|soft\")
-             ((> dsets (* dgets 2)) \"lfu|flat|soft\")
-             (else \"lfu|flat|soft\"))))))
+           ; A read-heavy working set is not a unique-SET flood. Recency
+           ; (LRU, no pin) keeps the keys just written and then read, so
+           ; phase_marathon ws_shift can leave LFU. Write-only floods stay
+           ; on LFU + soft and never emit |pin.
+           (if (and (>= dgets 40) (> dgets dsets) (>= hit-pct 45))
+             \"lru|flat\"
+             \"lfu|flat|soft\")))))
 ")

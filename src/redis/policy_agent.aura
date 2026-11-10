@@ -290,6 +290,8 @@
 (define *poison-defense* #t)
 (define *poison-unique-rate* 40)
 (define *poison-active* #f)
+(define *poison-pending* #f)
+(define *poison-return-profile* "normal")
 (define *poison-trips* 0)
 (define *prev-unique-sets* 0)
 (define *have-unique-prev* #f)
@@ -1284,55 +1286,139 @@
 
 
 ;; A19 — unique-SET / keyspace growth storm -> defensive choose body
-;; Defensive = lfu + refuse pin + soft/erate (LFU protects keep* under unique-SET flood).
-(define (maybe-poison-defense! dunique nkeys dsets)
+;; Defensive = lfu + refuse pin + soft/erate while the window stays write-only.
+;; A following read-heavy working set (phase_marathon ws_shift) is not a storm:
+;; confirm only after a quiet tick or a second flood tick, and leave LFU when
+;; the same keys are then read.
+(define (poison-working-set? dgets dsets dhits dmisses)
+  (let ((hit-pct (if (> (+ dhits dmisses) 0)
+                   (quotient (* 100 dhits) (+ dhits dmisses))
+                   0)))
+    (and (>= dgets 40) (> dgets dsets) (>= hit-pct 45))))
+
+(define (poison-write-flood? dunique dgets dsets nkeys)
+  (and (< dgets dunique)
+       (or (>= dunique *poison-unique-rate*)
+           (and (>= dunique 15) (> nkeys 100) (> dsets 20) (< dgets 8)))))
+
+(define (poison-enter! reason)
+  (set! *poison-pending* #f)
+  (set! *poison-return-profile*
+    (if (or (not (string? *profile-name*))
+            (= (string-length *profile-name*) 0)
+            (string=? *profile-name* "defensive"))
+      "normal"
+      *profile-name*))
+  (set! *poison-active* #t)
+  (set! *poison-trips* (+ *poison-trips* 1))
+  (if *meta-frozen*
+    (exit-auto-freeze! "poison_storm")
+    #t)
+  (audit-append! "poison-defense" *profile-name* "defensive" reason)
+  (if *canary-on*
+    (canary-start! "defensive" reason)
+    (do-fitness-swap-commit! "defensive" reason))
+  #t)
+
+(define (poison-leave-working-set!)
+  (set! *poison-active* #f)
+  (set! *poison-pending* #f)
+  (let ((to (if (and (string? *poison-return-profile*)
+                     (> (string-length *poison-return-profile*) 0)
+                     (not (string=? *poison-return-profile* "defensive")))
+              *poison-return-profile*
+              "normal")))
+    (display "policy_agent: poison-clear working-set → ")
+    (display to)
+    (newline)
+    (if (not (string=? *profile-name* to))
+      (let ((body (body-for-profile to))
+            (ok #f))
+        (set! ok
+          (try
+            (begin
+              (mutate:rebind "choose-fn" body "poison-clear")
+              #t)
+            (catch (e) #f)))
+        (display "policy_agent: poison-clear rebind result=")
+        (display ok)
+        (newline)
+        (if ok
+          (begin
+            (set! *profile-name* to)
+            (audit-append! "poison-clear" "defensive" to "working_set"))
+          #t))
+      #t)
+    ; No *force-rechoose*: that feeds a synthetic miss spike and pins LFU.
+    (if (number? *sock*)
+      (begin
+        (redis-call! *sock* "EVICT" "lru")
+        (set! *last-evict* "lru")
+        #t)
+      #t)))
+
+(define (maybe-poison-defense! dunique nkeys dsets dgets dhits dmisses)
   (if (not *poison-defense*)
     #f
-    (begin
-      ; Storm: unique-SET flood OR keyspace growing under write pressure.
-      (let ((storm (or (>= dunique *poison-unique-rate*)
-                       (and (>= dunique 15)
-                            (> nkeys 100)
-                            (> dsets 20)))))
-        (if storm
+    (let ((flood (poison-write-flood? dunique dgets dsets nkeys))
+          (ws (poison-working-set? dgets dsets dhits dmisses)))
+      ; Bench FROZEN / poison_frozen: keep the seeded choose-fn. FITNESS_MUTATE=0
+      ; alone still allows A19 (test_poison_keys).
+      (if *seed-frozen*
+        (if flood
           (begin
-            (display "policy_agent: poison-storm unique=")
-            (display dunique)
-            (display " nkeys=")
-            (display nkeys)
-            (display " dsets=")
-            (display dsets)
-            (display " active=")
-            (display *poison-active*)
-            (newline)
-            ; Bench FROZEN / poison_frozen: keep inverted seed; A19 defensive
-            ; swap would heal frozen and collapse poison_heal mutate−frozen Δ.
-            ; FITNESS_MUTATE=0 alone still allows A19 (test_poison_keys).
-            (if *seed-frozen*
-              (begin
-                (display "policy_agent: skip poison-defense (seed-frozen)\n")
-                #f)
-              (if (not *poison-active*)
-                (begin
-                  (set! *poison-active* #t)
-                  (set! *poison-trips* (+ *poison-trips* 1))
-                  ; A8: poison storm is a reason to leave meta-freeze — defensive
-                  ; swap needs base tick_ms, not the cost-gate stretch.
-                  (if *meta-frozen*
-                    (exit-auto-freeze! "poison_storm")
-                    #t)
-                  (audit-append! "poison-defense" *profile-name* "defensive" "unique_set_storm")
-                  (if *canary-on*
-                    (canary-start! "defensive" "unique_set_storm")
-                    (do-fitness-swap-commit! "defensive" "unique_set_storm"))
-                  #t)
-                #t)))
-          (if (and *poison-active* (< dunique 5))
-            (begin
-              (set! *poison-active* #f)
-              (display "policy_agent: poison-storm cleared\n")
-              #t)
-            #f))))))
+            (display "policy_agent: skip poison-defense (seed-frozen)\n")
+            #f)
+          #f)
+        (cond
+          (ws
+           (set! *poison-pending* #f)
+           (if *poison-active*
+             (poison-leave-working-set!)
+             #f))
+          (flood
+           (if *poison-active*
+             #t
+             (if *poison-pending*
+               (begin
+                 (display "policy_agent: poison-storm unique=")
+                 (display dunique)
+                 (display " nkeys=")
+                 (display nkeys)
+                 (display " dsets=")
+                 (display dsets)
+                 (display " dgets=")
+                 (display dgets)
+                 (newline)
+                 (display "policy_agent: poison-confirm unique_set_storm\n")
+                 (poison-enter! "unique_set_storm"))
+               (begin
+                 (set! *poison-pending* #t)
+                 (display "policy_agent: poison-pending unique=")
+                 (display dunique)
+                 (display " dgets=")
+                 (display dgets)
+                 (newline)
+                 #f))))
+          ((and *poison-pending* (< dgets 8) (< dunique 5))
+           (display "policy_agent: poison-storm unique=")
+           (display dunique)
+           (display " nkeys=")
+           (display nkeys)
+           (display " dsets=")
+           (display dsets)
+           (display " dgets=")
+           (display dgets)
+           (newline)
+           (display "policy_agent: poison-confirm quiet unique_set_storm\n")
+           (poison-enter! "unique_set_storm"))
+          (else
+           (if *poison-pending*
+             (begin
+               (set! *poison-pending* #f)
+               (display "policy_agent: poison-pending cancelled\n")
+               #f)
+             #f)))))))
 
 ;; A18 score: winner_score = (100 - hit_ewma) + (shadow_miss_pct / 2)
 ;;            + 5 * min(diverges, 6). Promote when samples>=min AND score>=gate.
@@ -2732,7 +2818,7 @@
                 (let ((dunique (if *have-unique-prev* (- unique-sets *prev-unique-sets*) 0)))
                   (set! *prev-unique-sets* unique-sets)
                   (set! *have-unique-prev* #t)
-                  (maybe-poison-defense! dunique nk dsets))
+                  (maybe-poison-defense! dunique nk dsets dgets dhits dmisses))
                 (set! *last-dexpired* dexpired)
                 (set! *last-avg-ttl* at)
                 (set! *last-keys-ttl* kt)
