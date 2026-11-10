@@ -52,12 +52,12 @@
   (cond
     ((= n 0) *RESP-ZERO*)
     ((= n 1) *RESP-ONE*)
-    (else (string-append ":" n "\r\n"))))
+    (else (string-append ":" (number->string n) "\r\n"))))
 
 (define (resp-encode-bulk s)
   (if (not (string? s))
     *RESP-NULL*
-    (string-append "$" (string-length s) "\r\n" s "\r\n")))
+    (string-append "$" (number->string (string-length s)) "\r\n" s "\r\n")))
 
 (define (resp-encode-null) *RESP-NULL*)
 
@@ -72,7 +72,7 @@
       (lambda ()
         (set! body (string-append body (resp-encode (car xs))))
         (set! xs (cdr xs))))
-    (string-append "*" n "\r\n" body)))
+    (string-append "*" (number->string n) "\r\n" body)))
 
 (define (resp-encode v)
   (cond
