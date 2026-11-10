@@ -56,6 +56,10 @@ live champ; INFO `shadow_*` keys.
 
 ## A19 `choose_defensive`
 
-Poison / unique-SET storm body: always emits `lfu|flat|soft` (LFU-oriented keep*
-defense; refuse `|pin`). See `tests/test_poison_keys.py` + `docs/diff-vs-redis.md` E2.
+Poison / unique-SET storm body. A write-only flood still emits `lfu|flat|soft`
+(LFU-oriented keep* defense; refuse `|pin`). A read-heavy working set
+(`dgets` above `dsets`, hit rate at least 45%) emits `lru|flat` so
+`phase_marathon` can leave LFU. The agent confirms a storm only after a
+quiet tick or a second flood tick, so a unique-SET burst that is immediately
+read (ws_shift) does not stick on LFU. See `tests/test_poison_keys.py`.
 
