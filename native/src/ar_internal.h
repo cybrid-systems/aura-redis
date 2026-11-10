@@ -5,6 +5,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 
 /* P3.16 — value type tag (string remains default / 0). */
@@ -54,18 +56,27 @@ typedef struct ArZSet {
   size_t cap;
 } ArZSet;
 
+/* Short keys live in the entry so GET/SET compare does not chase a second
+ * allocation. 24 bytes covers memtier keys and typical short names; longer
+ * keys stay on the heap (key_embed=0). */
+#define AR_EMBED_KEY 24
+
 typedef struct ArEntry {
-  char* key;
+  struct ArEntry* next;
+  uint64_t hash; /* ar_key_hash(key); 0 only for a zeroed unused entry */
   size_t klen;
   uint8_t type; /* ArType */
-  char* val;    /* string payload; NULL for non-string */
+  uint8_t key_embed; /* 1 → key bytes are in embed_key, not a malloc */
+  uint8_t val_embed; /* reserved; string values stay heap-allocated */
+  uint8_t lfu_freq; /* approximate LFU counter (Iteration 5) */
+  uint8_t pinned;   /* MVP M4: skip in eviction when set */
+  char embed_key[AR_EMBED_KEY];
+  char* key; /* embed_key or malloc; never free when key_embed */
+  char* val; /* string payload; NULL for non-string */
   size_t vlen;
   void* obj;    /* ArHash* / ArList* / ArZSet* when type != STRING */
   uint64_t last_access;
-  uint8_t lfu_freq; /* approximate LFU counter (Iteration 5) */
-  uint8_t pinned;   /* MVP M4: skip in eviction when set */
   uint64_t expire_at; /* 0 = none; else absolute deadline ms (M9) */
-  struct ArEntry* next;
 } ArEntry;
 
 typedef enum {
@@ -201,6 +212,9 @@ struct ArCore {
   char explain_join[192];
   /* A19 — unique SET / keyspace growth counters */
   uint64_t unique_sets; /* SETs that created a new key */
+  /* Write-path skips: 0 means do not walk AR_MAX_CONN. */
+  int nwatchers; /* connections with watch_n > 0 */
+  uint64_t repl_slot_scans; /* slots examined by repl_propagate */
 
   /* network */
   int listen_fd;
@@ -248,6 +262,7 @@ struct ArCore {
   int rdb_last_bgsave_ok; /* 1 ok / 0 fail */
 
   /* P2.14 — best-effort single-replica async replication */
+  int nreplicas; /* live is_replica connections; 0 skips repl_propagate scan */
   int repl_readonly; /* 1 if this node is a replica */
   char master_host[64];
   int master_port;
@@ -383,6 +398,68 @@ ArZSet* ar_zset_get(ArCore* core, const char* key, size_t klen, int* wrongtype);
 /* shared */
 size_t ar_fnv_hash(const char* s, size_t n);
 char* ar_xmemdup(const char* s, size_t n);
+
+/* Key hash for the primary table. Short keys (the GET/SET profile) are one
+ * multiply; long keys mix 8-byte chunks. Not FNV — field hashes stay FNV. */
+static inline size_t ar_key_hash(const char* s, size_t n) {
+  const unsigned char* p = (const unsigned char*)s;
+  uint64_t h = 0x9E3779B185EBCA87ull ^ ((uint64_t)n * 0xC2B2AE3D27D4EB4Full);
+  size_t i = 0;
+  while (i + 8 <= n) {
+    uint64_t v;
+    memcpy(&v, p + i, 8);
+    h ^= v;
+    h *= 0xC2B2AE3D27D4EB4Full;
+    h ^= h >> 33;
+    i += 8;
+  }
+  if (i < n) {
+    uint64_t v = 0;
+    memcpy(&v, p + i, n - i);
+    h ^= v;
+    h *= 0x165667B19E3779F9ull;
+  }
+  h ^= h >> 32;
+  return (size_t)h;
+}
+
+static inline void ar_entry_release_key(ArEntry* e) {
+  if (!e)
+    return;
+  if (e->key && !e->key_embed)
+    free(e->key);
+  e->key = NULL;
+  e->key_embed = 0;
+}
+
+/* Install key bytes. On OOM the previous key is left unchanged and 0 is returned. */
+static inline int ar_entry_assign_key(ArEntry* e, const char* key, size_t klen) {
+  if (!e)
+    return 0;
+  if (klen < AR_EMBED_KEY) {
+    char tmp[AR_EMBED_KEY];
+    if (klen && key)
+      memcpy(tmp, key, klen);
+    tmp[klen] = '\0';
+    ar_entry_release_key(e);
+    memcpy(e->embed_key, tmp, klen + 1);
+    e->key = e->embed_key;
+    e->key_embed = 1;
+  } else {
+    char* p = (char*)malloc(klen + 1);
+    if (!p)
+      return 0;
+    if (klen && key)
+      memcpy(p, key, klen);
+    p[klen] = '\0';
+    ar_entry_release_key(e);
+    e->key = p;
+    e->key_embed = 0;
+  }
+  e->klen = klen;
+  e->hash = ar_key_hash(key ? key : "", klen);
+  return 1;
+}
 void ar_mem_add(ArCore* core, size_t n);
 void ar_mem_sub(ArCore* core, size_t n);
 /* A7 typed pressure accounting */

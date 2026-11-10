@@ -418,17 +418,15 @@ static const ArEvictOps kEvictTinylfu = {
 
 
 
-static size_t hash_bin(const char* s, size_t n) {
-  size_t h = 1469598103934665603ull;
-  for (size_t i = 0; i < n; ++i) {
-    h ^= (unsigned char)s[i];
-    h *= 1099511628211ull;
-  }
-  return h;
-}
-
-static int key_eq(const ArEntry* e, const char* key, size_t klen) {
-  return e->klen == klen && memcmp(e->key, key, klen) == 0;
+static int key_eq_hashed(const ArEntry* e, const char* key, size_t klen,
+                         size_t h) {
+  if (e->hash != h || e->klen != klen)
+    return 0;
+  if (klen == 0)
+    return 1;
+  /* Embedded keys sit in the entry cache line; don't chase e->key. */
+  const char* kp = e->key_embed ? e->embed_key : e->key;
+  return kp && memcmp(kp, key, klen) == 0;
 }
 
 static char* xmemdup(const char* s, size_t n) {
@@ -459,14 +457,14 @@ static void maybe_evict(ArCore* core) {
 }
 
 static ArEntry* find_in_table(ArEntry** table, size_t nbuckets, const char* key,
-                              size_t klen, size_t* bucket_out) {
+                              size_t klen, size_t h, size_t* bucket_out) {
   if (!table || nbuckets == 0)
     return NULL;
-  size_t b = hash_bin(key, klen) & (nbuckets - 1);
+  size_t b = h & (nbuckets - 1);
   if (bucket_out)
     *bucket_out = b;
   for (ArEntry* e = table[b]; e; e = e->next) {
-    if (key_eq(e, key, klen))
+    if (key_eq_hashed(e, key, klen, h))
       return e;
   }
   return NULL;
@@ -484,8 +482,9 @@ static int entry_expired_now(ArCore* core, ArEntry* e, size_t b, int tier) {
 
 ArEntry* ar_find_entry_ex(ArCore* core, const char* key, size_t klen,
                           size_t* bucket_out, int* tier_out) {
+  size_t h = ar_key_hash(key ? key : "", klen);
   size_t b = 0;
-  ArEntry* e = find_in_table(core->buckets, core->nbuckets, key, klen, &b);
+  ArEntry* e = find_in_table(core->buckets, core->nbuckets, key, klen, h, &b);
   if (e) {
     if (entry_expired_now(core, e, b, 0)) {
       e = NULL;
@@ -498,7 +497,7 @@ ArEntry* ar_find_entry_ex(ArCore* core, const char* key, size_t klen,
     }
   }
   if (core->layout == AR_LAYOUT_HOT_COLD && core->cold_buckets) {
-    e = find_in_table(core->cold_buckets, core->cold_nbuckets, key, klen, &b);
+    e = find_in_table(core->cold_buckets, core->cold_nbuckets, key, klen, h, &b);
     if (e) {
       if (entry_expired_now(core, e, b, 1)) {
         e = NULL;
@@ -512,7 +511,7 @@ ArEntry* ar_find_entry_ex(ArCore* core, const char* key, size_t klen,
     }
   }
   if (bucket_out)
-    *bucket_out = hash_bin(key, klen) & (core->nbuckets - 1);
+    *bucket_out = h & (core->nbuckets - 1);
   if (tier_out)
     *tier_out = 0;
   return NULL;
@@ -538,7 +537,7 @@ static void unlink_entry(ArEntry** table, size_t bucket, ArEntry* e) {
 
 /* T2.12 — WATCH dirty notification (optimistic locking for MULTI/EXEC). */
 void ar_watch_touch(ArCore* core, const char* key, size_t klen) {
-  if (!core || !key)
+  if (!core || !key || core->nwatchers <= 0)
     return;
   for (int i = 0; i < AR_MAX_CONN; ++i) {
     ArConn* c = &core->conns[i];
@@ -555,7 +554,7 @@ void ar_watch_touch(ArCore* core, const char* key, size_t klen) {
 }
 
 void ar_watch_touch_all(ArCore* core) {
-  if (!core)
+  if (!core || core->nwatchers <= 0)
     return;
   for (int i = 0; i < AR_MAX_CONN; ++i) {
     ArConn* c = &core->conns[i];
@@ -592,7 +591,7 @@ void ar_entry_free_ex(ArCore* core, size_t bucket, int tier, ArEntry* e) {
     }
   }
   ar_entry_free_obj(e);
-  free(e->key);
+  ar_entry_release_key(e);
   free(e->val);
   free(e);
   if (core->nkeys)
@@ -640,7 +639,7 @@ static int demote_one_hot_to_cold(ArCore* core) {
     return 0;
   unlink_entry(core->buckets, best_b, best);
   core->hot_nkeys--;
-  size_t cb = hash_bin(best->key, best->klen) & (core->cold_nbuckets - 1);
+  size_t cb = best->hash & (core->cold_nbuckets - 1);
   best->next = core->cold_buckets[cb];
   core->cold_buckets[cb] = best;
   core->cold_nkeys++;
@@ -666,7 +665,7 @@ void ar_touch_get(ArCore* core, ArEntry* e, size_t bucket, int tier) {
     unlink_entry(core->cold_buckets, bucket, e);
     if (core->cold_nkeys)
       core->cold_nkeys--;
-    size_t hb = hash_bin(e->key, e->klen) & (core->nbuckets - 1);
+    size_t hb = e->hash & (core->nbuckets - 1);
     e->next = core->buckets[hb];
     core->buckets[hb] = e;
     core->hot_nkeys++;
@@ -684,7 +683,7 @@ static void rehash_table(ArEntry*** table_io, size_t* nb_io) {
     ArEntry* e = (*table_io)[i];
     while (e) {
       ArEntry* next = e->next;
-      size_t b = hash_bin(e->key, e->klen) & (n2 - 1);
+      size_t b = e->hash & (n2 - 1);
       e->next = nb[b];
       nb[b] = e;
       e = next;
@@ -715,7 +714,23 @@ int ar_entry_set_ex(ArCore* core, const char* key, size_t klen, const char* val,
   int tier = 0;
   ArEntry* e = ar_find_entry_ex(core, key, klen, &b, &tier);
   if (e) {
-    char* nv = xmemdup(val, vlen);
+    /* Same-size string overwrite: reuse the buffer. Alloc failure cannot
+     * happen, and the old value stays intact until memcpy finishes. */
+    if (e->type == AR_TYPE_STRING && e->val && e->vlen == vlen) {
+      if (vlen && val)
+        memcpy(e->val, val, vlen);
+      e->val[vlen] = '\0';
+      e->last_access = ++core->clock;
+      entry_set_expire_at(core, e, expire_at);
+      if (core->layout == AR_LAYOUT_HOT_COLD && tier == 1)
+        ar_touch_get(core, e, b, tier);
+      if (core->evict && core->evict->on_set)
+        core->evict->on_set(core, e);
+      maybe_evict(core);
+      ar_watch_touch(core, key, klen);
+      return 1;
+    }
+    char* nv = xmemdup(val ? val : "", vlen);
     if (!nv)
       return 0;
     /* SET replaces any type with string (Redis). */
@@ -757,11 +772,13 @@ int ar_entry_set_ex(ArCore* core, const char* key, size_t klen, const char* val,
   ArEntry* ne = (ArEntry*)calloc(1, sizeof(ArEntry));
   if (!ne)
     return 0;
-  ne->key = xmemdup(key, klen);
-  ne->val = xmemdup(val, vlen);
-  if (!ne->key || !ne->val) {
-    free(ne->key);
-    free(ne->val);
+  if (!ar_entry_assign_key(ne, key, klen)) {
+    free(ne);
+    return 0;
+  }
+  ne->val = xmemdup(val ? val : "", vlen);
+  if (!ne->val) {
+    ar_entry_release_key(ne);
     free(ne);
     return 0;
   }
@@ -773,7 +790,7 @@ int ar_entry_set_ex(ArCore* core, const char* key, size_t klen, const char* val,
   ne->lfu_freq = 5;
   ne->expire_at = 0;
   /* New keys always enter hot/flat */
-  b = hash_bin(key, klen) & (core->nbuckets - 1);
+  b = ne->hash & (core->nbuckets - 1);
   ne->next = core->buckets[b];
   core->buckets[b] = ne;
   core->unique_sets++;
@@ -832,7 +849,7 @@ static int migrate_to_flat(ArCore* core) {
       ArEntry* e = core->cold_buckets[i];
       while (e) {
         ArEntry* next = e->next;
-        size_t b = hash_bin(e->key, e->klen) & (core->nbuckets - 1);
+        size_t b = e->hash & (core->nbuckets - 1);
         e->next = core->buckets[b];
         core->buckets[b] = e;
         e = next;
@@ -998,7 +1015,7 @@ ArCore* ar_core_create(void) {
 
 static void entry_raw_free(ArEntry* e) {
   ar_entry_free_obj(e);
-  free(e->key);
+  ar_entry_release_key(e);
   free(e->val);
   free(e);
 }
@@ -1363,10 +1380,14 @@ int ar_rename(ArCore* core, const char* key, size_t klen, const char* newkey,
   if (dest && nx)
     return 2;
 
-  /* Allocate new key before destroying dest (avoid dest-lost-on-OOM). */
-  char* nk = xmemdup(newkey, nklen);
-  if (!nk)
-    return -1;
+  /* Allocate a heap key before destroying dest (avoid dest-lost-on-OOM).
+   * Short keys embed and cannot fail. */
+  char* nk = NULL;
+  if (nklen >= AR_EMBED_KEY) {
+    nk = xmemdup(newkey, nklen);
+    if (!nk)
+      return -1;
+  }
   if (dest)
     ar_entry_free_ex(core, db, dtier, dest);
 
@@ -1392,13 +1413,19 @@ int ar_rename(ArCore* core, const char* key, size_t klen, const char* newkey,
     ar_mem_sub(core, delta);
     ar_type_stats_bytes_delta(core, e->type, -(int64_t)delta);
   }
-  free(e->key);
-  e->key = nk;
-  e->klen = nklen;
+  if (nk) {
+    ar_entry_release_key(e);
+    e->key = nk;
+    e->key_embed = 0;
+    e->klen = nklen;
+    e->hash = ar_key_hash(newkey, nklen);
+  } else if (!ar_entry_assign_key(e, newkey, nklen)) {
+    return -1;
+  }
   e->last_access = ++core->clock;
   core->sets++;
 
-  size_t nb = hash_bin(newkey, nklen) & (core->nbuckets - 1);
+  size_t nb = e->hash & (core->nbuckets - 1);
   e->next = core->buckets[nb];
   core->buckets[nb] = e;
   if (core->layout == AR_LAYOUT_HOT_COLD)

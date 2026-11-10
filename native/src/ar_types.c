@@ -306,12 +306,10 @@ ArEntry* ar_entry_get_or_create(ArCore* core, const char* key, size_t klen,
   ArEntry* ne = (ArEntry*)calloc(1, sizeof(ArEntry));
   if (!ne)
     return NULL;
-  ne->key = ar_xmemdup(key, klen);
-  if (!ne->key) {
+  if (!ar_entry_assign_key(ne, key, klen)) {
     free(ne);
     return NULL;
   }
-  ne->klen = klen;
   ne->type = type;
   ne->val = NULL;
   ne->vlen = 0;
@@ -320,14 +318,14 @@ ArEntry* ar_entry_get_or_create(ArCore* core, const char* key, size_t klen,
   if (type == AR_TYPE_HASH) {
     ne->obj = hash_create();
     if (!ne->obj) {
-      free(ne->key);
+      ar_entry_release_key(ne);
       free(ne);
       return NULL;
     }
   } else if (type == AR_TYPE_LIST) {
     ArList* l = (ArList*)calloc(1, sizeof(ArList));
     if (!l) {
-      free(ne->key);
+      ar_entry_release_key(ne);
       free(ne);
       return NULL;
     }
@@ -335,13 +333,13 @@ ArEntry* ar_entry_get_or_create(ArCore* core, const char* key, size_t klen,
   } else if (type == AR_TYPE_ZSET) {
     ArZSet* z = (ArZSet*)calloc(1, sizeof(ArZSet));
     if (!z) {
-      free(ne->key);
+      ar_entry_release_key(ne);
       free(ne);
       return NULL;
     }
     ne->obj = z;
   }
-  b = ar_fnv_hash(key, klen) & (core->nbuckets - 1);
+  b = ne->hash & (core->nbuckets - 1);
   ne->next = core->buckets[b];
   core->buckets[b] = ne;
   core->nkeys++;
