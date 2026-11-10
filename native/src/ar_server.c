@@ -50,9 +50,11 @@ static void multi_clear(ArConn* c) {
   c->in_multi = 0;
 }
 
-static void watch_clear(ArConn* c) {
+static void watch_clear(ArCore* core, ArConn* c) {
   if (!c)
     return;
+  if (c->watch_n > 0 && core && core->nwatchers > 0)
+    core->nwatchers--;
   for (int i = 0; i < c->watch_n; ++i) {
     free(c->watch_keys[i]);
     c->watch_keys[i] = NULL;
@@ -74,9 +76,11 @@ static void pubsub_clear(ArConn* c) {
   c->pubsub_mode = 0;
 }
 
-static void conn_reset(ArConn* c) {
+static void conn_reset(ArCore* core, ArConn* c) {
+  if (core && c->is_replica && core->nreplicas > 0)
+    core->nreplicas--;
   multi_clear(c);
-  watch_clear(c);
+  watch_clear(core, c);
   pubsub_clear(c);
   c->fd = -1;
   c->in_use = 0;
@@ -112,7 +116,7 @@ static ArConn* conn_alloc(ArCore* core, int fd) {
       }
       if (!c->rbuf || !c->wbuf)
         return NULL;
-      conn_reset(c);
+      conn_reset(core, c);
       c->fd = fd;
       c->in_use = 1;
       c->last_active_ms = ar_now_ms();
@@ -136,7 +140,7 @@ static void conn_close(ArCore* core, ArConn* c) {
     epoll_ctl(core->epfd, EPOLL_CTL_DEL, c->fd, NULL);
     close(c->fd);
   }
-  conn_reset(c);
+  conn_reset(core, c);
 }
 
 static int wbuf_reserve(ArConn* c, size_t need) {
@@ -284,7 +288,12 @@ static void repl_propagate(ArCore* core, Arg* argv, int argc) {
     return;
   if (core->repl_readonly || core->repl_applying)
     return;
+  /* No replica: do not walk the 1024-slot table. repl_slot_scans stays 0
+   * so a test can see the empty scan if this return is removed. */
+  if (core->nreplicas <= 0)
+    return;
   for (int i = 0; i < AR_MAX_CONN; ++i) {
+    core->repl_slot_scans++;
     ArConn* r = &core->conns[i];
     if (!r->in_use || !r->is_replica)
       continue;
@@ -914,6 +923,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       return reply_err(c, "ERR wrong number of arguments for 'watch'");
     if (c->in_multi)
       return reply_err(c, "ERR WATCH inside MULTI is not allowed");
+    int watch_before = c->watch_n;
     for (int ai = 1; ai < argc; ++ai) {
       int exists = 0;
       for (int w = 0; w < c->watch_n; ++w) {
@@ -928,18 +938,23 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       if (c->watch_n >= AR_WATCH_MAX)
         return reply_err(c, "ERR WATCH key limit exceeded");
       char* k = ar_xmemdup(argv[ai].p, argv[ai].len);
-      if (!k)
+      if (!k) {
+        if (watch_before == 0 && c->watch_n > 0)
+          core->nwatchers++;
         return reply_err(c, "ERR OOM");
+      }
       c->watch_keys[c->watch_n] = k;
       c->watch_klens[c->watch_n] = argv[ai].len;
       c->watch_n++;
     }
+    if (watch_before == 0 && c->watch_n > 0)
+      core->nwatchers++;
     return reply_ok(c);
   }
   if (cmd_eq(cmd, clen, "unwatch")) {
     if (argc != 1)
       return reply_err(c, "ERR wrong number of arguments for 'unwatch'");
-    watch_clear(c);
+    watch_clear(core, c);
     return reply_ok(c);
   }
 
@@ -959,7 +974,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     if (!c->in_multi)
       return reply_err(c, "ERR DISCARD without MULTI");
     multi_clear(c);
-    watch_clear(c);
+    watch_clear(core, c);
     return reply_ok(c);
   }
   if (cmd_eq(cmd, clen, "exec")) {
@@ -969,7 +984,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       return reply_err(c, "ERR EXEC without MULTI");
     if (c->watch_dirty) {
       multi_clear(c);
-      watch_clear(c);
+      watch_clear(core, c);
       return reply_null_array(c);
     }
     int nq = c->multi_n;
@@ -978,7 +993,7 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     int hn = snprintf(hdr, sizeof(hdr), "*%d\r\n", nq);
     if (wbuf_append(c, hdr, (size_t)hn) < 0) {
       multi_clear(c);
-      watch_clear(c);
+      watch_clear(core, c);
       return -1;
     }
     for (int qi = 0; qi < nq; ++qi) {
@@ -990,12 +1005,12 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       }
       if (dispatch(core, c, qargv, q->argc) < 0) {
         multi_clear(c);
-        watch_clear(c);
+        watch_clear(core, c);
         return -1;
       }
     }
     multi_clear(c);
-    watch_clear(c);
+    watch_clear(core, c);
     return 0;
   }
   /* Inside MULTI: queue (except handled above). */
@@ -1026,7 +1041,10 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
       return reply_err(c, "ERR wrong number of arguments for 'sync'");
     if (core->repl_readonly)
       return reply_err(c, "ERR SYNC against a replica");
-    c->is_replica = 1;
+    if (!c->is_replica) {
+      c->is_replica = 1;
+      core->nreplicas++;
+    }
     if (repl_fullsync(core, c) < 0)
       return reply_err(c, "ERR sync failed");
     return 0;
@@ -2053,11 +2071,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
   if (cmd_eq(cmd, clen, "info")) {
     char hints[160];
     ar_core_policy_hints(core, hints, sizeof(hints));
-    int connected_slaves_count = 0;
-    for (int i = 0; i < AR_MAX_CONN; ++i)
-      if (core->conns[i].in_use && core->conns[i].is_replica)
-        connected_slaves_count++;
-    char buf[5120];
+    int connected_slaves_count = core->nreplicas;
+    char buf[6144];
     int n = snprintf(
         buf, sizeof(buf),
         "# Server\n"
@@ -2145,7 +2160,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         "explain_evict:%s\n"
         "explain_layout:%s\n"
         "explain:%s\n"
-        "unique_sets:%llu\n",
+        "unique_sets:%llu\n"
+        "repl_slot_scans:%llu\n",
         core->tcp_port,
         core->tls_port,
         core->tls_listen_fd >= 0 ? "yes" : "no",
@@ -2223,7 +2239,8 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
         ar_core_explain_evict(core),
         ar_core_explain_layout(core),
         ar_core_explain_join(core),
-        (unsigned long long)ar_core_unique_sets(core));
+        (unsigned long long)ar_core_unique_sets(core),
+        (unsigned long long)core->repl_slot_scans);
     if (n < 0)
       return reply_err(c, "ERR info");
     return reply_bulk(c, buf, (size_t)n);
