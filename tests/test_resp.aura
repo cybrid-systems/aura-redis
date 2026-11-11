@@ -43,6 +43,19 @@
 ; Incomplete
 (check "incomplete" (resp-try-parse "$3\r\nfo" 0) #f)
 
+(display "test_resp: find-crlf\n")
+(check "crlf at 0" (resp-find-crlf "\r\n" 0) 0)
+(check "crlf straddle start" (resp-find-crlf "\r\n" 1) -1)
+(check "crlf past end" (resp-find-crlf "\r\n" 2) -1)
+(check "crlf after text" (resp-find-crlf "abc\r\n" 0) 3)
+(check "crlf on the CR" (resp-find-crlf "abc\r\n" 3) 3)
+(check "start on LF" (resp-find-crlf "abc\r\n" 4) -1)
+(check "no crlf" (resp-find-crlf "no-crlf" 0) -1)
+(check "lone cr" (resp-find-crlf "\r" 0) -1)
+(check "lf then cr" (resp-find-crlf "\n\r" 0) -1)
+(check "second crlf after straddle" (resp-find-crlf "\r\n\r\n" 1) 2)
+(check "empty" (resp-find-crlf "" 0) -1)
+
 (display "test_resp: fails=")
 (display *fails*)
 (newline)

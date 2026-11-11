@@ -90,18 +90,13 @@
     ((string=? (car v) "array") (resp-encode-array (car (cdr v))))
     (else (resp-encode-error "ERR encode"))))
 
-; Find index of \r\n starting at `start`, or -1
+; Index of the CR in the first CRLF at or after `start`, or -1.
+; string-index is the runtime substring search (code-point index of the needle).
+; A CRLF that straddles `start` (CR before start, LF at start) is not a match;
+; the search continues and may find a later CRLF. No CRLF yields -1.
 (define (resp-find-crlf buf start)
-  (let ((n (string-length buf))
-        (i start)
-        (found -1))
-    (while (lambda () (and (< i (- n 1)) (< found 0)))
-      (lambda ()
-        (if (and (= (string-ref buf i) 13)
-                 (= (string-ref buf (+ i 1)) 10))
-          (set! found i)
-          (set! i (+ i 1)))))
-    found))
+  (let ((i (string-index buf "\r\n" start)))
+    (if (< i 0) -1 i)))
 
 ; Parse signed integer from buf[start .. crlf-index). Returns number or #f
 (define (resp-parse-int-at buf start end)
