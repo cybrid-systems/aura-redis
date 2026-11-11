@@ -1,0 +1,101 @@
+; List deque: LPUSH/RPUSH/LPOP/RPOP/LLEN, including pushes from both ends.
+; Run: AURA_SANDBOX=off AURA_PATH=.deps/aura/lib ./.deps/aura/build/aura tests/test_store_list.aura
+
+(require "src/redis/store" all:)
+
+(define *fails* 0)
+
+(define (check name got want)
+  (if (equal? got want)
+    (begin (display "  OK ") (display name) (newline))
+    (begin
+      (set! *fails* (+ *fails* 1))
+      (display "  FAIL ") (display name)
+      (display " got=") (display got)
+      (display " want=") (display want)
+      (newline))))
+
+; Pop from the left until empty. Returns the values in logical order.
+(define (drain-left db key)
+  (let ((out (list))
+        (v (store-list-pop! db key #t)))
+    (while (lambda () v)
+      (lambda ()
+        (set! out (cons v out))
+        (set! v (store-list-pop! db key #t))))
+    (reverse out)))
+
+(define (drain-right db key)
+  (let ((out (list))
+        (v (store-list-pop! db key #f)))
+    (while (lambda () v)
+      (lambda ()
+        (set! out (cons v out))
+        (set! v (store-list-pop! db key #f))))
+    (reverse out)))
+
+(display "test_store_list: order\n")
+(let ((db (store-new)))
+  (check "rpush a" (store-list-push! db "L" "a" #f) 1)
+  (check "rpush b" (store-list-push! db "L" "b" #f) 2)
+  (check "rpush c" (store-list-push! db "L" "c" #f) 3)
+  (check "llen rpush" (store-list-len db "L") 3)
+  (check "rpush then lpop order" (drain-left db "L") (list "a" "b" "c"))
+  (check "llen empty" (store-list-len db "L") 0)
+  (check "lpop empty" (store-list-pop! db "L" #t) #f)
+  (check "rpop empty" (store-list-pop! db "L" #f) #f)
+  (check "gone" (store-exists? db (list "L")) 0))
+
+(let ((db (store-new)))
+  (store-list-push! db "L" "a" #t)
+  (store-list-push! db "L" "b" #t)
+  (store-list-push! db "L" "c" #t)
+  (check "lpush order" (drain-left db "L") (list "c" "b" "a"))
+  (check "lpush key removed" (store-exists? db (list "L")) 0))
+
+(let ((db (store-new)))
+  (store-list-push! db "L" "a" #f)
+  (store-list-push! db "L" "b" #f)
+  (check "rpop b" (store-list-pop! db "L" #f) "b")
+  (check "rpop a" (store-list-pop! db "L" #f) "a")
+  (check "rpop gone" (store-exists? db (list "L")) 0))
+
+(let ((db (store-new)))
+  (store-list-push! db "L" "a" #t)
+  (store-list-push! db "L" "b" #t)
+  ; logical b, a — right end is a. RPOP must not reverse twice and drop b.
+  (check "lpush then rpop" (store-list-pop! db "L" #f) "a")
+  (check "then rpop b" (store-list-pop! db "L" #f) "b")
+  (check "llen after" (store-list-len db "L") 0))
+
+(let ((db (store-new)))
+  (store-list-push! db "L" "a" #f)
+  (store-list-push! db "L" "b" #f)
+  (store-list-push! db "L" "z" #t)
+  (store-list-push! db "L" "c" #f)
+  (store-list-push! db "L" "y" #t)
+  ; y, z, a, b, c
+  (check "llen mixed" (store-list-len db "L") 5)
+  (check "mixed order" (drain-left db "L") (list "y" "z" "a" "b" "c"))
+  (check "type" (store-type db "L") "none"))
+
+(let ((db (store-new)))
+  (store-list-push! db "L" "a" #t)
+  (store-list-push! db "L" "b" #f)
+  (store-list-push! db "L" "c" #t)
+  (store-list-push! db "L" "d" #f)
+  ; c, a, b, d
+  (check "both ends" (drain-right db "L") (list "d" "b" "a" "c")))
+
+(let ((db (store-new)))
+  (store-set-string! db "s" "x" 0)
+  (check "wrongtype push" (store-list-push! db "s" "y" #f) #f)
+  (check "wrongtype len" (store-list-len db "s") 0)
+  (check "string kept" (store-type db "s") "string"))
+
+(display "test_store_list: fails=")
+(display *fails*)
+(newline)
+(if (= *fails* 0)
+  (display "test_store_list: ALL PASSED\n")
+  (display "test_store_list: FAILED\n"))
