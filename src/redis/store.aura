@@ -3,7 +3,11 @@
 ;
 ; Entry shape (hash):
 ;   "t"  → "string" | "list" | "hash"
-;   "v"  → string | list-of-strings | nested hash
+;   "v"  → string | nested hash (list elements are not stored in "v")
+;   list: "L" left spine (car is the left end), "R" right spine (car is the
+;         right end), "n" element count. Logical order is L ++ reverse(R).
+;         A push is one cons. A pop on an empty spine reverses the other
+;         spine once; it does not reverse twice. LLEN reads "n".
 ;   "ex" → expire deadline ms (0 = none)
 ;
 ; TTL is lazy per-key: hot-path ops call store-touch! (drop that key only
@@ -228,49 +232,78 @@
       ((not e)
        (let ((entry (hash)))
          (hash-set! entry "t" "list")
-         (hash-set! entry "v" (list))
+         (hash-set! entry "L" (list))
+         (hash-set! entry "R" (list))
+         (hash-set! entry "n" 0)
          (hash-set! entry "ex" 0)
          (hash-set! db key entry)
          entry))
       ((string=? (hash-ref e "t" "") "list") e)
       (else #f))))
 
+; One reverse, and only when the side we are about to pop is empty.
+(define (list-move-to-left! e)
+  (let ((r (hash-ref e "R" (list))))
+    (if (null? r)
+      #f
+      (begin
+        (hash-set! e "L" (reverse r))
+        (hash-set! e "R" (list))
+        #t))))
+
+(define (list-move-to-right! e)
+  (let ((l (hash-ref e "L" (list))))
+    (if (null? l)
+      #f
+      (begin
+        (hash-set! e "R" (reverse l))
+        (hash-set! e "L" (list))
+        #t))))
+
 (define (store-list-push! db key val left?)
   (store-touch! db key)
   (let ((e (store-ensure-list! db key)))
     (if (not e)
       #f
-      (let ((xs (hash-ref e "v" (list))))
+      (begin
         (if left?
-          (hash-set! e "v" (cons val xs))
-          (hash-set! e "v" (append xs (list val))))
+          (hash-set! e "L" (cons val (hash-ref e "L" (list))))
+          (hash-set! e "R" (cons val (hash-ref e "R" (list)))))
+        (hash-set! e "n" (+ (hash-ref e "n" 0) 1))
         (hash-set! db key e)
-        (length (hash-ref e "v" (list)))))))
+        (hash-ref e "n" 0)))))
 
 (define (store-list-pop! db key left?)
   (let ((e (store-touch! db key)))
     (if (or (not e) (not (string=? (hash-ref e "t" "") "list")))
       #f
-      (let ((xs (hash-ref e "v" (list))))
-        (if (null? xs)
+      (let ((n (hash-ref e "n" 0)))
+        (if (<= n 0)
           #f
-          (if left?
-            (let ((v (car xs)))
-              (hash-set! e "v" (cdr xs))
-              (if (null? (cdr xs)) (hash-remove! db key) (hash-set! db key e))
-              v)
-            (let ((rev (reverse xs)))
-              (let ((v (car rev))
-                    (rest (reverse (cdr rev))))
-                (hash-set! e "v" rest)
-                (if (null? rest) (hash-remove! db key) (hash-set! db key e))
-                v))))))))
+          (begin
+            (if left?
+              (if (null? (hash-ref e "L" (list)))
+                (list-move-to-left! e))
+              (if (null? (hash-ref e "R" (list)))
+                (list-move-to-right! e)))
+            (let ((side (if left? "L" "R"))
+                  (xs (hash-ref e (if left? "L" "R") (list))))
+              (if (null? xs)
+                #f
+                (let ((v (car xs))
+                      (leftn (- n 1)))
+                  (hash-set! e side (cdr xs))
+                  (hash-set! e "n" leftn)
+                  (if (<= leftn 0)
+                    (hash-remove! db key)
+                    (hash-set! db key e))
+                  v)))))))))
 
 (define (store-list-len db key)
   (let ((e (store-get db key)))
     (if (or (not e) (not (string=? (hash-ref e "t" "") "list")))
       0
-      (length (hash-ref e "v" (list))))))
+      (hash-ref e "n" 0))))
 
 (define (store-ensure-hash! db key)
   (let ((e (hash-ref db key #f)))
