@@ -55,6 +55,13 @@
 ;   AURA_REDIS_CANARY_TICKS          trial window ticks (default 5)
 ;   AURA_REDIS_CANARY_INJECT         start one canary trial of named profile
 ;                                   (broken|inverted|aggressive|…) after warm-up
+;   AURA_REDIS_BUS_WORKSPACE=N       issue #14: host the cross-process tool bus
+;                                   on workspace N (see docs/bus.md). Unset =
+;                                   bus off, byte-identical v0.3.0 behavior.
+;                                   Canary/evidence params come from the host
+;                                   env at bus:host time (runner sets them):
+;                                   AURA_BUS_EVIDENCE / AURA_BUS_CANARY_WINDOW
+;                                   / AURA_BUS_CANARY_FLOOR / AURA_BUS_CANARY_KEY
 ;   AURA_REDIS_CANARY_DROP_PP        EWMA drop vs baseline to heal (default 12)
 ;   AURA_REDIS_SHADOW_AUTOPROMOTE=0|1 A18: shadow dry-run winner -> canary trial (default 0)
 ;   AURA_REDIS_POISON_DEFENSE=0|1    A19: unique-SET / keyspace storm -> LFU defensive body (default 1)
@@ -264,6 +271,11 @@
 (define *unfreeze-count* 0)
 (define *fitness-before-freeze* #t)
 (define *tick-wall0-ms* 0) ; for applies/sec in heartbeat
+; issue #14: cross-process bus host mode (gated by AURA_REDIS_BUS_WORKSPACE)
+(define *bus-workspace* 0)
+(define *bus-session* #f) ; maintainer self-attach session id
+(define *bus-grants* 0)
+(define *bus-publishes* 0)
 ; A3: durable mutation audit ring (file) + last explain fields for heartbeat/INFO
 (define *audit-file* "")
 (define *audit-ring-max* 64)
@@ -1941,6 +1953,67 @@
 (set-code "(define (choose-fn dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) \"\")")
 (eval-current)
 
+; ── issue #14: bus host mode (gated by AURA_REDIS_BUS_WORKSPACE) ──
+; The choose-fn workspace is now seeded. When AURA_REDIS_BUS_WORKSPACE=N
+; is set, host the bus on workspace N, self-attach as maintainer (role 3,
+; caps 127), install the pure-define-only safe constraint and declare the
+; std/contract protection mirror for the RESP / C-plane / persistence /
+; reconnect / audit logic. choose-fn stays the only bus-mutable target.
+; Canary observation is env-driven at bus:host time (the runner sets
+; AURA_BUS_EVIDENCE / AURA_BUS_CANARY_WINDOW / _FLOOR / _KEY before
+; launch; Aura env is read-only). The A4 env-driven canary below stays
+; the fallback when the bus is off. See docs/bus.md.
+(let ((e (getenv "AURA_REDIS_BUS_WORKSPACE")))
+  (if (and (string? e) (> (string-length e) 0) (number? (string->number e)))
+    (begin
+      (set! *bus-workspace* (string->number e))
+      ; Lazy require (A15 pattern): bus-off boot must stay byte-identical —
+      ; loading std/bus at top level shifts boot timing and exposes the
+      ; audit read+truncate+write race. Load only when bus mode is on.
+      (require "std/bus" all:)
+      (require "std/contract" all:)
+      (let ((h (bus:host *bus-workspace*)))
+        (display "policy_agent: bus:host ws=")
+        (display *bus-workspace*)
+        (display " → ")
+        (display h)
+        (newline)
+        (if (bus:ok? h)
+          (let ((ms (bus:attach "" *bus-workspace* 3 127 255)))
+            (if (bus:ok? ms)
+              (begin
+                (set! *bus-session* (car (cdr ms)))
+                (bus:install-constraint *bus-session* "pure-define-only"
+                                        "(lambda (ctx) #t)")
+                ; Protection mirror: no op may rebind the control-plane
+                ; logic; the bus apply path refuses patches to these names.
+                (let ((cs (contract:set)))
+                  (set! cs (contract:protect cs "redis-call!"))
+                  (set! cs (contract:protect cs "resp-encode-cmd"))
+                  (set! cs (contract:protect cs "resp-encode-bulk"))
+                  (set! cs (contract:protect cs "resp-parse-one"))
+                  (set! cs (contract:protect cs "ensure-connected!"))
+                  (set! cs (contract:protect cs "close-sock!"))
+                  (set! cs (contract:protect cs "reapply-last-policy!"))
+                  (set! cs (contract:protect cs "write-policy-pin!"))
+                  (set! cs (contract:protect cs "resume-from-pin!"))
+                  (set! cs (contract:protect cs "log-policy-pin!"))
+                  (set! cs (contract:protect cs "audit-append!"))
+                  (set! cs (contract:protect cs "write-heartbeat!"))
+                  (contract:activate! cs))
+                (bus:project-nodes *bus-session*)
+                (display "policy_agent: bus mode on ws=")
+                (display *bus-workspace*)
+                (display " session=")
+                (display *bus-session*)
+                (display " protected=12 mutable=choose-fn\n"))
+              (begin
+                (display "policy_agent: bus self-attach FAILED: ")
+                (display ms)
+                (newline))))
+          #t)))
+    #t))
+
 (define *safety* (mutate:safety-snapshot))
 (display "policy_agent: mutate:safety-snapshot ok boundary-safe? probe\n")
 (display "policy_agent: mutate:boundary-safe?=")
@@ -2620,6 +2693,64 @@
         (log-policy-pin! "reapply")
         #t))))
 
+
+;; issue #14 — bus helpers (no-ops unless bus mode is on)
+; Publish the tick's window metrics on the Metrics channel (key ids in
+; docs/bus.md). hit-ewma doubles as the canary observation metric when
+; the runner sets AURA_BUS_CANARY_KEY=7.
+(define (bus-publish-metrics! dgets dsets dhits dmisses devicted)
+  (if (number? *bus-session*)
+    (let ((sid *bus-session*)
+          (erate (if (> (+ dgets dsets) 0)
+                   (quotient (* 100 devicted) (+ dgets dsets))
+                   0)))
+      (bus:publish sid 1 dgets)
+      (bus:publish sid 2 dsets)
+      (bus:publish sid 3 dhits)
+      (bus:publish sid 4 dmisses)
+      (bus:publish sid 5 devicted)
+      (bus:publish sid 6 erate)
+      (bus:publish sid 7 *hit-ewma*)
+      (bus:project-nodes sid)
+      (set! *bus-publishes* (+ *bus-publishes* 1))
+      #t)
+    #t))
+
+; Scoped keep+rollback delegation (bits 24 = keep|rollback) to one
+; worldline, for a judge (harness, role 2) that requests it. Returns the
+; token, or #f when the bus is off / the grant failed. Perf peers (role 1)
+; propose trials only — keep is NEVER granted to them.
+(define (bus-grant-keep! worldline)
+  (if (and (number? *bus-session*) (number? worldline) (> worldline 0))
+    (let ((g (bus:grant *bus-session* 24 255 0 0 worldline)))
+      (if (bus:ok? g)
+        (begin
+          (set! *bus-grants* (+ *bus-grants* 1))
+          (display "policy_agent: bus grant keep+rollback wl=")
+          (display worldline)
+          (display " token=")
+          (display (car (cdr g)))
+          (newline)
+          (car (cdr g)))
+        (begin
+          (display "policy_agent: bus grant refused wl=")
+          (display worldline)
+          (display " code=")
+          (display (bus:code g))
+          (newline)
+          #f)))
+    #f))
+
+(define (bus-shutdown!)
+  (if (number? *bus-session*)
+    (begin
+      (bus:detach *bus-session*)
+      (set! *bus-session* #f)
+      (bus:unhost *bus-workspace*)
+      (display "policy_agent: bus detached/unhosted ws=")
+      (display *bus-workspace*)
+      (newline))
+    #t))
 (define (ensure-connected!)
   (if (and *conn-alive* (number? *sock*))
     #t
@@ -2815,6 +2946,8 @@
                 (set! *last-dmisses* dmisses)
                 (set! *last-devicted* devicted)
                 (set! *last-nkeys* nk)
+                ; issue #14: publish window metrics when bus mode is on
+                (bus-publish-metrics! dgets dsets dhits dmisses devicted)
                 (let ((dunique (if *have-unique-prev* (- unique-sets *prev-unique-sets*) 0)))
                   (set! *prev-unique-sets* unique-sets)
                   (set! *have-unique-prev* #t)
@@ -3216,6 +3349,10 @@
         )) ; end ensure-connected begin / while body
   #t)
 
+
+; issue #14: tear down the bus host cleanly (Disconnect rolls back any
+; pending peer trials in the coordinator).
+(bus-shutdown!)
 (if (number? *sock*)
   (tcp-close *sock*)
   #t)
