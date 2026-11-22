@@ -2722,6 +2722,31 @@
       #t)
     #t))
 
+; issue #5397: grant the judge a scoped keep for a pending trial. The
+; host watches the worldlines channel; a trial a perf peer opened (state
+; 0 = pending) gets a scoped keep+rollback token, printed as
+; "bus grant wl=N token=T" so the judge can activate it. The token is
+; scoped to that one worldline: it grants nothing else.
+(define *bus-granted* '())
+
+(define (bus-grant-pending!)
+  (if (number? *bus-session*)
+      (let ((q (bus:query *bus-session* 4 0 0)))
+        (if (bus:ok? q)
+            (let loop ((rows (list-ref q 4)) (acc '()))
+              (if (null? rows)
+                  acc
+                  (let ((row (car rows)))
+                    (let ((id (car row)) (state (list-ref row 2)))
+                      (if (and (= state 0) (not (member id *bus-granted*)))
+                          (begin
+                            (set! *bus-granted* (cons id *bus-granted*))
+                            (bus-grant-keep! id)
+                            (loop (cdr rows) acc))
+                          (loop (cdr rows) acc))))))
+            '()))
+    '()))
+
 ; Scoped keep+rollback delegation (bits 24 = keep|rollback) to one
 ; worldline, for a judge (harness, role 2) that requests it. Returns the
 ; token, or #f when the bus is off / the grant failed. Perf peers (role 1)
@@ -2954,6 +2979,8 @@
                 (set! *last-nkeys* nk)
                 ; issue #14: publish window metrics when bus mode is on
                 (bus-publish-metrics! dgets dsets dhits dmisses devicted)
+                ; issue #5397: hand the judge a scoped keep for a pending trial
+                (bus-grant-pending!)
                 (let ((dunique (if *have-unique-prev* (- unique-sets *prev-unique-sets*) 0)))
                   (set! *prev-unique-sets* unique-sets)
                   (set! *have-unique-prev* #t)

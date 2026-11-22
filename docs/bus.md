@@ -102,6 +102,13 @@ Each tick also re-projects Nodes (`bus:project-nodes`). Rows read via
   trials, but **keep is never granted to perf**.
 - Grants are derived from the maintainer session only; the host never
   hands out constraint-write or grant bits.
+- The host **grants on demand** (issue #5397): every policy tick it
+  watches the worldlines channel and, for each pending trial nobody has
+  been granted yet, it issues a scoped keep+rollback token and prints
+  `bus grant keep+rollback wl=N token=T`. The judge activates the token
+  out of band; the token grants nothing beyond that one worldline. A
+  round with a negative control therefore needs one token per candidate
+  (the control's too — the statistics must reject it).
 
 ## Canary observation
 
