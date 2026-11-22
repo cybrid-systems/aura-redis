@@ -1893,8 +1893,8 @@
                    (if (do-fitness-threshold-mutate! reason)
                      #t
                      (do-fitness-swap! to reason))
-                   (do-fitness-swap! to reason)))))
-          (else #f)))))))
+                   (do-fitness-swap! to reason))))))
+          (else #f))))))
 
 (define (maybe-reload-profile!)
   (if (or (not (string? *profile-file*)) (= (string-length *profile-file*) 0))
