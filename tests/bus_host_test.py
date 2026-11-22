@@ -45,10 +45,27 @@ HOST_SCRIPT = r"""
 ; contract protection -> project-nodes -> metric ticks).
 (require "std/bus" all:)
 (require "std/contract" all:)
-(set-code "(define (choose-fn x) (+ x 1)) (define (resp-send x) x)")
+(set-code "(define (choose-fn x) (+ x 1)) (define (admit-fn x) 1) (define (resp-send x) x)")
 (eval-current)
 (contract:activate! (contract:protect (contract:set) "resp-send"))
 (define ws (string->number (getenv "AURA_REDIS_BUS_WORKSPACE")))
+
+; Split on a separator: "a|b|c" -> ("a" "b" "c"). The multi-target
+; command carries two node ids and two bodies, and a body carries
+; spaces, so the fields are separated by a vertical bar.
+(define (split-on sep s)
+  (let loop ((i 0) (cur "") (acc '()))
+    (if (>= i (string-length s))
+        (reverse (if (string=? cur "") acc (cons cur acc)))
+        (let ((c (string-ref s i)))
+          (if (char=? c sep)
+              (loop (+ i 1) "" (cons cur acc))
+              (loop (+ i 1) (string-append cur (substring s i (+ i 1))) acc))))))
+
+; The workspace generation the candidates are built on: every live KEEP
+; advances it by one, and a stale baseline is refused.
+(define *gen* 0)
+
 (define h (bus:host ws))
 (display (if (bus:ok? h) "host-ok" "host-FAIL")) (newline)
 (define ms (bus:attach "" ws 3 127 255))
@@ -75,10 +92,11 @@ HOST_SCRIPT = r"""
   (define src (bus:publish-source msid body))
   (bus:publish-patch msid node bus:source-field (car (cdr src)) wl 0)
   (define d (car (cdr (bus:candidate-digest msid wl))))
-  (bus:bind-evidence msid wl 0 d 7 42 1)
+  (bus:bind-evidence msid wl *gen* d 7 42 1)
   (define g (bus:grant msid 24 255 0 0 wl))
   (bus:grant-activate msid (car (cdr g)))
   (define k (bus:keep msid wl 0 0))
+  (if (bus:ok? k) (set! *gen* (+ *gen* 1)))
   (display "keep=") (display (if (bus:ok? k) "ok" (bus:code k)))
   (display " reason=") (display (bus:message k)) (display " patch-done|") (newline)
   (bus:detach msid)
@@ -92,6 +110,12 @@ HOST_SCRIPT = r"""
        (define r (bus:host? ws))
        (display "host?=") (display (car (cdr r))) (display "|") (newline)
        (loop))
+      ((string=? l "defs")
+       ; The host's own define names and node ids (aura#5397): a peer
+       ; asks the host instead of guessing an id that is host-local.
+       (define d (bus:defines msid))
+       (display "defs=") (display (if (bus:ok? d) (list-ref d 3) '())) (display "|") (newline)
+       (loop))
       ((string=? l "tick")
        (metric-tick)
        (display "tick-ok|") (newline)
@@ -101,6 +125,29 @@ HOST_SCRIPT = r"""
        (loop))
       ((string=? l "resp")
        (display "resp=") (display (resp-send 5)) (display "|") (newline)
+       (loop))
+      ((and (>= (string-length l) 6) (string=? (substring l 0 6) "multi "))
+       ; "multi <node1> <body1> <node2> <body2>": one worldline carries a
+       ; patch per function and the KEEP applies the set atomically.
+       (define parts (split-on #\| (substring l 6 (string-length l))))
+       (define tr (bus:trial msid 3))
+       (define wl (car (cdr tr)))
+       (define (patch node body)
+         (define src (bus:publish-source msid body))
+         (bus:publish-patch msid node bus:source-field (car (cdr src)) wl 0))
+       (patch (string->number (car parts)) (car (cdr parts)))
+       (patch (string->number (car (cdr (cdr parts)))) (car (cdr (cdr (cdr parts)))))
+       (define d (car (cdr (bus:candidate-digest msid wl))))
+       (bus:bind-evidence msid wl *gen* d 7 42 1)
+       (define g (bus:grant msid 24 255 0 0 wl))
+       (bus:grant-activate msid (car (cdr g)))
+       (define k (bus:keep msid wl 0 0))
+       (if (bus:ok? k) (set! *gen* (+ *gen* 1)))
+       (display "multi-keep=") (display (if (bus:ok? k) "ok" (bus:code k)))
+       (display " reason=") (display (bus:message k)) (display " multi-done|") (newline)
+       (bus:detach msid)
+       (set! ms (bus:attach "" ws 3 127 255))
+       (set! msid (car (cdr ms)))
        (loop))
       ((and (>= (string-length l) 6) (string=? (substring l 0 6) "patch "))
        ; "patch <node> <body>"
@@ -208,34 +255,23 @@ class Proc:
                 self.p.wait()
 
 
-def find_node_ids(tmp: Path, env: dict[str, str]) -> tuple[int, int]:
-    """Discover the Define node ids for choose-fn / resp-send via query."""
-    probe = r"""
-(set-code "(define (choose-fn x) (+ x 1)) (define (resp-send x) x)")
-(eval-current)
-(define (find-def name)
-  (let loop ((ids (query :node-type "Define")))
-    (if (null? ids) #f
-      (let ((info (query :node (car ids))))
-        (if (and (pair? (cdr info)) (string? (car (cdr info)))
-                 (string=? (car (cdr info)) name))
-          (car ids)
-          (loop (cdr ids)))))))
-(display "choose-node=") (display (find-def "choose-fn")) (newline)
-(display "resp-node=") (display (find-def "resp-send")) (newline)
-"""
-    path = tmp / "probe.aura"
-    path.write_text(probe)
-    out = subprocess.run([AURA_BIN, str(path)], env=env, cwd=str(ROOT),
-                         capture_output=True, text=True, timeout=60).stdout
-    ids = {}
-    for line in out.splitlines():
-        for key in ("choose-node=", "resp-node="):
-            if line.startswith(key):
-                ids[key] = int(line[len(key):])
-    if "choose-node=" not in ids or "resp-node=" not in ids:
-        raise RuntimeError(f"node probe failed:\n{out}")
-    return ids["choose-node="], ids["resp-node="]
+def find_node_ids(host) -> tuple[int, int, int]:
+    """The host's define names and node ids (aura#5397). The ids live in
+    the host's own workspace AST, so the host is the only one that can
+    answer: a peer asks (bus:defines) instead of guessing."""
+    host.send("defs")
+    line = host.wait_line("defs=")
+    body = line.split("defs=", 1)[1].split("|", 1)[0]
+    ids: dict[str, int] = {}
+    # The reply is ((name node) (name node) ...).
+    for chunk in body.split("(")[1:]:
+        parts = chunk.replace(")", " ").split()
+        if len(parts) >= 2:
+            ids[parts[0]] = int(parts[1])
+    for name in ("choose-fn", "admit-fn", "resp-send"):
+        if name not in ids:
+            raise RuntimeError(f"the host did not report {name}: {line}")
+    return ids["choose-fn"], ids["admit-fn"], ids["resp-send"]
 
 
 def main() -> int:
@@ -247,11 +283,10 @@ def main() -> int:
     sock = tmp / "aura" / "bus" / f"{WS}.sock"
     host = peer = None
     try:
-        choose_node, resp_node = find_node_ids(tmp, env)
-        print(f"node ids: choose-fn={choose_node} resp-send={resp_node}")
-
         host = Proc(HOST_SCRIPT, tmp, "host", env)
         host.wait_line("ready")
+        choose_node, admit_node, resp_node = find_node_ids(host)
+        print(f"node ids: choose-fn={choose_node} admit-fn={admit_node} resp-send={resp_node}")
         assert "host-ok" in host.log.read_text(), "bus:host failed"
         assert sock.exists(), f"host socket missing: {sock}"
         host.send("host?")
@@ -304,6 +339,16 @@ def main() -> int:
         host.send("choose")
         assert "choose=15|" in host.wait_line("choose=15|"), "KEEP not applied live"
         print("6. pure choose-fn KEEP applied live OK")
+
+        # 7. a multi-function candidate: one worldline carries a patch per
+        #    function and the KEEP applies the set atomically.
+        host.send(f"multi {choose_node}|(lambda (x) (+ x 20))|{admit_node}|(lambda (x) 7)")
+        k4 = host.wait_count("multi-done|", 1)
+        assert "multi-keep=ok" in k4, f"multi-function KEEP failed:\n{k4}"
+        host.send("choose")
+        assert "choose=25|" in host.wait_line("choose=25|"), \
+            "choose-fn not rewritten by the multi-function KEEP"
+        print("7. multi-function KEEP applied atomically OK")
 
         host.stop()
         assert "HOST-DONE" in host.log.read_text(), "host did not shut down cleanly"

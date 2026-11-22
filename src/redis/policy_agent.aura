@@ -1950,7 +1950,13 @@
     (newline))
   #t)
 (display "policy_agent: seeding choose-fn (hot-strategy)\n")
-(set-code "(define (choose-fn dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) \"\")")
+; issue #5397: the bus-mutable target set is a FAMILY of pure policy
+; functions, not one: choose-fn picks the eviction kernel, admit-fn
+; decides whether a write is admitted at all, ttl-fn picks the TTL
+; policy. A candidate may rewrite several of them at once; the bus
+; applies the set atomically. All three are pure and deliberately NOT
+; in the protection set — the control-plane logic is.
+(set-code "(define (choose-fn dgets dsets dhits dmisses devicted nkeys dexpired avg_ttl keys_ttl) \"\") (define (admit-fn nkeys dgets dsets) 1) (define (ttl-fn nkeys avg_ttl keys_ttl) \"\")")
 (eval-current)
 
 ; ── issue #14: bus host mode (gated by AURA_REDIS_BUS_WORKSPACE) ──
@@ -2006,7 +2012,7 @@
                 (display *bus-workspace*)
                 (display " session=")
                 (display *bus-session*)
-                (display " protected=12 mutable=choose-fn\n"))
+                (display " protected=12 mutable=choose-fn,admit-fn,ttl-fn\n"))
               (begin
                 (display "policy_agent: bus self-attach FAILED: ")
                 (display ms)

@@ -46,9 +46,21 @@ read+truncate+write race, so bus-off boot stays byte-identical.
    engine mirrors the activated set, so the bus KEEP apply path refuses
    source-carrier patches targeting any protected name.
 5. `(bus:project-nodes sid)` — project the live FlatAST into Nodes.
+   `(bus:defines sid)` answers the same names with their node ids, so a
+   peer addresses a function by name (aura#5397).
 
-`choose-fn` is the **only bus-mutable target**; it is deliberately not
-in the protection set.
+The bus-mutable target set is a **family of pure policy functions**
+(aura#5397): `choose-fn` picks the eviction kernel, `admit-fn` decides
+whether a write is admitted at all, `ttl-fn` picks the TTL policy. A
+candidate may rewrite several of them at once — one source-carrier patch
+per function, all in one worldline — and the bus applies the set
+**atomically**: one broken body anywhere in the set leaves every
+function byte-identical. None of the three is in the protection set.
+
+A peer asks the host for the target names and their node ids with
+`(bus:defines session)`. The node ids live in the host's own workspace
+AST, so a peer must not guess them: the host is the only one that can
+answer.
 
 ## Protected set (12 defines)
 
