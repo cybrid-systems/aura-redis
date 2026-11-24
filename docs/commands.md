@@ -81,7 +81,7 @@ Last audited: 2026-09-23 (CST) for P3.16–P3.18 + SET opts + APPEND/RENAME/UNLI
 | `ZREM` | ≥3 | integer | |
 | `ZCARD` | 2 | integer | |
 | `ZRANGE` | 4–5 | array | optional WITHSCORES |
-| `ZRANGEBYSCORE` | ≥4 | array | min/max, -inf/+inf; WITHSCORES; LIMIT; match-cap 256 |
+| `ZRANGEBYSCORE` | ≥4 | array | min/max, -inf/+inf, `(score` exclusive bounds; WITHSCORES; LIMIT; match-cap 256 |
 | `MULTI` | 1 | +OK | P3.17a; subsequent cmds → +QUEUED |
 | `EXEC` | 1 | array / null array | replies; `*-1` if WATCH key dirty; error if no MULTI |
 | `DISCARD` | 1 | +OK | clear queue + watches |

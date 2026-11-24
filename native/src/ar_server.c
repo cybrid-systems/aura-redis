@@ -235,6 +235,19 @@ static int parse_double(const char* p, size_t n, double* out) {
   return end && end != buf && *end == '\0';
 }
 
+/* Redis score bound: an optional leading '(' means the bound is exclusive.
+   -inf/+inf are accepted by parse_double. */
+static int parse_score_bound(const char* p, size_t n, double* out,
+                             int* exclusive) {
+  *exclusive = 0;
+  if (n > 0 && p[0] == '(') {
+    *exclusive = 1;
+    p++;
+    n--;
+  }
+  return parse_double(p, n, out);
+}
+
 static int cmd_eq(const char* a, size_t alen, const char* lit) {
   size_t n = strlen(lit);
   if (alen != n)
@@ -2642,8 +2655,9 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     if (argc < 4)
       return reply_err(c, "ERR wrong number of arguments for 'zrangebyscore'");
     double minv, maxv;
-    if (!parse_double(argv[2].p, argv[2].len, &minv) ||
-        !parse_double(argv[3].p, argv[3].len, &maxv))
+    int minex = 0, maxex = 0;
+    if (!parse_score_bound(argv[2].p, argv[2].len, &minv, &minex) ||
+        !parse_score_bound(argv[3].p, argv[3].len, &maxv, &maxex))
       return reply_err(c, "ERR min or max is not a float");
     int withscores = 0;
     int64_t lim_off = 0, lim_cnt = -1;
@@ -2686,6 +2700,10 @@ static int dispatch(ArCore* core, ArConn* c, Arg* argv, int argc) {
     for (size_t i = 0; i < z->len && nm < AR_ZSET_RANGE_MATCH_CAP; ++i) {
       double sc = z->arr[i].score;
       if (sc < minv || sc > maxv)
+        continue;
+      if (minex && sc == minv)
+        continue;
+      if (maxex && sc == maxv)
         continue;
       match[nm++] = i;
     }

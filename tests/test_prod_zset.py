@@ -88,6 +88,26 @@ def main():
             )
             lim = call(sock, "ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", "1", "1")
             assert lim == ["b"]
+            # Exclusive score bounds are part of the Redis contract:
+            # a leading '(' excludes the bound itself.
+            assert call(sock, "ZRANGEBYSCORE", "z", "(2", "3") == ["c"]
+            assert call(sock, "ZRANGEBYSCORE", "z", "1", "(3") == ["a", "b"]
+            assert call(sock, "ZRANGEBYSCORE", "z", "(1", "(3") == ["a", "b"]
+            assert call(sock, "ZRANGEBYSCORE", "z", "(1.5", "(3") == ["b"]
+            assert call(sock, "ZRANGEBYSCORE", "z", "2", "2") == ["b"]
+            assert call(sock, "ZRANGEBYSCORE", "z", "2", "(2") == []
+            assert call(
+                sock, "ZRANGEBYSCORE", "z", "(2", "3", "WITHSCORES"
+            ) == ["c", "3"]
+            assert call(
+                sock, "ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", "1", "-1"
+            ) == ["b", "c"]
+            assert call(
+                sock, "ZRANGEBYSCORE", "z", "-inf", "+inf", "LIMIT", "9", "1"
+            ) == []
+            assert "not a float" in err_str(
+                call(sock, "ZRANGEBYSCORE", "z", "(x", "3")
+            )
             assert call(sock, "ZREM", "z", "b", "x") == 1
             assert call(sock, "ZCARD", "z") == 2
             assert call(sock, "TYPE", "z") == "zset"
