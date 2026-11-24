@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -99,6 +100,7 @@ def start_agent(
             stderr=subprocess.STDOUT,
             env=full,
             cwd=str(ROOT),
+            start_new_session=True,
         )
         handle = f"native:{proc.pid}"
         _NATIVE[handle] = proc
@@ -169,16 +171,30 @@ def stop_agent(handle: str) -> None:
         _NATIVE_LOG.pop(handle, None)
         if proc is None:
             return
-        if proc.poll() is None:
-            proc.terminate()
+        # stdbuf is the direct child; aura is its child in the same session.
+        # Kill the whole process group, otherwise the agent survives and can
+        # race a later test by rewriting the policy pin (#17 baseline run).
+        try:
+            pgid = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            pgid = None
+        if proc.poll() is None and pgid is not None:
             try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            if pgid is not None:
                 try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
                     pass
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
         return
     subprocess.run(["sudo", "docker", "kill", handle], capture_output=True)
     subprocess.run(["sudo", "docker", "rm", "-f", handle], capture_output=True)

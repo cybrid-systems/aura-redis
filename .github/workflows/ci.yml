@@ -30,22 +30,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     container:
-      image: ghcr.io/cybrid-systems/dev:v1.0.7
+      image: ghcr.io/cybrid-systems/aura-ci@sha256:66392ce2a5f24668fb923d1c900c545435f6b453f3df585dc4668402c07042d5
     steps:
       - name: Checkout aura-redis
         uses: actions/checkout@v4
 
-      - name: Fetch pinned Aura
-        run: ./scripts/fetch-aura.sh
+      - name: Orchestra baseline drift (#13)
+        run: python3 scripts/check-baseline.py
 
-      - name: Build Aura (must compile)
-        run: ./scripts/build-aura.sh
-
-      - name: Prove aura binary exists
-        run: |
-          test -x .deps/aura/build/aura
-          .deps/aura/build/aura --help >/dev/null 2>&1 || true
-          ls -la .deps/aura/build/aura
+      - name: Install the pinned Aura nightly
+        run: ./scripts/install-aura.sh
 
       - name: aura-redis smoke (PING/SET/GET/DEL/INCR/EXISTS/FLUSHDB)
         run: ./scripts/smoke-test.sh
@@ -56,16 +50,13 @@ jobs:
     timeout-minutes: 180
     needs: build-aura-and-smoke
     container:
-      image: ghcr.io/cybrid-systems/dev:v1.0.7
+      image: ghcr.io/cybrid-systems/aura-ci@sha256:66392ce2a5f24668fb923d1c900c545435f6b453f3df585dc4668402c07042d5
     steps:
       - name: Checkout aura-redis
         uses: actions/checkout@v4
 
-      - name: Fetch pinned Aura
-        run: ./scripts/fetch-aura.sh
-
-      - name: Build Aura
-        run: ./scripts/build-aura.sh
+      - name: Install the pinned Aura nightly
+        run: ./scripts/install-aura.sh
 
       - name: ci-prod gate
         run: |
