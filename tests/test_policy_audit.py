@@ -127,6 +127,10 @@ def test_policy_audit_ring_and_explain() -> None:
             time.sleep(0.1)
         assert AUDIT.exists(), f"missing audit file {AUDIT}; agent log:\n{log[-1200:]}"
         body = AUDIT.read_text(errors="replace")
+        # The agent appends while this test reads. A trailing line without a
+        # newline may still be mid-write; schema-check only committed lines.
+        if body and not body.endswith(chr(10)):
+            body = body[: body.rfind(chr(10)) + 1]
         lines = [ln for ln in body.splitlines() if ln.strip().startswith("ts=")]
         assert lines, f"no audit lines in {AUDIT}:\n{body!r}\nlog:\n{log[-1200:]}"
 
