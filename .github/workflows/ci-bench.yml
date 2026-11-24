@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     container:
-      image: ghcr.io/cybrid-systems/dev:v1.0.7
+      image: ghcr.io/cybrid-systems/aura-ci@sha256:66392ce2a5f24668fb923d1c900c545435f6b453f3df585dc4668402c07042d5
     steps:
       - uses: actions/checkout@v4
       - name: Fetch + build Aura
@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 400
     container:
-      image: ghcr.io/cybrid-systems/dev:v1.0.7
+      image: ghcr.io/cybrid-systems/aura-ci@sha256:66392ce2a5f24668fb923d1c900c545435f6b453f3df585dc4668402c07042d5
     steps:
       - uses: actions/checkout@v4
       - name: Fetch + build Aura

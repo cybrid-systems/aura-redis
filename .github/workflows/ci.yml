@@ -30,10 +30,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     container:
-      image: ghcr.io/cybrid-systems/dev:v1.0.7
+      image: ghcr.io/cybrid-systems/aura-ci@sha256:66392ce2a5f24668fb923d1c900c545435f6b453f3df585dc4668402c07042d5
     steps:
       - name: Checkout aura-redis
         uses: actions/checkout@v4
+
+      - name: Orchestra baseline drift (#13)
+        run: python3 scripts/check-baseline.py
 
       - name: Fetch pinned Aura
         run: ./scripts/fetch-aura.sh
@@ -56,7 +59,7 @@ jobs:
     timeout-minutes: 180
     needs: build-aura-and-smoke
     container:
-      image: ghcr.io/cybrid-systems/dev:v1.0.7
+      image: ghcr.io/cybrid-systems/aura-ci@sha256:66392ce2a5f24668fb923d1c900c545435f6b453f3df585dc4668402c07042d5
     steps:
       - name: Checkout aura-redis
         uses: actions/checkout@v4
