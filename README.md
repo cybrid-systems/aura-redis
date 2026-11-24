@@ -138,7 +138,7 @@ Loopback bind **127.0.0.1** for both engines (documented).
 | EN | 中文 |
 |----|------|
 | Prove Aura can host a small network service | 验证 Aura 可承载小型网络服务 |
-| CI builds Aura itself inside the official image | CI 在官方镜像内编译 Aura 本体 |
+| CI installs the pinned Aura nightly; no Aura compile in CI | CI 安装锁定的 Aura nightly，不在 CI 内编译 Aura |
 | Document Aura TCP / RESP / fiber patterns | 沉淀 Aura TCP / RESP / fiber 用法 |
 
 ---
@@ -225,11 +225,11 @@ docker run --rm -v "$PWD:/work" -w /work \
 
 Inside the container this script:
 
-1. `scripts/fetch-aura.sh` — clone `cybrid-systems/aura` @ `AURA_REF` → `.deps/aura`
-2. `scripts/build-aura.sh` — `./build.py build` (RelWithDebInfo + mold defaults)
+1. `scripts/install-aura.sh` — download the nightly archive pinned by `baseline/aura-baseline.json`, verify its sha256 → `.deps/aura`
+2. `scripts/build-native.sh` — build the C data plane
 3. `scripts/smoke-test.sh` — start server + Python RESP smoke client
 
-Reuse a prebuilt binary (skip ~18min compile):
+A source build is still available for local debugging:
 
 ```bash
 docker run --rm -v "$PWD:/work" -w /work \
@@ -311,9 +311,8 @@ tests/test_resp.aura
 
 Workflow **CI** job `build-aura + aura-redis-smoke`:
 
-- Runner: `ubuntu-latest` + container `ghcr.io/cybrid-systems/dev:v1.0.7`
-- Timeout: 120 minutes (Aura builds are long)
-- Fails if Aura does not compile
+- Runner: `ubuntu-latest` + container `ghcr.io/cybrid-systems/aura-ci@sha256:...`
+- Installs the pinned Aura nightly and verifies its archive sha256; it does not compile Aura
 - Then runs `scripts/smoke-test.sh` (core + MGET/MSET/APPEND/… + pipeline + concurrent)
 
 Optional non-failing bench (local / after smoke):

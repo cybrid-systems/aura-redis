@@ -38,17 +38,8 @@ jobs:
       - name: Orchestra baseline drift (#13)
         run: python3 scripts/check-baseline.py
 
-      - name: Fetch pinned Aura
-        run: ./scripts/fetch-aura.sh
-
-      - name: Build Aura (must compile)
-        run: ./scripts/build-aura.sh
-
-      - name: Prove aura binary exists
-        run: |
-          test -x .deps/aura/build/aura
-          .deps/aura/build/aura --help >/dev/null 2>&1 || true
-          ls -la .deps/aura/build/aura
+      - name: Install the pinned Aura nightly
+        run: ./scripts/install-aura.sh
 
       - name: aura-redis smoke (PING/SET/GET/DEL/INCR/EXISTS/FLUSHDB)
         run: ./scripts/smoke-test.sh
@@ -64,11 +55,8 @@ jobs:
       - name: Checkout aura-redis
         uses: actions/checkout@v4
 
-      - name: Fetch pinned Aura
-        run: ./scripts/fetch-aura.sh
-
-      - name: Build Aura
-        run: ./scripts/build-aura.sh
+      - name: Install the pinned Aura nightly
+        run: ./scripts/install-aura.sh
 
       - name: ci-prod gate
         run: |
