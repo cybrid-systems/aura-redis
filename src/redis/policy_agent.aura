@@ -71,17 +71,6 @@
 
 (require "std/mutate" all:)
 (require "std/hot-strategy" all:)
-
-; #5431 workaround: the post-#5411 hot rebind no longer re-lowers the
-; long-running top-level loop, so a direct choose-fn call site can keep a
-; stale closure. Dispatch through a stable cell updated with the body.
-(define *choose-impl* (lambda (a b c d e f g h i) ""))
-(define (choose-dispatch a b c d e f g h i)
-  (*choose-impl* a b c d e f g h i))
-(define (agent-swap-choose! name body summary)
-  (let ((r (hot-strategy:swap! name body summary)))
-    (set! *choose-impl* (eval (read-from-string body)))
-    r))
 (require "std/socket" all:)
 (require "src/redis/policy/choose_normal" all:)
 (require "src/redis/policy/choose_aggressive" all:)
@@ -999,7 +988,7 @@
           (set! *thresh-miss-pin* new-miss)
           (let ((body (build-threshold-body new-min new-miss))
                 (r #f))
-            (set! r (agent-swap-choose! "choose-fn" body "fitness-thresholds"))
+            (set! r (hot-strategy:swap! "choose-fn" body "fitness-thresholds"))
             (display "policy_agent: fitness-threshold-mutate min-ops=")
             (display old-min)
             (display "→")
@@ -1923,7 +1912,7 @@
               (if (mutate:boundary-safe?)
                 (begin
                   (mutate:safety-snapshot)
-                  (let ((r (agent-swap-choose! "choose-fn" (body-for-profile name)
+                  (let ((r (hot-strategy:swap! "choose-fn" (body-for-profile name)
                                                (string-append "profile-" name))))
                     (display "policy_agent: hot-strategy:swap! profile=")
                     (display name)
@@ -2038,7 +2027,7 @@
 (newline)
 
 (hot-strategy:register! "choose-fn" *policy-choose-normal*)
-(let ((r (agent-swap-choose! "choose-fn" *policy-choose-normal* "seed-normal")))
+(let ((r (hot-strategy:swap! "choose-fn" *policy-choose-normal* "seed-normal")))
   (display "policy_agent: register/swap normal → ")
   (display r)
   (newline))
@@ -2061,7 +2050,7 @@
          (not (string=? *seed-profile* "normal")))
   (begin
     (mutate:safety-snapshot)
-    (let ((r (agent-swap-choose! "choose-fn" (body-for-profile *seed-profile*)
+    (let ((r (hot-strategy:swap! "choose-fn" (body-for-profile *seed-profile*)
                                  (string-append "seed-" *seed-profile*))))
       (display "policy_agent: seed-profile → ")
       (display *seed-profile*)
@@ -2115,7 +2104,7 @@
     (let ((body (build-evolve-body *thresh-min-ops* *thresh-miss-pin*
                                    *w-miss* *w-write* *w-evict*))
           (tag (if *evolve-on* "evolve-seed" "thresh-seed-frozen")))
-      (let ((r (agent-swap-choose! "choose-fn" body tag)))
+      (let ((r (hot-strategy:swap! "choose-fn" body tag)))
         (display "policy_agent: threshold-seed → ")
         (display tag)
         (display " result=")
@@ -2242,7 +2231,7 @@
                   (mutate:safety-snapshot)
                   (let ((body (body-for-profile prof))
                         (tag (string-append "resume-" prof)))
-                    (let ((r (agent-swap-choose! "choose-fn" body tag)))
+                    (let ((r (hot-strategy:swap! "choose-fn" body tag)))
                       (display "policy_agent: resume-profile → ")
                       (display prof)
                       (display " result=")
@@ -3000,7 +2989,7 @@
                 (set! *last-avg-ttl* at)
                 (set! *last-keys-ttl* kt)
                 (let ((choice (try
-                                (choose-dispatch dgets dsets dhits dmisses devicted nk
+                                (choose-fn dgets dsets dhits dmisses devicted nk
                                            dexpired at kt)
                                 (catch (e) ""))))
                   ; M12/A5: prefix-scoped override from POLICY hints / bags
@@ -3337,7 +3326,7 @@
               (if (mutate:boundary-safe?)
                 (begin
                   (mutate:safety-snapshot)
-                  (let ((r (agent-swap-choose! "choose-fn" *policy-choose-inverted* "demo-invert")))
+                  (let ((r (hot-strategy:swap! "choose-fn" *policy-choose-inverted* "demo-invert")))
                     (display "policy_agent: swap inverted result=")
                     (display r)
                     (newline)
@@ -3349,7 +3338,7 @@
             (begin
               (display "policy_agent: attempting broken body (expect heal)\n")
               (mutate:safety-snapshot)
-              (let ((r (agent-swap-choose! "choose-fn" *policy-choose-broken* "demo-broken")))
+              (let ((r (hot-strategy:swap! "choose-fn" *policy-choose-broken* "demo-broken")))
                 (display "policy_agent: broken swap result=")
                 (display r)
                 (newline)
