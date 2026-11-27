@@ -1,0 +1,13 @@
+name: follow aura nightly
+
+on:
+  schedule:
+    - cron: "11-59/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  follow:
+    uses: cybrid-systems/aura-agents/.github/workflows/follow-nightly.yml@main
