@@ -17,10 +17,7 @@ baseline="$root/baseline/aura-baseline.json"
 [[ -f "$baseline" ]] || { echo "missing $baseline" >&2; exit 1; }
 
 dest="$root/.deps/aura"
-if [[ -x "$dest/build/aura" && -x "$dest/bin/aura" ]]; then
-  printf '%s\n' "$dest"
-  exit 0
-fi
+stamp="$dest/.published-sha256"
 
 arch="$(uname -m)"
 case "$arch" in
@@ -63,7 +60,19 @@ elif [[ "$want" != "$pinned" ]]; then
   fi
 fi
 
-if [[ ! -x "$dest/build/aura" ]]; then
+# Reuse the cached copy only when the release still publishes the same
+# archive. A rolled nightly then replaces the cached binary instead of
+# leaving an arbitrarily old one in place.
+reuse=0
+if [[ -x "$dest/build/aura" && -x "$dest/bin/aura" ]]; then
+  cached=""
+  [[ -f "$stamp" ]] && cached="$(tr -d '[:space:]' < "$stamp")"
+  if [[ -z "$want" || "$cached" == "$want" ]]; then
+    reuse=1
+  fi
+fi
+
+if [[ "$reuse" == 0 ]]; then
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   echo "install-aura: nightly ${commit:0:9} (${arch}) -> .deps/aura" >&2
@@ -77,6 +86,7 @@ if [[ ! -x "$dest/build/aura" ]]; then
   tar -xzf "$tmp/$name" -C "$dest" --strip-components=1
   mkdir -p "$dest/build"
   ln -sfn ../bin/aura "$dest/build/aura"
+  printf '%s\n' "$want" > "$stamp"
 fi
 
 [[ -x "$dest/build/aura" ]] || { echo "install-aura: no build/aura" >&2; exit 1; }
